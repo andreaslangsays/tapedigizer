@@ -298,33 +298,64 @@ pub fn render_stereo_waveform(
     }
 
     // -------------------------------------------------------------
-    // Render Dual Waveforms (with Vertical Amplitude Zoom)
+    // Render Dual Waveforms (with Pixel-Binning & Zero Baselines)
     // -------------------------------------------------------------
+    // Center zero baselines for L & R
+    painter.line_segment(
+        [Pos2::new(wf_rect.min.x, lane_l_center), Pos2::new(wf_rect.max.x, lane_l_center)],
+        Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
+    );
+    painter.line_segment(
+        [Pos2::new(wf_rect.min.x, lane_r_center), Pos2::new(wf_rect.max.x, lane_r_center)],
+        Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
+    );
+
     let n_points = waveform_data.len();
     if n_points > 0 {
         let start_pt = ((view_start_frac * n_points as f64).floor() as usize).min(n_points);
-        let end_pt = ((view_end_frac * n_points as f64).ceil() as usize).min(n_points);
-        let visible_count = (end_pt - start_pt).max(1);
-        let bar_w = (wf_width / visible_count as f32).clamp(1.0, 4.0);
+        let end_pt = ((view_end_frac * n_points as f64).ceil() as usize).min(n_points).max(start_pt + 1);
+        let visible_count = end_pt - start_pt;
+
+        let num_bars = ((wf_width / 2.0).floor() as usize).clamp(20, 1600);
+        let bar_step = wf_width / num_bars as f32;
+        let bar_w = (bar_step * 0.75).clamp(1.0, 3.5);
         let amp_scale = (*vertical_zoom).clamp(1.0, 16.0);
 
-        for (rel_idx, pt_idx) in (start_pt..end_pt).enumerate() {
-            let pt = &waveform_data[pt_idx];
-            let x = wf_rect.min.x + (rel_idx as f32 / visible_count as f32) * wf_width;
+        for bar_idx in 0..num_bars {
+            let p0 = start_pt + ((bar_idx as f64 * visible_count as f64) / num_bars as f64) as usize;
+            let p1 = (start_pt + (((bar_idx + 1) as f64 * visible_count as f64) / num_bars as f64).ceil() as usize)
+                .min(end_pt)
+                .max(p0 + 1);
+
+            let mut min_l = 0.0_f32;
+            let mut max_l = 0.0_f32;
+            let mut min_r = 0.0_f32;
+            let mut max_r = 0.0_f32;
+
+            for p in &waveform_data[p0..p1] {
+                if p.min_l < min_l { min_l = p.min_l; }
+                if p.max_l > max_l { max_l = p.max_l; }
+                if p.min_r < min_r { min_r = p.min_r; }
+                if p.max_r > max_r { max_r = p.max_r; }
+            }
+
+            let x = wf_rect.min.x + bar_idx as f32 * bar_step + bar_step * 0.5;
 
             // Lane L
-            let top_l = lane_l_center - ((pt.max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
-            let bot_l = lane_l_center - ((pt.min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
+            let top_l = lane_l_center - ((max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
+            let bot_l = lane_l_center - ((min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
+            let h_l = (bot_l - top_l).max(1.0);
             painter.line_segment(
-                [Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))],
+                [Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)],
                 Stroke::new(bar_w, WAVE_LEFT),
             );
 
             // Lane R
-            let top_r = lane_r_center - ((pt.max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
-            let bot_r = lane_r_center - ((pt.min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
+            let top_r = lane_r_center - ((max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
+            let bot_r = lane_r_center - ((min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
+            let h_r = (bot_r - top_r).max(1.0);
             painter.line_segment(
-                [Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))],
+                [Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)],
                 Stroke::new(bar_w, WAVE_RIGHT),
             );
         }
@@ -755,6 +786,15 @@ pub fn render_stereo_waveform(
                     if response.dragged() {
                         interaction.dragged_marker = Some((m_idx, target_time));
                     }
+                } else if response.dragged() {
+                    // Dragging in waveform without hovering a marker selects the section for the Lupe!
+                    if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                        let t_start = screen_x_to_time(origin.x);
+                        let t_curr = target_time;
+                        if (t_curr - t_start).abs() > 0.05 {
+                            interaction.new_selected_region = Some((t_start.min(t_curr), t_start.max(t_curr)));
+                        }
+                    }
                 } else if response.clicked() {
                     // Regular click in waveform sets playhead and selects segment
                     interaction.seek_to_seconds = Some(target_time);
@@ -1013,6 +1053,8 @@ pub fn render_live_recording_waveform(
 pub struct ScopeInteraction {
     pub clicked_transient_time: Option<f64>,
     pub seek_to_time: Option<f64>,
+    pub dragged_marker: Option<(usize, f64)>,
+    pub selected_marker_idx: Option<usize>,
 }
 
 pub fn render_detail_magnifier_scope(
@@ -1027,6 +1069,9 @@ pub fn render_detail_magnifier_scope(
     selected_marker_idx: Option<usize>,
     vertical_zoom: f32,
     transients: &[crate::splitter::TransientPoint],
+    show_transients: bool,
+    scope_zoom: f32,
+    scope_scroll_frac: &mut f32,
     current_playhead_sec: f64,
 ) -> ScopeInteraction {
     let mut interaction = ScopeInteraction::default();
@@ -1042,14 +1087,30 @@ pub fn render_detail_magnifier_scope(
     painter.rect_filled(rect, 6.0, Color32::from_rgb(14, 16, 22));
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_rgb(45, 52, 70)));
 
-    let start_t = region.0.max(0.0);
-    let end_t = region.1.min(total_duration_sec).max(start_t + 0.05);
-    let window_span_sec = (end_t - start_t).max(0.05);
-
     let header_w = 44.0;
     let scope_left = rect.min.x + header_w + 6.0;
     let scope_right = rect.max.x - 12.0;
     let scope_w = (scope_right - scope_left).max(10.0);
+
+    // Mouse wheel pan within scope plate
+    if resp.hovered() {
+        let scroll_delta = ui.input(|i| i.raw_scroll_delta);
+        if scroll_delta.x.abs() > 0.1 || scroll_delta.y.abs() > 0.1 {
+            let delta = if scroll_delta.x.abs() > 0.1 { scroll_delta.x } else { scroll_delta.y };
+            let step = (delta / scope_w) * 0.6;
+            *scope_scroll_frac = (*scope_scroll_frac - step).clamp(0.0, 1.0);
+        }
+    }
+
+    let base_start_t = region.0.max(0.0);
+    let base_end_t = region.1.min(total_duration_sec).max(base_start_t + 0.01);
+    let base_span_sec = (base_end_t - base_start_t).max(0.01);
+
+    let zoom = (scope_zoom as f64).clamp(1.0, 100.0);
+    let window_span_sec = (base_span_sec / zoom).max(0.001);
+    let max_scroll_span = (base_span_sec - window_span_sec).max(0.0);
+    let start_t = base_start_t + (*scope_scroll_frac as f64).clamp(0.0, 1.0) * max_scroll_span;
+    let end_t = start_t + window_span_sec;
 
     let scope_top = rect.min.y + 6.0;
     let scope_wf_h = 92.0;
@@ -1076,6 +1137,16 @@ pub fn render_detail_magnifier_scope(
     draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 6.0, lane_l_top), Pos2::new(rect.min.x + header_w, lane_l_bot)), "L", WAVE_LEFT);
     draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 6.0, lane_r_top), Pos2::new(rect.min.x + header_w, lane_r_bot)), "R", WAVE_RIGHT);
 
+    // Center zero lines
+    painter.line_segment(
+        [Pos2::new(scope_left, lane_l_center), Pos2::new(scope_right, lane_l_center)],
+        Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
+    );
+    painter.line_segment(
+        [Pos2::new(scope_left, lane_r_center), Pos2::new(scope_right, lane_r_center)],
+        Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
+    );
+
     let t_to_x = |t: f64| -> f32 {
         let frac = ((t - start_t) / window_span_sec).clamp(0.0, 1.0) as f32;
         scope_left + frac * scope_w
@@ -1087,7 +1158,11 @@ pub fn render_detail_magnifier_scope(
     };
 
     // Adaptive Grid lines
-    let (step_sub, step_major) = if window_span_sec <= 2.0 {
+    let (step_sub, step_major) = if window_span_sec <= 0.1 {
+        (0.005, 0.02)
+    } else if window_span_sec <= 0.5 {
+        (0.01, 0.05)
+    } else if window_span_sec <= 2.0 {
         (0.05, 0.25)
     } else if window_span_sec <= 8.0 {
         (0.1, 0.5)
@@ -1101,7 +1176,7 @@ pub fn render_detail_magnifier_scope(
     while grid_t <= end_t {
         let gx = t_to_x(grid_t);
         let is_major = (grid_t / step_major).round() * step_major == grid_t
-            || ((grid_t / step_major) - (grid_t / step_major).round()).abs() < 0.001;
+            || ((grid_t / step_major) - (grid_t / step_major).round()).abs() < 0.0001;
 
         let grid_stroke = if is_major {
             Stroke::new(1.0, Color32::from_rgb(42, 48, 64))
@@ -1114,7 +1189,9 @@ pub fn render_detail_magnifier_scope(
             painter.line_segment([Pos2::new(gx, ruler_rect.min.y), Pos2::new(gx, ruler_rect.min.y + 4.0)], Stroke::new(1.0, Color32::from_rgb(90, 100, 120)));
             let m = (grid_t / 60.0).floor() as u64;
             let s = grid_t % 60.0;
-            let label = if window_span_sec <= 5.0 {
+            let label = if window_span_sec <= 1.0 {
+                format!("{:02}:{:06.3}", m, s)
+            } else if window_span_sec <= 5.0 {
                 format!("{:02}:{:05.2}", m, s)
             } else {
                 format!("{:02}:{:04.1}", m, s)
@@ -1163,11 +1240,13 @@ pub fn render_detail_magnifier_scope(
 
             let top_l = lane_l_center - ((max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
             let bot_l = lane_l_center - ((min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
-            painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))], Stroke::new(col_w, WAVE_LEFT));
+            let h_l = (bot_l - top_l).max(1.0);
+            painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)], Stroke::new(col_w, WAVE_LEFT));
 
             let top_r = lane_r_center - ((max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
             let bot_r = lane_r_center - ((min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
-            painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))], Stroke::new(col_w, WAVE_RIGHT));
+            let h_r = (bot_r - top_r).max(1.0);
+            painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)], Stroke::new(col_w, WAVE_RIGHT));
         }
     } else {
         // Fallback to waveform cache
@@ -1175,8 +1254,8 @@ pub fn render_detail_magnifier_scope(
         if n_pts > 0 && total_duration_sec > 0.0 {
             let pts_per_sec = n_pts as f64 / total_duration_sec;
             let start_idx = ((start_t * pts_per_sec).floor() as usize).min(n_pts);
-            let end_idx = ((end_t * pts_per_sec).ceil() as usize).min(n_pts);
-            let visible_count = (end_idx - start_idx).max(1);
+            let end_idx = ((end_t * pts_per_sec).ceil() as usize).min(n_pts).max(start_idx + 1);
+            let visible_count = end_idx - start_idx;
             let col_w = (scope_w / visible_count as f32).clamp(1.0, 6.0);
 
             for (rel, p_idx) in (start_idx..end_idx).enumerate() {
@@ -1185,71 +1264,83 @@ pub fn render_detail_magnifier_scope(
 
                 let top_l = lane_l_center - ((pt.max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
                 let bot_l = lane_l_center - ((pt.min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
-                painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))], Stroke::new(col_w, WAVE_LEFT));
+                let h_l = (bot_l - top_l).max(1.0);
+                painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)], Stroke::new(col_w, WAVE_LEFT));
 
                 let top_r = lane_r_center - ((pt.max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
                 let bot_r = lane_r_center - ((pt.min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
-                painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))], Stroke::new(col_w, WAVE_RIGHT));
+                let h_r = (bot_r - top_r).max(1.0);
+                painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)], Stroke::new(col_w, WAVE_RIGHT));
             }
         }
     }
 
     let mouse_pos = resp.hover_pos();
 
-    // Render Transient Spikes & Diamond Markers
-    for tp in transients {
-        if tp.time_sec >= start_t && tp.time_sec <= end_t {
-            let tx = t_to_x(tp.time_sec);
-            let is_hovered = mouse_pos.map(|p| (p.x - tx).abs() < 6.0 && scope_rect.contains(p)).unwrap_or(false);
+    // Render Transient Spikes & Diamond Markers (if enabled)
+    if show_transients {
+        for tp in transients {
+            if tp.time_sec >= start_t && tp.time_sec <= end_t {
+                let tx = t_to_x(tp.time_sec);
+                let is_hovered = mouse_pos.map(|p| (p.x - tx).abs() < 6.0 && scope_rect.contains(p)).unwrap_or(false);
 
-            let t_col = if is_hovered {
-                Color32::WHITE
-            } else {
-                Color32::from_rgb(255, 215, 0)
-            };
+                let t_col = if is_hovered {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(255, 215, 0)
+                };
 
-            // Vertical transient spike
-            painter.line_segment(
-                [Pos2::new(tx, scope_rect.min.y), Pos2::new(tx, scope_rect.max.y)],
-                Stroke::new(if is_hovered { 1.8 } else { 1.2 }, t_col),
-            );
+                // Vertical transient spike
+                painter.line_segment(
+                    [Pos2::new(tx, scope_rect.min.y), Pos2::new(tx, scope_rect.max.y)],
+                    Stroke::new(if is_hovered { 1.8 } else { 1.2 }, t_col),
+                );
 
-            // Diamond head at the top
-            let d_pts = vec![
-                Pos2::new(tx, scope_rect.min.y + 1.0),
-                Pos2::new(tx + 4.0, scope_rect.min.y + 6.0),
-                Pos2::new(tx, scope_rect.min.y + 11.0),
-                Pos2::new(tx - 4.0, scope_rect.min.y + 6.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(d_pts, t_col, Stroke::NONE));
+                // Diamond head at the top
+                let d_pts = vec![
+                    Pos2::new(tx, scope_rect.min.y + 1.0),
+                    Pos2::new(tx + 4.0, scope_rect.min.y + 6.0),
+                    Pos2::new(tx, scope_rect.min.y + 11.0),
+                    Pos2::new(tx - 4.0, scope_rect.min.y + 6.0),
+                ];
+                painter.add(egui::Shape::convex_polygon(d_pts, t_col, Stroke::NONE));
 
-            if is_hovered {
-                painter.circle_stroke(Pos2::new(tx, scope_rect.min.y + 6.0), 7.0, Stroke::new(1.5, Color32::WHITE));
-                let tm = (tp.time_sec / 60.0).floor() as u64;
-                let ts = tp.time_sec % 60.0;
-                let tip_tag = Rect::from_center_size(Pos2::new(tx, scope_rect.min.y + 24.0), Vec2::new(110.0, 18.0));
-                painter.rect_filled(tip_tag, 3.0, Color32::from_rgb(28, 24, 10));
-                painter.rect_stroke(tip_tag, 3.0, Stroke::new(1.0, Color32::from_rgb(255, 215, 0)));
-                painter.text(tip_tag.center(), egui::Align2::CENTER_CENTER, format!("⚡ {:02}:{:05.2}s", tm, ts), egui::FontId::monospace(9.0), Color32::from_rgb(255, 215, 0));
+                if is_hovered {
+                    painter.circle_stroke(Pos2::new(tx, scope_rect.min.y + 6.0), 7.0, Stroke::new(1.5, Color32::WHITE));
+                    let tm = (tp.time_sec / 60.0).floor() as u64;
+                    let ts = tp.time_sec % 60.0;
+                    let tip_tag = Rect::from_center_size(Pos2::new(tx, scope_rect.min.y + 24.0), Vec2::new(110.0, 18.0));
+                    painter.rect_filled(tip_tag, 3.0, Color32::from_rgb(28, 24, 10));
+                    painter.rect_stroke(tip_tag, 3.0, Stroke::new(1.0, Color32::from_rgb(255, 215, 0)));
+                    painter.text(tip_tag.center(), egui::Align2::CENTER_CENTER, format!("⚡ {:02}:{:05.2}s", tm, ts), egui::FontId::monospace(9.0), Color32::from_rgb(255, 215, 0));
 
-                if resp.clicked() {
-                    interaction.clicked_transient_time = Some(tp.time_sec);
+                    if resp.clicked() {
+                        interaction.clicked_transient_time = Some(tp.time_sec);
+                    }
                 }
             }
         }
     }
 
-    // Existing Markers in view
+    // Existing Markers in view with Dragging and Nudging support
+    let mut hovered_scope_marker = None;
     for (m_i, &m) in markers.iter().enumerate() {
         if m >= start_t && m <= end_t {
             let mx = t_to_x(m);
             let is_sel = selected_marker_idx == Some(m_i);
             let col = if is_sel { Color32::from_rgb(255, 215, 0) } else { LED_AMBER };
-            painter.line_segment([Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)], Stroke::new(1.8, col));
+            painter.line_segment([Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)], Stroke::new(2.0, col));
 
-            let flag = Rect::from_center_size(Pos2::new(mx, scope_rect.min.y + 10.0), Vec2::new(32.0, 16.0));
+            let flag = Rect::from_center_size(Pos2::new(mx, scope_rect.min.y + 10.0), Vec2::new(36.0, 18.0));
             painter.rect_filled(flag, 3.0, col);
-            painter.text(flag.center(), egui::Align2::CENTER_CENTER, format!("T{:02}", m_i + 2), egui::FontId::monospace(9.0), Color32::BLACK);
+            painter.rect_stroke(flag, 3.0, Stroke::new(1.0, BORDER_DARK));
+            painter.text(flag.center(), egui::Align2::CENTER_CENTER, format!("T{:02}", m_i + 2), egui::FontId::monospace(9.5), Color32::BLACK);
+
+            if let Some(pos) = mouse_pos {
+                if (pos.x - mx).abs() < 10.0 && (scope_rect.contains(pos) || ruler_rect.contains(pos)) {
+                    hovered_scope_marker = Some((m_i, m));
+                }
+            }
         }
     }
 
@@ -1268,8 +1359,20 @@ pub fn render_detail_magnifier_scope(
         painter.add(egui::Shape::convex_polygon(tri, Color32::WHITE, Stroke::NONE));
     }
 
-    // Click/Drag interaction to seek or set target
-    if resp.clicked() {
+    // Direct Scope Interactions (Drag marker, select marker, or seek)
+    if let Some((m_idx, _)) = hovered_scope_marker {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        if resp.clicked() {
+            interaction.selected_marker_idx = Some(m_idx);
+        }
+        if resp.dragged() {
+            if let Some(pos) = mouse_pos {
+                let new_t = x_to_t(pos.x);
+                interaction.selected_marker_idx = Some(m_idx);
+                interaction.dragged_marker = Some((m_idx, new_t));
+            }
+        }
+    } else if resp.clicked() {
         if let Some(pos) = mouse_pos {
             if scope_rect.contains(pos) || ruler_rect.contains(pos) {
                 let clicked_t = x_to_t(pos.x);

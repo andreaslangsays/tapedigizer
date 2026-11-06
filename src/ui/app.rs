@@ -68,6 +68,9 @@ pub struct TapeDigizerApp {
     magnifier_scope_active: bool,
     selected_region: Option<(f64, f64)>,
     transient_sensitivity: f32,
+    show_transients: bool,
+    scope_zoom: f32,
+    scope_scroll: f32,
     waveform_scroll: f32,
     active_edit_tool: EditTool,
 
@@ -191,6 +194,9 @@ impl TapeDigizerApp {
             magnifier_scope_active: false,
             selected_region: None,
             transient_sensitivity: 1.0,
+            show_transients: true,
+            scope_zoom: 1.0,
+            scope_scroll: 0.0,
             waveform_scroll: 0.0,
             active_edit_tool: EditTool::Pointer,
             hover_preview_enabled: true,
@@ -550,15 +556,12 @@ impl TapeDigizerApp {
             eprintln!("Fehler beim Laden im Player: {}", e);
         }
 
-        // 4. Wellenform-Cache übernehmen
-        self.waveform_cache = self.recorder.get_waveform_data();
-        if self.waveform_cache.is_empty() {
-            self.waveform_cache = generate_stereo_waveform_from_samples(
-                &self.player.get_samples_l(),
-                &self.player.get_samples_r(),
-                self.player.total_samples(),
-            );
-        }
+        // 4. Echte Wellenform aus geladenen PCM-Samples generieren
+        self.waveform_cache = generate_stereo_waveform_from_samples(
+            &self.player.get_samples_l(),
+            &self.player.get_samples_r(),
+            self.player.total_samples(),
+        );
 
         self.splitter.clear_markers();
     }
@@ -740,7 +743,7 @@ impl eframe::App for TapeDigizerApp {
 
                     ui.menu_button(self.language.menu_help(), |ui| {
                         if ui.button(self.language.menu_about()).clicked() {
-                            self.export_status_message = Some((true, "TapeDigizer v1.1.0 — High-fidelity Audio Digitization Console".into()));
+                            self.export_status_message = Some((true, "TapeDigizer v1.2.0 — High-fidelity Audio Digitization Console".into()));
                             ui.close_menu();
                         }
                     });
@@ -759,7 +762,7 @@ impl eframe::App for TapeDigizerApp {
                     ui.add_space(4.0);
                     ui.label(RichText::new("TAPEDIGIZER").size(18.0).monospace().strong().color(LED_AMBER));
                     ui.label(RichText::new("PRO AUDIO TAPE CONSOLE").size(9.5).monospace().color(TEXT_MUTED));
-                    ui.label(RichText::new("v1.1.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
+                    ui.label(RichText::new("v1.2.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
 
                     // Right Side: Language Switcher + Logic Pro Inspired Center LCD Console
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1717,7 +1720,7 @@ impl TapeDigizerApp {
                     self.transient_sensitivity,
                 );
 
-                // Scope Header Bar with Region Info, Transient Count & Sensitivity Slider
+                // Scope Header Bar with Region Info, Transient Toggle, Zoom & Sensitivity Slider
                 ui.horizontal(|ui| {
                     let r_start = active_region.0;
                     let r_end = active_region.1;
@@ -1730,11 +1733,30 @@ impl TapeDigizerApp {
                     let reg_badge = format!("🔍 BEREICH: {:02}:{:05.2} ➔ {:02}:{:05.2} ({:.2}s)", s_m, s_s, e_m, e_s, r_dur);
                     ui.label(RichText::new(reg_badge).monospace().strong().color(Color32::from_rgb(255, 215, 0)));
 
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(self.language.label_transients_detected(transients.len())).color(LED_GREEN).monospace().strong());
+                    ui.add_space(6.0);
+
+                    // Transients Ein-/Ausblenden Toggle
+                    let trans_col = if self.show_transients { LED_GREEN } else { TEXT_MUTED };
+                    let trans_label = if self.show_transients {
+                        format!("⚡ Transienten: EIN ({})", transients.len())
+                    } else {
+                        "⚡ Transienten: AUS".to_string()
+                    };
+                    let trans_btn = egui::Button::new(RichText::new(trans_label).monospace().strong().color(trans_col))
+                        .rounding(4.0);
+                    if ui.add(trans_btn).on_hover_text("Transienten (Einsätze & Peaks) in der Lupe ein- oder ausblenden").clicked() {
+                        self.show_transients = !self.show_transients;
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add(egui::Slider::new(&mut self.transient_sensitivity, 0.4..=3.0).text(self.language.label_sensitivity()).suffix("x"));
+                        // Scope Zoom Slider
+                        ui.add(egui::Slider::new(&mut self.scope_zoom, 1.0..=50.0).text("🔍 Lupe-Zoom").suffix("x"));
+
+                        ui.add_space(4.0);
+                        if self.show_transients {
+                            ui.add(egui::Slider::new(&mut self.transient_sensitivity, 0.4..=3.0).text(self.language.label_sensitivity()).suffix("x"));
+                        }
+
                         if ui.button(self.language.btn_full_track_region()).clicked() {
                             let tracks = self.splitter.get_tracks(total_sec);
                             for t in tracks {
@@ -1764,6 +1786,9 @@ impl TapeDigizerApp {
                     self.selected_marker_idx,
                     self.waveform_vertical_zoom,
                     &transients,
+                    self.show_transients,
+                    self.scope_zoom,
+                    &mut self.scope_scroll,
                     cur_sec,
                 );
 
@@ -1773,6 +1798,16 @@ impl TapeDigizerApp {
                 if let Some(t_trans) = scope_action.clicked_transient_time {
                     self.splitter.add_marker(t_trans, total_sec);
                     self.player.seek_seconds(t_trans);
+                }
+                if let Some(s_idx) = scope_action.selected_marker_idx {
+                    self.selected_marker_idx = Some(s_idx);
+                }
+                if let Some((idx, new_t)) = scope_action.dragged_marker {
+                    if idx < self.splitter.markers.len() && has_audio && total_sec > 1.0 {
+                        self.splitter.push_undo();
+                        self.splitter.markers[idx] = new_t.clamp(0.01, (total_sec - 0.01).max(0.01));
+                        self.splitter.markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    }
                 }
 
                 ui.add_space(6.0);
@@ -1796,23 +1831,71 @@ impl TapeDigizerApp {
                         }
                     }
 
-                    if let Some(m_idx) = self.selected_marker_idx {
+                    // Auto-target marker in active region if none selected
+                    let target_marker_idx = self.selected_marker_idx.or_else(|| {
+                        self.splitter.markers.iter().position(|&m| m >= active_region.0 && m <= active_region.1)
+                    });
+
+                    if let Some(m_idx) = target_marker_idx {
                         let m_time = self.splitter.markers.get(m_idx).copied().unwrap_or(0.0);
                         let m_title = self.splitter.custom_titles.get(m_idx + 1).cloned().unwrap_or_else(|| format!("Track {:02}", m_idx + 2));
-                        ui.add_space(10.0);
-                        ui.label(RichText::new(format!("Marker T{:02} ({:.2}s):", m_idx + 2, m_time)).color(LED_AMBER).strong());
+                        let sample_pos = (m_time * rate as f64).round() as u64;
 
-                        if ui.button("⮜ -0.1s").clicked() {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("📍 T{:02} ({:.4}s | Smp: {}):", m_idx + 2, m_time, sample_pos))
+                                .color(LED_AMBER)
+                                .monospace()
+                                .strong(),
+                        );
+
+                        // Sample-accurate & Millisecond Nudge Micro-Controls
+                        let smp_sec = 1.0 / rate.max(1) as f64;
+
+                        if ui.button("◀ -100ms").on_hover_text("-100 Millisekunden").clicked() {
                             self.splitter.nudge_marker(m_idx, -0.1, total_sec);
                         }
-                        if ui.button("⮜ -0.01s").clicked() {
+                        if ui.button("◀ -10ms").on_hover_text("-10 Millisekunden").clicked() {
                             self.splitter.nudge_marker(m_idx, -0.01, total_sec);
                         }
-                        if ui.button("+0.01s ⮞").clicked() {
+                        if ui.button("◀ -1ms").on_hover_text("-1 Millisekunde").clicked() {
+                            self.splitter.nudge_marker(m_idx, -0.001, total_sec);
+                        }
+                        if ui.button("◀ -1 Smp").on_hover_text(format!("Samplegenau: 1 Sample zurück ({:.6}s)", smp_sec)).clicked() {
+                            self.splitter.nudge_marker(m_idx, -smp_sec, total_sec);
+                        }
+                        if ui.button("+1 Smp ▶").on_hover_text(format!("Samplegenau: 1 Sample vor ({:.6}s)", smp_sec)).clicked() {
+                            self.splitter.nudge_marker(m_idx, smp_sec, total_sec);
+                        }
+                        if ui.button("+1ms ▶").on_hover_text("+1 Millisekunde").clicked() {
+                            self.splitter.nudge_marker(m_idx, 0.001, total_sec);
+                        }
+                        if ui.button("+10ms ▶").on_hover_text("+10 Millisekunden").clicked() {
                             self.splitter.nudge_marker(m_idx, 0.01, total_sec);
                         }
-                        if ui.button("+0.1s ⮞").clicked() {
+                        if ui.button("+100ms ▶").on_hover_text("+100 Millisekunden").clicked() {
                             self.splitter.nudge_marker(m_idx, 0.1, total_sec);
+                        }
+
+                        // Snap to nearest transient
+                        if !transients.is_empty() {
+                            let snap_btn = egui::Button::new(RichText::new("⚡ An Transiente einrasten").color(Color32::from_rgb(255, 215, 0)).strong());
+                            if ui.add(snap_btn).on_hover_text("Marker samplegenau an die nächstgelegene Transiente (Beat/Einsatz) springen lassen").clicked() {
+                                let mut best_dist = f64::MAX;
+                                let mut best_t = m_time;
+                                for t in &transients {
+                                    let dist = (t.time_sec - m_time).abs();
+                                    if dist < best_dist {
+                                        best_dist = dist;
+                                        best_t = t.time_sec;
+                                    }
+                                }
+                                if best_dist < 2.0 {
+                                    self.splitter.push_undo();
+                                    self.splitter.markers[m_idx] = best_t;
+                                    self.splitter.markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                }
+                            }
                         }
 
                         let del_btn = egui::Button::new(RichText::new("🗑 Löschen").color(LED_RED));
@@ -1874,39 +1957,43 @@ impl TapeDigizerApp {
         render_hardware_rack_card(ui, &self.language.card_tracklist(tracks.len()), |ui| {
             let total_card_w = ui.available_width();
             let fixed_cols_w = 44.0 + 115.0 + 115.0 + 60.0 + 260.0 + 50.0;
-            let title_w = (total_card_w - fixed_cols_w).max(300.0);
+            let title_w = (total_card_w - fixed_cols_w).max(280.0);
+            let table_total_w = fixed_cols_w + title_w;
 
-            // A) Pinned Table Header Bar (Fixed at top, never scrolls out of view!)
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(Vec2::new(44.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("#").monospace().strong().color(TEXT_MUTED));
-                });
-                ui.allocate_ui_with_layout(Vec2::new(title_w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(self.language.col_title()).monospace().strong().color(TEXT_MUTED));
-                });
-                ui.allocate_ui_with_layout(Vec2::new(115.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(self.language.col_start()).monospace().strong().color(TEXT_MUTED));
-                });
-                ui.allocate_ui_with_layout(Vec2::new(115.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(self.language.col_end()).monospace().strong().color(TEXT_MUTED));
-                });
-                ui.allocate_ui_with_layout(Vec2::new(60.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(self.language.col_duration()).monospace().strong().color(TEXT_MUTED));
-                });
-                ui.allocate_ui_with_layout(Vec2::new(260.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(self.language.col_actions()).monospace().strong().color(TEXT_MUTED));
-                });
-            });
-
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            // B) Scrollable Channel Lanes
-            egui::ScrollArea::vertical()
-                .max_height(280.0)
+            // Scrollable Channel Lanes with synchronized header
+            egui::ScrollArea::both()
+                .max_height(300.0)
+                .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
+                    ui.set_min_width(table_total_w);
+
+                    // A) Table Header Bar
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(44.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(RichText::new("#").monospace().strong().color(TEXT_MUTED));
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(title_w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(self.language.col_title()).monospace().strong().color(TEXT_MUTED));
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(115.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(self.language.col_start()).monospace().strong().color(TEXT_MUTED));
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(115.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(self.language.col_end()).monospace().strong().color(TEXT_MUTED));
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(60.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(self.language.col_duration()).monospace().strong().color(TEXT_MUTED));
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(260.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(self.language.col_actions()).monospace().strong().color(TEXT_MUTED));
+                        });
+                    });
+
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
                     for (i, track) in tracks.iter().enumerate() {
                         let is_selected_seg = self.selected_segment_idx == Some(track.segment_index);
                         let is_this_track_playing = self.player.is_playing()
@@ -2225,7 +2312,7 @@ fn generate_stereo_waveform_from_samples(
     if total == 0 {
         return Vec::new();
     }
-    let target_points = 900;
+    let target_points = 4800;
     let chunk_size = (total / target_points).max(1);
 
     let mut points = Vec::new();
@@ -2301,6 +2388,9 @@ mod tests {
             magnifier_scope_active: false,
             selected_region: None,
             transient_sensitivity: 1.0,
+            show_transients: true,
+            scope_zoom: 1.0,
+            scope_scroll: 0.0,
             waveform_scroll: 0.0,
             active_edit_tool: EditTool::Pointer,
             hover_preview_enabled: true,

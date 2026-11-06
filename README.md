@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.0-blue.svg" alt="Version 1.1.0" />
+  <img src="https://img.shields.io/badge/version-1.2.0-blue.svg" alt="Version 1.2.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -40,24 +40,24 @@
    * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
    * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
 
-3. **✂️ Tab 3: Track-Schnitt, Lupenansicht & Transienten (Neu in v1.1.0)**
-   * **🔍 Lupenansicht mit Bereichsauswahl & Transienten-Analyse (Neu in v1.1.0):**
-     * **Freie Bereichsauswahl (`⬚ Bereich` Werkzeug / Taste `R` oder Shift-Ziehen):** Wähle einen beliebigen Zeitabschnitt der Wellenform aus, der sofort in der Lupe fokussiert wird.
-     * **Echte Sample-Präzision:** Liest direkt die rohen 24-Bit 48kHz PCM-Samples aus dem Speicher für Oszilloskop-Schärfe.
-     * **Automatische Transienten-Erkennung:** Findet Onsets, Snare- und Bassdrum-Schläge, Gesangseinsätze und Band-Einschnitte und markiert sie mit goldenen Diamant-Spikes (`◆`).
-     * **Klick-to-Marker:** Ein Klick auf eine Transiente setzt den Schnittmarker exakt auf den Attack-Punkt.
-     * **Bereichs-Wiedergabe:** Taste `▶ Bereich abspielen` spielt exakt den selektierten Bereich ab.
-   * **🎛️ Grundlegend überarbeitete Trackliste & Eingabeansicht (Neu in v1.1.0):**
-     * **Fixierte Spaltenköpfe:** Die Kopfzeile (`#`, `Titel`, `Start`, `Ende`, `Dauer`, `Aktionen`) bleibt beim Scrollen fest oben verankert.
-     * **Auto-expandierende Titel-Eingabe:** Das Songtitel-Feld ist dynamisch flexibel und garantiert mindestens 300px breit – kein Abschneiden von langen Track-Titeln mehr!
-     * **`🔍 In Lupe` Schnell-Button:** Öffnet jeden Track mit einem Klick sofort im Detail-Lupenfenster.
-     * **Feinjustierung (Nudging):** Präzise `◀` / `▶` Tasten am Start- und Endzeitpunkt jedes Titels.
-   * **Pausen-Ausschluss:** Stille-Passagen per Klick als `⏸ Weglassen` markieren oder automatisch mit `✂ Pausen ausschneiden & weglassen` erkennen.
-   * **Vertikale Wellenform-Skalierung:** 1x bis 16x Pegel-Lupe per Regler oder `⇧⌥ + Mausrad`, Wellenhöhe 220px, 300px, 420px.
-     * Die Übersicht-Leiste und die Wellenform-Hintergründe stellen alle geschnittenen Stücke als farbige Blöcke (`#1`, `#2`, `#3`, `⏸`) dar.
-     * Ein Klick auf einen Block in der Übersicht springt sofort zum entsprechenden Song.
-   * **Pausen ausschneiden & weglassen (Neu in v1.0.0):**
-     * Jeder Abschnitt kann per Klick als **Pause (Weglassen)** markiert werden – Pausen werden optisch schraffiert und beim 24-Bit WAV-Export komplett übersprungen!
+3. **✂️ Tab 3: Track-Schnitt, Lupenansicht & Transienten (Neu in v1.2.0)**
+   * **🌊 Überarbeitete Standard-Wellenansicht mit Pixel-Binning & Nulllinien (Neu in v1.2.0):**
+     * Bildschirmsäulen-Binning (Aggregierte Min/Max-Peaks) verhindert Überlappungs-Artefakte und stellt Dynamik, Transienten und Stillephasen absolut scharf und originalgetreu dar.
+     * Dezente Null-Achsenlinien für linken und rechten Kanal trennen positive und negative Halbwellen.
+   * **🔍 Flüssiges Bereichs-Markieren & Zoombare Lupenansicht (Neu in v1.2.0):**
+     * **Nahtlose Bereichsauswahl:** Einfaches Klicken und horizontales Ziehen mit der Maus in der oberen Standardwellenansicht markiert sofort den gewünschten Abschnitt und öffnet die Lupe.
+     * **Tiefen-Zoom in der Lupe:** Stufenloser Zoom von 1x bis 50x (bis in den Millisekunden- und Sample-Bereich) per Schieberegler oder Mausrad.
+     * **Ein- und ausblendbare Transienten (`⚡ Transienten [EIN / AUS]`):** Transienten mit Spitzenwerten und Onsets können auf Knopfdruck ein- oder ausgeblendet werden.
+     * **Samplegenaues Verschieben von Schnittmarkern:**
+       * Marker können direkt im Lupenfenster mit der Maus verschoben werden.
+       * Mikro-Nudge-Tasten für samplegenaue Justierung (`◀ -1 Smp`, `+1 Smp ▶`), sowie Millisekunden-Schritte (`±1ms`, `±10ms`, `±100ms`).
+       * **`⚡ An Transiente einrasten`**: Lässt den Schnittmarker mit einem Klick magnetisch auf den exakten Beat- oder Toneinsatz springen.
+   * **🎛️ Professionelle Trackliste mit flexibler Songtitel-Breite:**
+     * Synchronisiertes horizontales und vertikales Scrollen verhindert jedes Zusammendrücken der Eingabefelder.
+     * Großzügiges Songtitel-Eingabefeld (mindestens 280–500px) für vollständige Liedtitel.
+     * Tastaturnavigation mit Enter / Tab zum nächsten Track.
+   * **Pausen ausschneiden & weglassen:**
+     * Abschnitte als `⏸ Pause (Weglassen)` markieren oder automatisch erkennen. Schraffierte Darstellung, beim 24-Bit WAV-Export komplett übersprungen.
      * Button *✂ Pausen ausschneiden & weglassen*: Erkennt Stille-Intervalle vollautomatisch und setzt Start- und End-Marker als ausgeschnittene Pausen-Lücken.
    * **Marker-Feinverschiebung (Nudge ◀ / ▶) (Neu in v1.0.0):**
      * Schnelle Verschiebung per Tastatur (`◀` / `▶` Pfeiltasten für 0.1s, mit Shift für 1s).
