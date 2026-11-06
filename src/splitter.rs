@@ -66,7 +66,10 @@ impl TrackSplitter {
     }
 
     pub fn push_undo(&mut self) {
-        let snap = self.snapshot();
+        self.record_undo(self.snapshot());
+    }
+
+    fn record_undo(&mut self, snap: MarkerSnapshot) {
         if self.undo_stack.last() != Some(&snap) {
             self.undo_stack.push(snap);
             if self.undo_stack.len() > 60 {
@@ -110,30 +113,95 @@ impl TrackSplitter {
         !self.redo_stack.is_empty()
     }
 
-    pub fn add_marker(&mut self, seconds: f64, total_duration: f64) {
-        if seconds <= 0.2 || seconds >= total_duration - 0.2 {
-            return;
+    pub fn add_marker(&mut self, seconds: f64, total_duration: f64, sample_rate: u32) -> Option<usize> {
+        if !seconds.is_finite() || sample_rate == 0 {
+            return None;
         }
-        // Avoid adding duplicate markers very close to existing ones (< 0.5s)
-        if !self.markers.iter().any(|&m| (m - seconds).abs() < 0.5) {
-            self.push_undo();
-            self.markers.push(seconds);
-            self.markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let rate = f64::from(sample_rate);
+        let frame = (seconds * rate).round();
+        let time = frame / rate;
+        let index = self.markers.partition_point(|&marker| marker < time);
+        if frame < 1.0 || frame >= (total_duration * rate).round()
+            || self.markers.get(index) == Some(&time)
+        {
+            return None;
         }
+        self.push_undo();
+        self.markers.insert(index, time);
+        if index < self.custom_titles.len() {
+            self.custom_titles.insert(index + 1, String::new());
+        }
+        let split_pause = self.pause_indices.contains(&index);
+        for pause in &mut self.pause_indices {
+            if *pause > index {
+                *pause += 1;
+            }
+        }
+        if split_pause {
+            self.pause_indices.push(index + 1);
+            self.pause_indices.sort_unstable();
+        }
+        Some(index)
     }
 
     pub fn remove_marker_at_index(&mut self, index: usize) {
-        if index < self.markers.len() {
-            self.push_undo();
-            self.markers.remove(index);
-            // Re-adjust pause indices
-            self.pause_indices.retain(|&p| p != index);
-            for p in &mut self.pause_indices {
-                if *p > index {
-                    *p -= 1;
-                }
+        if index >= self.markers.len() {
+            return;
+        }
+        self.push_undo();
+        self.markers.remove(index);
+        if index + 1 < self.custom_titles.len() {
+            self.custom_titles.remove(index + 1);
+        }
+        let merged_pause = self.is_pause(index) && self.is_pause(index + 1);
+        self.pause_indices.retain(|&p| p != index + 1 && (p != index || merged_pause));
+        for pause in &mut self.pause_indices {
+            if *pause > index + 1 {
+                *pause -= 1;
             }
         }
+    }
+
+    /// Move a boundary without changing segment order. The caller owns the undo transaction.
+    pub fn preview_marker_move(&mut self, index: usize, seconds: f64, duration: f64, rate: u32) -> bool {
+        if index >= self.markers.len() || !seconds.is_finite() || rate == 0 {
+            return false;
+        }
+        let rate = f64::from(rate);
+        let first = index.checked_sub(1).map_or(0.0, |i| self.markers[i]);
+        let last = self.markers.get(index + 1).copied().unwrap_or(duration);
+        let min_frame = (first * rate).round() + 1.0;
+        let max_frame = (last * rate).round() - 1.0;
+        if min_frame > max_frame {
+            return false;
+        }
+        let next = (seconds * rate).round().clamp(min_frame, max_frame) / rate;
+        if next == self.markers[index] {
+            return false;
+        }
+        self.markers[index] = next;
+        true
+    }
+
+    pub fn move_marker(&mut self, index: usize, seconds: f64, duration: f64, rate: u32) -> bool {
+        let before = self.snapshot();
+        if !self.preview_marker_move(index, seconds, duration, rate) {
+            return false;
+        }
+        self.commit_edit(before);
+        true
+    }
+
+    pub fn commit_edit(&mut self, before: MarkerSnapshot) {
+        if before != self.snapshot() {
+            self.record_undo(before);
+        }
+    }
+
+    pub fn restore(&mut self, snapshot: MarkerSnapshot) {
+        self.markers = snapshot.markers;
+        self.custom_titles = snapshot.custom_titles;
+        self.pause_indices = snapshot.pause_indices;
     }
 
     pub fn clear_markers(&mut self) {
@@ -158,23 +226,6 @@ impl TrackSplitter {
     #[allow(dead_code)]
     pub fn is_pause(&self, segment_index: usize) -> bool {
         self.pause_indices.contains(&segment_index)
-    }
-
-    pub fn nudge_marker(&mut self, marker_idx: usize, delta_sec: f64, total_duration: f64) -> bool {
-        if marker_idx >= self.markers.len() {
-            return false;
-        }
-        self.push_undo();
-        let cur = self.markers[marker_idx];
-        let min_bound = if marker_idx == 0 { 0.1 } else { self.markers[marker_idx - 1] + 0.05 };
-        let max_bound = if marker_idx + 1 < self.markers.len() {
-            self.markers[marker_idx + 1] - 0.05
-        } else {
-            (total_duration - 0.1).max(0.1)
-        };
-        let new_val = (cur + delta_sec).clamp(min_bound, max_bound);
-        self.markers[marker_idx] = new_val;
-        true
     }
 
     pub fn get_tracks(&self, total_duration: f64) -> Vec<TrackInfo> {
@@ -209,7 +260,7 @@ impl TrackSplitter {
             } else {
                 format!("Track {:02}", export_index)
             };
-            let title = self.custom_titles.get(i).cloned().unwrap_or(default_name);
+            let title = self.custom_titles.get(i).filter(|title| !title.is_empty()).cloned().unwrap_or(default_name);
 
             tracks.push(TrackInfo {
                 index: export_index,
@@ -278,7 +329,7 @@ impl TrackSplitter {
                     if current_silence_len >= min_windows {
                         let center_win = silence_start_win + current_silence_len / 2;
                         let center_sec = (center_win * window_size) as f64 / sample_rate as f64;
-                        self.add_marker(center_sec, total_duration);
+                        self.add_marker(center_sec, total_duration, sample_rate);
                     }
                     in_silence = false;
                     current_silence_len = 0;
@@ -359,10 +410,10 @@ impl TrackSplitter {
         // Place markers at starts and ends of silence intervals
         for (t_start, t_end) in &silence_intervals {
             if *t_start > 0.4 {
-                self.add_marker(*t_start, total_duration);
+                self.add_marker(*t_start, total_duration, sample_rate);
             }
             if *t_end < total_duration - 0.4 {
-                self.add_marker(*t_end, total_duration);
+                self.add_marker(*t_end, total_duration, sample_rate);
             }
         }
 
@@ -382,143 +433,138 @@ impl TrackSplitter {
 }
 
 /// Slices the input WAV file into individual tracks and exports them (excluding paused segments)
-pub fn export_tracks<P: AsRef<Path>>(
-    source_wav_path: P,
-    output_dir: P,
+pub fn export_tracks(
+    source_wav_path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
     tracks: &[TrackInfo],
     norm_mode: NormalizationMode,
+    progress: impl Fn(usize, usize) -> bool,
 ) -> Result<Vec<PathBuf>, String> {
-    let exportable_tracks: Vec<&TrackInfo> = tracks.iter().filter(|t| !t.is_pause).collect();
-    if exportable_tracks.is_empty() {
-        return Err("Keine aktiven Tracks zum Exportieren vorhanden (alle als Pause markiert oder keine Tracks vorhanden).".to_string());
-    }
-
-    let src = source_wav_path.as_ref();
-    if !src.exists() {
-        return Err(format!("Quelldatei '{}' wurde nicht gefunden. Bitte nimm zuerst Audio in Tab 1 auf.", src.display()));
-    }
-
     let out_dir = output_dir.as_ref();
-    std::fs::create_dir_all(out_dir).map_err(|e| {
-        format!("Zielordner '{}' konnte nicht erstellt werden: {}", out_dir.display(), e)
-    })?;
-
-    // Probe writeability
-    let probe_file = out_dir.join(".tapedigizer_probe");
-    std::fs::write(&probe_file, b"test").map_err(|e| {
-        format!("Zielordner '{}' ist schreibgeschützt oder nicht beschreibbar: {}", out_dir.display(), e)
-    })?;
-    let _ = std::fs::remove_file(&probe_file);
-
-    let mut reader = hound::WavReader::open(src).map_err(|e| format!("Fehler beim Öffnen der Audiodatei: {}", e))?;
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let source = std::fs::File::open(source_wav_path).map_err(|e| e.to_string())?;
+    let mut reader = hound::WavReader::new(std::io::BufReader::new(source)).map_err(|e| e.to_string())?;
     let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-
-    let max_val = match spec.bits_per_sample {
-        16 => 32768.0_f32,
-        24 => 8388608.0_f32,
-        32 => 2147483648.0_f32,
-        _ => 32768.0_f32,
-    };
-
-    let mut samples_l: Vec<f32> = Vec::new();
-    let mut samples_r: Vec<f32> = Vec::new();
-
-    if spec.channels == 2 {
-        let mut iter = reader.samples::<i32>();
-        while let (Some(Ok(sl)), Some(Ok(sr))) = (iter.next(), iter.next()) {
-            samples_l.push(sl as f32 / max_val);
-            samples_r.push(sr as f32 / max_val);
+    if !matches!(spec.channels, 1 | 2) || spec.sample_rate == 0
+        || spec.sample_format != hound::SampleFormat::Int
+        || !matches!(spec.bits_per_sample, 16 | 24 | 32)
+    {
+        return Err("Unsupported WAV format".into());
+    }
+    let channels = u32::from(spec.channels);
+    let duration = reader.duration();
+    let rate = f64::from(spec.sample_rate);
+    let mut exports = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for track in tracks.iter().filter(|track| !track.is_pause) {
+        let start = (track.start_seconds * rate).round() as u32;
+        let end = (track.end_seconds * rate).round() as u32;
+        if !track.start_seconds.is_finite() || !track.end_seconds.is_finite()
+            || track.start_seconds < 0.0 || start >= end || end > duration
+        {
+            return Err(format!("Invalid export range for track {}", track.index));
         }
-    } else {
-        for s in reader.samples::<i32>() {
-            if let Ok(sample) = s {
-                let v = sample as f32 / max_val;
-                samples_l.push(v);
-                samples_r.push(v);
-            }
+        let title = crate::project::sanitize_track_title(&track.title, track.index);
+        let path = out_dir.join(format!("{:02} - {title}.wav", track.index));
+        if path.exists() || !names.insert(path.clone()) {
+            return Err(format!("Export destination already exists: {}", path.display()));
         }
+        exports.push((start, end, path));
+    }
+    if exports.is_empty() {
+        return Err("No tracks to export".into());
     }
 
-    let target_peak_lin = 10.0_f32.powf(-0.3 / 20.0); // -0.3 dBFS safe target
-
-    // Calculate album-wide scale if Album Normalization is selected
-    let album_scale = if norm_mode == NormalizationMode::PeakAlbum {
-        let mut max_p: f32 = 0.0001;
-        for &s in samples_l.iter().chain(samples_r.iter()) {
-            let abs = s.abs();
-            if abs > max_p { max_p = abs; }
-        }
-        (target_peak_lin / max_p).min(10.0)
+    let peak_scale = |peak: i64| {
+        let full_scale = (1_i64 << (spec.bits_per_sample - 1)) as f64;
+        let target = 10.0_f64.powf(-0.3 / 20.0);
+        (target / (peak as f64 / full_scale).max(0.0001)).min(10.0)
+    };
+    let track_count = exports.len();
+    let report = |finished| {
+        if progress(finished, track_count) { Ok(()) } else { Err("Export cancelled".to_string()) }
+    };
+    report(0)?;
+    let album_gain = if norm_mode == NormalizationMode::PeakAlbum {
+        peak_scale(read_peak(&mut reader, 0, duration * channels, || report(0))?)
     } else {
         1.0
     };
-
-    let out_dir = output_dir.as_ref();
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
-
-    let mut exported_files = Vec::new();
-
-    for track in exportable_tracks {
-        let start_sample = (track.start_seconds * sample_rate as f64).round() as usize;
-        let end_sample = ((track.end_seconds * sample_rate as f64).round() as usize).min(samples_l.len());
-
-        if start_sample >= end_sample {
-            continue;
-        }
-
-        // Clean & sanitize track filename
-        let safe_title = crate::project::sanitize_track_title(&track.title, track.index);
-        let filename = format!("{:02} - {}.wav", track.index, safe_title);
-        let out_path = out_dir.join(filename);
-
-        let track_l = &samples_l[start_sample..end_sample];
-        let track_r = &samples_r[start_sample..end_sample];
-
-        // Determine gain scale for this track
-        let scale = match norm_mode {
-            NormalizationMode::None => 1.0,
-            NormalizationMode::PeakAlbum => album_scale,
-            NormalizationMode::PeakPerTrack => {
-                let mut max_p: f32 = 0.0001;
-                for i in 0..track_l.len() {
-                    let al = track_l[i].abs();
-                    let ar = track_r[i].abs();
-                    if al > max_p { max_p = al; }
-                    if ar > max_p { max_p = ar; }
-                }
-                (target_peak_lin / max_p).min(10.0)
+    let output_spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: spec.sample_rate,
+        bits_per_sample: 24,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let pcm_factor = 2.0_f64.powi(24 - i32::from(spec.bits_per_sample));
+    let mut staged = Vec::new();
+    let mut published = Vec::new();
+    let result = (|| {
+        for (index, (start, end, destination)) in exports.into_iter().enumerate() {
+            let count = end - start;
+            let gain = if norm_mode == NormalizationMode::PeakPerTrack {
+                peak_scale(read_peak(&mut reader, start, count * channels, || report(index))?)
+            } else {
+                album_gain
+            };
+            let (temporary, file) = crate::project::unique_file(out_dir, ".export", "partial")?;
+            staged.push((temporary, destination));
+            let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), output_spec)
+                .map_err(|e| e.to_string())?;
+            reader.seek(start).map_err(|e| e.to_string())?;
+            let mut samples = reader.samples::<i32>();
+            let encode = |sample: i32| {
+                (f64::from(sample) * pcm_factor * gain).round().clamp(-8_388_608.0, 8_388_607.0) as i32
+            };
+            for frame in 0..count {
+                if frame % 16_384 == 0 { report(index)?; }
+                let left = next_pcm(&mut samples)?;
+                let right = if channels == 2 { next_pcm(&mut samples)? } else { left };
+                writer.write_sample(encode(left)).map_err(|e| e.to_string())?;
+                writer.write_sample(encode(right)).map_err(|e| e.to_string())?;
             }
-        };
-
-        // Write 24-bit WAV file
-        let out_spec = hound::WavSpec {
-            channels: 2,
-            sample_rate,
-            bits_per_sample: 24,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let mut writer = hound::WavWriter::create(&out_path, out_spec).map_err(|e| e.to_string())?;
-        let max_val_24 = 8_388_607.0_f32;
-
-        for i in 0..track_l.len() {
-            let sl = (track_l[i] * scale).clamp(-1.0, 1.0);
-            let sr = (track_r[i] * scale).clamp(-1.0, 1.0);
-
-            let samp_l = (sl * max_val_24) as i32;
-            let samp_r = (sr * max_val_24) as i32;
-
-            writer.write_sample(samp_l).map_err(|e| e.to_string())?;
-            writer.write_sample(samp_r).map_err(|e| e.to_string())?;
+            writer.finalize().map_err(|e| e.to_string())?;
+            report(index + 1)?;
         }
-
-        writer.finalize().map_err(|e| e.to_string())?;
-        exported_files.push(out_path);
+        for (temporary, destination) in &staged {
+            crate::project::publish_new_file(temporary, destination)
+                .map_err(|e| format!("{}: {e}", destination.display()))?;
+            published.push(destination.clone());
+        }
+        Ok::<(), String>(())
+    })();
+    for (temporary, _) in staged {
+        let _ = std::fs::remove_file(temporary);
     }
-
-    Ok(exported_files)
+    if let Err(error) = result {
+        for destination in published {
+            let _ = std::fs::remove_file(destination);
+        }
+        return Err(error);
+    }
+    Ok(published)
 }
+
+fn next_pcm(samples: &mut impl Iterator<Item = Result<i32, hound::Error>>) -> Result<i32, String> {
+    samples.next().ok_or("Incomplete WAV data")?.map_err(|e| e.to_string())
+}
+
+fn read_peak(
+    reader: &mut hound::WavReader<impl std::io::Read + std::io::Seek>,
+    start: u32,
+    sample_count: u32,
+    check: impl Fn() -> Result<(), String>,
+) -> Result<i64, String> {
+    reader.seek(start).map_err(|e| e.to_string())?;
+    let mut samples = reader.samples::<i32>();
+    let mut peak = 0;
+    for index in 0..sample_count {
+        if index % 16_384 == 0 { check()?; }
+        peak = peak.max(i64::from(next_pcm(&mut samples)?).abs());
+    }
+    Ok(peak)
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransientPoint {
@@ -621,13 +667,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn moving_marker_previews_commit_as_one_edit_and_respect_neighbors() {
+        let mut editor = TrackSplitter::new();
+        editor.add_marker(1.0, 4.0, 48_000);
+        editor.add_marker(2.0, 4.0, 48_000);
+        let before = editor.snapshot();
+        let undo_count = editor.undo_stack.len();
+        assert!(editor.preview_marker_move(0, 1.25, 4.0, 48_000));
+        assert!(editor.preview_marker_move(0, 3.0, 4.0, 48_000));
+        assert_eq!((editor.markers[0] * 48_000.0).round() as u64, 95_999);
+        editor.commit_edit(before.clone());
+        assert_eq!(editor.undo_stack.len(), undo_count + 1);
+        assert!(editor.undo());
+        assert_eq!(editor.snapshot(), before);
+    }
+
+    #[test]
+    fn export_preserves_pcm_and_protects_existing_files() {
+        use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+        let base = std::env::temp_dir();
+        let (source, file) = crate::project::unique_file(&base, "tapedigizer-export-test", "wav").unwrap();
+        let output = source.with_extension("output");
+        let samples = [-8_388_608, 8_388_607, 7, -8, 125_000, -250_000, 2, -1];
+        let mut writer = WavWriter::new(file, WavSpec {
+            channels: 2, sample_rate: 48_000, bits_per_sample: 24, sample_format: SampleFormat::Int,
+        }).unwrap();
+        for sample in samples {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let editor = TrackSplitter {
+            markers: vec![1.0 / 48_000.0, 2.0 / 48_000.0],
+            pause_indices: vec![1],
+            ..TrackSplitter::new()
+        };
+        let tracks = editor.get_tracks(1.0);
+        let mut tracks = tracks[..3].to_vec();
+        tracks[2].end_seconds = 4.0 / 48_000.0;
+        let proceed = |_, _| true;
+        let original = output.join("original");
+        let paths = export_tracks(&source, &original, &tracks, NormalizationMode::None, proceed).unwrap();
+        let read = |path: &Path| WavReader::open(path).unwrap().samples::<i32>()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(read(&paths[0]), &samples[..2]);
+        assert_eq!(read(&paths[1]), &samples[4..]);
+        assert!(export_tracks(&source, &original, &tracks, NormalizationMode::None, proceed).is_err());
+        assert_eq!(read(&paths[0]), &samples[..2]);
+
+        let per_track = export_tracks(&source, output.join("track"), &tracks, NormalizationMode::PeakPerTrack, proceed).unwrap();
+        let album = export_tracks(&source, output.join("album"), &tracks, NormalizationMode::PeakAlbum, proceed).unwrap();
+        assert!(read(&per_track[1])[1].abs() > 2_000_000);
+        assert!(read(&album[1])[1].abs() < 250_000);
+
+        let cancelled = output.join("cancelled");
+        let result = export_tracks(&source, &cancelled, &tracks, NormalizationMode::None, |finished, _| finished < 1);
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(cancelled).unwrap().count(), 0);
+        let truncated = output.join("truncated");
+        let file = std::fs::OpenOptions::new().write(true).open(&source).unwrap();
+        file.set_len(file.metadata().unwrap().len() - 6).unwrap();
+        assert!(export_tracks(&source, &truncated, &tracks, NormalizationMode::None, proceed).is_err());
+        assert_eq!(std::fs::read_dir(truncated).unwrap().count(), 0);
+        std::fs::remove_dir_all(output).unwrap();
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn splitting_and_merging_preserves_segment_metadata() {
+        let mut editor = TrackSplitter::new();
+        editor.add_marker(4.0, 12.0, 48_000);
+        editor.custom_titles = vec!["First".into(), "Second".into()];
+        editor.toggle_pause(1);
+        editor.add_marker(2.0, 12.0, 48_000);
+        assert_eq!(editor.get_tracks(12.0)[2].title, "Second");
+        assert!(editor.is_pause(2));
+        editor.remove_marker_at_index(0);
+        assert_eq!(editor.get_tracks(12.0)[1].title, "Second");
+        assert!(editor.is_pause(1));
+        assert!(editor.undo());
+        assert!(editor.is_pause(2));
+    }
+
+    #[test]
     fn test_track_splitting_markers() {
         let mut splitter = TrackSplitter::new();
         let total_duration = 300.0; // 5 minutes
 
-        splitter.add_marker(60.0, total_duration);
-        splitter.add_marker(150.0, total_duration);
-        splitter.add_marker(210.0, total_duration);
+        splitter.add_marker(60.0, total_duration, 48_000);
+        splitter.add_marker(150.0, total_duration, 48_000);
+        splitter.add_marker(210.0, total_duration, 48_000);
 
         let tracks = splitter.get_tracks(total_duration);
         assert_eq!(tracks.len(), 4);
@@ -676,11 +806,11 @@ mod tests {
         assert!(!splitter.can_undo());
         assert!(!splitter.can_redo());
 
-        splitter.add_marker(60.0, 300.0);
+        splitter.add_marker(60.0, 300.0, 48_000);
         assert_eq!(splitter.markers, vec![60.0]);
         assert!(splitter.can_undo());
 
-        splitter.add_marker(120.0, 300.0);
+        splitter.add_marker(120.0, 300.0, 48_000);
         assert_eq!(splitter.markers, vec![60.0, 120.0]);
 
         // Remove marker 0 (at 60.0)
@@ -701,8 +831,8 @@ mod tests {
     fn test_toggle_pause_and_nudge() {
         let mut splitter = TrackSplitter::new();
         let total_duration = 200.0;
-        splitter.add_marker(50.0, total_duration);
-        splitter.add_marker(100.0, total_duration);
+        splitter.add_marker(50.0, total_duration, 48_000);
+        splitter.add_marker(100.0, total_duration, 48_000);
 
         // Segment 1 (50.0 .. 100.0) marked as pause
         splitter.toggle_pause(1);
@@ -718,7 +848,7 @@ mod tests {
         assert_eq!(tracks[2].index, 2); // next active track is #2!
 
         // Test nudge
-        assert!(splitter.nudge_marker(0, 5.0, total_duration));
+        assert!(splitter.move_marker(0, splitter.markers[0] + 5.0, total_duration, 48_000));
         assert!((splitter.markers[0] - 55.0).abs() < 0.001);
     }
 

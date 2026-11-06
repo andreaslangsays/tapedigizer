@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::Path;
 use crate::audio::meter::linear_to_db;
 
@@ -33,64 +34,30 @@ pub struct AudioAnalysisReport {
     pub diagnosis: LevelDiagnosis,
 }
 
+#[cfg(test)]
 pub fn analyze_wav_file<P: AsRef<Path>>(path: P) -> Result<AudioAnalysisReport, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let buf_reader = std::io::BufReader::with_capacity(1024 * 1024, file);
-    let mut reader = hound::WavReader::new(buf_reader).map_err(|e| e.to_string())?;
-    let spec = reader.spec();
+    let audio = crate::audio::player::AudioPlayer::decode_file(path)?;
+    analyze_samples(&audio.left, &audio.right, audio.sample_rate)
+}
 
-    let max_val = match spec.bits_per_sample {
-        16 => 32768.0_f32,
-        24 => 8388608.0_f32,
-        32 => 2147483648.0_f32,
-        _ => 32768.0_f32,
-    };
-
-    let mut peak_l: f32 = 0.0;
-    let mut peak_r: f32 = 0.0;
-    let mut sum_sq_l: f64 = 0.0;
-    let mut sum_sq_r: f64 = 0.0;
-    let mut clipped_samples: usize = 0;
-    let mut frame_count: usize = 0;
-
-    let clip_threshold = 0.999;
-
-    if spec.channels == 2 {
-        let mut iter = reader.samples::<i32>();
-        while let (Some(Ok(s_l)), Some(Ok(s_r))) = (iter.next(), iter.next()) {
-            let fl = (s_l as f32 / max_val).clamp(-1.0, 1.0);
-            let fr = (s_r as f32 / max_val).clamp(-1.0, 1.0);
-
-            let abs_l = fl.abs();
-            let abs_r = fr.abs();
-
-            if abs_l > peak_l { peak_l = abs_l; }
-            if abs_r > peak_r { peak_r = abs_r; }
-
-            if abs_l >= clip_threshold || abs_r >= clip_threshold {
-                clipped_samples += 1;
-            }
-
-            sum_sq_l += (fl as f64) * (fl as f64);
-            sum_sq_r += (fr as f64) * (fr as f64);
-            frame_count += 1;
-        }
-    } else {
-        for s in reader.samples::<i32>() {
-            if let Ok(sample) = s {
-                let f = (sample as f32 / max_val).clamp(-1.0, 1.0);
-                let abs = f.abs();
-                if abs > peak_l { peak_l = abs; peak_r = abs; }
-                if abs >= clip_threshold { clipped_samples += 1; }
-                sum_sq_l += (f as f64) * (f as f64);
-                sum_sq_r += (f as f64) * (f as f64);
-                frame_count += 1;
-            }
-        }
+pub fn analyze_samples(left: &[f32], right: &[f32], sample_rate: u32) -> Result<AudioAnalysisReport, String> {
+    if left.is_empty() || left.len() != right.len() || sample_rate == 0 {
+        return Err("Invalid audio data for level analysis".into());
     }
-
-    if frame_count == 0 {
-        return Err("WAV-Datei enthält keine Audio-Samples".to_string());
+    let mut peak_l = 0.0_f32;
+    let mut peak_r = 0.0_f32;
+    let mut sum_sq_l = 0.0_f64;
+    let mut sum_sq_r = 0.0_f64;
+    let mut clipped_samples = 0;
+    let frame_count = left.len();
+    for (&l, &r) in left.iter().zip(right) {
+        let l = l.clamp(-1.0, 1.0);
+        let r = r.clamp(-1.0, 1.0);
+        peak_l = peak_l.max(l.abs());
+        peak_r = peak_r.max(r.abs());
+        clipped_samples += usize::from(l.abs() >= 0.999 || r.abs() >= 0.999);
+        sum_sq_l += f64::from(l).powi(2);
+        sum_sq_r += f64::from(r).powi(2);
     }
 
     let peak_l_db = linear_to_db(peak_l);
@@ -102,7 +69,7 @@ pub fn analyze_wav_file<P: AsRef<Path>>(path: P) -> Result<AudioAnalysisReport, 
     let rms_l_db = linear_to_db(rms_l);
     let rms_r_db = linear_to_db(rms_r);
 
-    let duration_seconds = frame_count as f64 / spec.sample_rate as f64;
+    let duration_seconds = frame_count as f64 / f64::from(sample_rate);
 
     // Evaluate Diagnosis
     let target_peak_db = -1.5_f32; // Safe target for cassette/tape transfer

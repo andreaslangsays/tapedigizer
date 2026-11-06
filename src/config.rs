@@ -82,9 +82,8 @@ mod tests {
         cfg.last_channel_left = Some(10);
         cfg.last_channel_right = Some(11);
         cfg.timer_minutes = Some(45);
-        cfg.save();
-
-        let loaded = AppConfig::load();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.last_device_name.as_deref(), Some("ZOOM L-12 Driver"));
         assert_eq!(loaded.last_channel_left, Some(10));
         assert_eq!(loaded.last_channel_right, Some(11));

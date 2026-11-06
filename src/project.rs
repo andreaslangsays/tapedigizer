@@ -76,54 +76,117 @@ impl TapeDigizerProject {
         source_session_wav: Option<&Path>,
     ) -> Result<PathBuf, String> {
         let proj_path = project_file_path.as_ref();
-        let parent_dir = proj_path.parent().unwrap_or_else(|| Path::new("."));
+        if !proj_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("tapedigizer")) {
+            return Err("Project destination must use the .tapedigizer extension".into());
+        }
+        let parent_dir = proj_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent_dir).map_err(|e| e.to_string())?;
 
         let mut proj = self.clone();
-
-        // Copy source WAV alongside project file so it is 100% self-contained
-        if let Some(src_wav) = source_session_wav {
-            if src_wav.exists() {
-                let stem = proj_path.file_stem().and_then(|s| s.to_str()).unwrap_or("tape_audio");
-                let companion_wav_name = format!("{}.wav", stem);
-                let companion_wav_path = parent_dir.join(&companion_wav_name);
-
-                if src_wav != companion_wav_path {
-                    let _ = std::fs::copy(src_wav, &companion_wav_path);
-                }
-                proj.audio_file_path = companion_wav_name;
+        let mut new_audio = None;
+        if let Some(source) = source_session_wav {
+            let source = source.canonicalize().map_err(|e| e.to_string())?;
+            if proj_path.canonicalize().ok().as_ref() == Some(&source) {
+                return Err("The project destination points to its audio source".into());
+            }
+            let parent = parent_dir.canonicalize().map_err(|e| e.to_string())?;
+            if source.parent() == Some(parent.as_path()) {
+                proj.audio_file_path = source.file_name().unwrap().to_string_lossy().into_owned();
+            } else {
+                let (temporary, mut output) = unique_file(parent_dir, ".audio", "partial")?;
+                let result = (|| {
+                    let mut input = std::fs::File::open(&source)?;
+                    std::io::copy(&mut input, &mut output)?;
+                    output.sync_all()?;
+                    // Publish a complete copy under a fresh name without replacing audio.
+                    let stem = temporary.file_stem().unwrap().to_string_lossy();
+                    let project_name = sanitize_filename(&proj_path.file_stem().unwrap_or_default().to_string_lossy());
+                    let destination = parent_dir.join(format!("{project_name}{}.wav", stem.trim_start_matches(".audio")));
+                    publish_new_file(&temporary, &destination)?;
+                    Ok::<_, std::io::Error>(destination)
+                })();
+                let _ = std::fs::remove_file(&temporary);
+                let destination = result.map_err(|e| e.to_string())?;
+                proj.audio_file_path = destination.file_name().unwrap().to_string_lossy().into_owned();
+                new_audio = Some(destination);
             }
         }
 
-        let json = serde_json::to_string_pretty(&proj).map_err(|e| e.to_string())?;
-        std::fs::write(proj_path, json).map_err(|e| e.to_string())?;
+        let result = (|| {
+            use std::io::Write;
+            let json = serde_json::to_vec_pretty(&proj).map_err(|e| e.to_string())?;
+            let (temporary, mut output) = unique_file(parent_dir, ".project", "partial")?;
+            let write = output.write_all(&json).and_then(|_| output.sync_all());
+            let commit = write.and_then(|_| std::fs::rename(&temporary, proj_path));
+            let _ = std::fs::remove_file(&temporary);
+            commit.map_err(|e| e.to_string())
+        })();
+        if result.is_err() {
+            if let Some(path) = new_audio {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        result?;
         Ok(proj_path.to_path_buf())
     }
 
     pub fn load_from_file<P: AsRef<Path>>(
         project_file_path: P,
-    ) -> Result<(Self, PathBuf), String> {
+    ) -> Result<(Self, Option<PathBuf>), String> {
         let proj_path = project_file_path.as_ref();
         let content = std::fs::read_to_string(proj_path).map_err(|e| e.to_string())?;
         let proj: Self = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        if proj.audio_file_path.is_empty() {
+            return Ok((proj, None));
+        }
 
-        let parent_dir = proj_path.parent().unwrap_or_else(|| Path::new("."));
+        let parent_dir = proj_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let audio_path = parent_dir.join(&proj.audio_file_path);
-        let resolved_audio_path = if audio_path.exists() {
+        let resolved_audio_path = if audio_path.is_file() {
             audio_path
         } else {
             PathBuf::from(&proj.audio_file_path)
         };
 
-        if !resolved_audio_path.exists() {
+        if !resolved_audio_path.is_file() {
             return Err(format!(
                 "Die zugehörige Audiodatei '{}' wurde nicht gefunden.",
                 proj.audio_file_path
             ));
         }
 
-        Ok((proj, resolved_audio_path))
+        Ok((proj, Some(resolved_audio_path)))
     }
+}
+
+/// Publish a complete file without overwriting an existing destination.
+pub(crate) fn publish_new_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        // Both paths are NUL-terminated and live for the duration of the call.
+        let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    std::fs::hard_link(from, to)
+}
+
+pub(crate) fn unique_file(dir: &Path, stem: &str, extension: &str) -> Result<(PathBuf, std::fs::File), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("{stem}-{timestamp}-{sequence}.{extension}"));
+    let file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((path, file))
 }
 
 pub fn sanitize_filename(name: &str) -> String {
@@ -188,6 +251,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_save_keeps_existing_project_and_source() {
+        let (file, handle) = unique_file(&std::env::temp_dir(), "tapedigizer-project-test", "tapedigizer").unwrap();
+        drop(handle);
+        std::fs::write(&file, b"original project").unwrap();
+        let source = file.with_extension("wav");
+        let project = TapeDigizerProject::new("Test".into(), TapeSide::SideA, "".into(), vec![], vec![], vec![], "none".into());
+        assert!(project.save_to_file(&file, Some(&source)).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"original project");
+        std::fs::write(&source, b"original audio").unwrap();
+        assert!(project.save_to_file(&source, Some(&source)).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"original audio");
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
     fn test_project_save_load() {
         let temp_dir = std::env::temp_dir().join("tapedigizer_test_proj");
         let _ = std::fs::create_dir_all(&temp_dir);
@@ -215,7 +294,7 @@ mod tests {
         assert_eq!(loaded.markers, vec![12.5, 45.0]);
         assert_eq!(loaded.custom_titles.len(), 3);
         assert_eq!(loaded.pause_indices, vec![1]);
-        assert!(audio_path.exists());
+        assert!(audio_path.unwrap().is_file());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

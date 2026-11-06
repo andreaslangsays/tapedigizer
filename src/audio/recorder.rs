@@ -14,6 +14,7 @@ pub enum RecorderState {
     Idle,
     Monitoring,
     Recording,
+    Finalizing,
     Finished,
 }
 
@@ -33,9 +34,10 @@ pub struct AudioRecorder {
     // Recording controls
     recording_stream: Option<Stream>,
     monitor_stream: Option<Stream>,
-    sample_sender: Option<Sender<Option<Vec<(f32, f32)>>>>,
-    writer_handle: Option<std::thread::JoinHandle<()>>,
-    stop_signal: Arc<AtomicBool>,
+    sample_sender: Option<Sender<Vec<(f32, f32)>>>,
+    writer_handle: Option<std::thread::JoinHandle<Result<(), String>>>,
+    interrupted: Arc<AtomicBool>,
+    recording_error: Option<String>,
     
     // Stats
     recorded_samples: Arc<AtomicUsize>,
@@ -62,7 +64,8 @@ impl AudioRecorder {
             monitor_stream: None,
             sample_sender: None,
             writer_handle: None,
-            stop_signal: Arc::new(AtomicBool::new(false)),
+            interrupted: Arc::new(AtomicBool::new(false)),
+            recording_error: None,
             recorded_samples: Arc::new(AtomicUsize::new(0)),
             total_clipped_samples: Arc::new(AtomicUsize::new(0)),
             max_peak_left: Arc::new(RwLock::new(0.0)),
@@ -143,38 +146,29 @@ impl AudioRecorder {
     }
 
     /// Check if auto-stop conditions (timer or silence) have been met
-    pub fn poll_auto_stop(&mut self) -> bool {
-        if *self.state.read() != RecorderState::Recording {
-            return false;
+    pub fn poll_auto_stop(&mut self) {
+        if self.state() != RecorderState::Recording {
+            return;
         }
-
-        // Timer limit check
-        if let (Some(start), Some(limit)) = (self.start_time, self.timer_limit) {
-            if start.elapsed() >= limit {
-                self.stop_recording();
-                return true;
-            }
+        let elapsed = self.elapsed_duration();
+        let timer_elapsed = self.timer_limit.is_some_and(|limit| elapsed >= limit);
+        let end_of_tape = self.silence_autostop_enabled && elapsed > Duration::from_secs(30)
+            && *self.silence_seconds_detected.read() >= 15.0;
+        if self.interrupted.load(Ordering::Acquire) || timer_elapsed || end_of_tape {
+            self.begin_stop();
         }
+    }
 
-        // Silence auto-stop check (> 15 seconds of silence)
-        if self.silence_autostop_enabled {
-            let silence_sec = *self.silence_seconds_detected.read();
-            // Only trigger if we have been recording for at least 30 seconds
-            if let Some(start) = self.start_time {
-                if start.elapsed() > Duration::from_secs(30) && silence_sec >= 15.0 {
-                    self.stop_recording();
-                    return true;
-                }
-            }
-        }
-
-        false
+    pub fn is_busy(&self) -> bool {
+        matches!(self.state(), RecorderState::Recording | RecorderState::Finalizing)
     }
 
     /// Starts live monitoring without recording to disk (for level calibration / Einpegeln)
     pub fn start_monitoring(&mut self, device_name: &str, channel_pair: ChannelPair) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("A recording is active".into());
+        }
         self.stop_monitoring();
-        self.stop_recording();
 
         let host = cpal::default_host();
         let device = host
@@ -249,8 +243,10 @@ impl AudioRecorder {
         timer_duration: Option<Duration>,
         enable_silence_autostop: bool,
     ) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("A recording is active".into());
+        }
         self.stop_monitoring();
-        self.stop_recording();
 
         let host = cpal::default_host();
         let device = host
@@ -276,55 +272,59 @@ impl AudioRecorder {
         self.start_time = Some(Instant::now());
         self.current_filepath = Some(target_path.clone());
 
-        // Channel for passing stereo samples (L, R) to disk writer thread
-        let (tx, rx): (Sender<Option<Vec<(f32, f32)>>>, Receiver<Option<Vec<(f32, f32)>>>) = bounded(256);
+        if channel_pair.left_channel >= total_channels || channel_pair.right_channel >= total_channels {
+            return Err("Invalid input channel pair".into());
+        }
+        if !matches!(default_config.sample_format(), cpal::SampleFormat::F32 | cpal::SampleFormat::I16) {
+            return Err("Unsupported input format".into());
+        }
+
+        let file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .open(&target_path).map_err(|e| format!("{}: {e}", target_path.display()))?;
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate,
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)
+            .map_err(|e| e.to_string())?;
+        let (tx, rx): (Sender<Vec<(f32, f32)>>, Receiver<Vec<(f32, f32)>>) = bounded(256);
         self.sample_sender = Some(tx.clone());
-        let stop_signal = Arc::new(AtomicBool::new(false));
-        self.stop_signal = stop_signal.clone();
+        self.interrupted.store(false, Ordering::Release);
+        self.recording_error = None;
 
-        // Spawn background WAV file writer thread (24-bit PCM)
-        let file_path_clone = target_path.clone();
-        let recorded_samples_arc = self.recorded_samples.clone();
-
-        let writer_handle = std::thread::spawn(move || {
-            let spec = hound::WavSpec {
-                channels: 2,
-                sample_rate,
-                bits_per_sample: 24,
-                sample_format: hound::SampleFormat::Int,
-            };
-
-            let Ok(mut writer) = hound::WavWriter::create(&file_path_clone, spec) else {
-                eprintln!("Konnte WAV-Datei nicht erstellen: {:?}", file_path_clone);
-                return;
-            };
-
-            let max_val_24 = 8_388_607.0_f32; // 2^23 - 1
-
-            while let Ok(msg) = rx.recv() {
-                match msg {
-                    Some(chunk) => {
-                        for (l, r) in chunk {
-                            let sample_l = (l.clamp(-1.0, 1.0) * max_val_24) as i32;
-                            let sample_r = (r.clamp(-1.0, 1.0) * max_val_24) as i32;
-
-                            let _ = writer.write_sample(sample_l);
-                            let _ = writer.write_sample(sample_r);
-                            recorded_samples_arc.fetch_add(1, Ordering::Relaxed);
-                        }
+        let writer_interrupted = self.interrupted.clone();
+        let recorded_samples = self.recorded_samples.clone();
+        self.writer_handle = Some(std::thread::spawn(move || {
+            let write_result = (|| {
+                // Leave room for the WAV header in the RIFF size field.
+                const MAX_FRAMES: usize = (u32::MAX as usize - 128) / 6;
+                let mut frames = 0;
+                let mut checkpoint = Instant::now();
+                while let Ok(chunk) = rx.recv() {
+                    if frames + chunk.len() > MAX_FRAMES {
+                        return Err("WAV size limit reached".to_string());
                     }
-                    None => {
-                        // Sentinel: recording ended cleanly, exit loop to finalize!
-                        break;
+                    for (left, right) in chunk {
+                        writer.write_sample(to_pcm24(left)).map_err(|e| e.to_string())?;
+                        writer.write_sample(to_pcm24(right)).map_err(|e| e.to_string())?;
+                        frames += 1;
+                    }
+                    recorded_samples.store(frames, Ordering::Relaxed);
+                    if checkpoint.elapsed() >= Duration::from_secs(5) {
+                        writer.flush().map_err(|e| e.to_string())?;
+                        checkpoint = Instant::now();
                     }
                 }
+                Ok::<(), String>(())
+            })();
+            if write_result.is_err() {
+                writer_interrupted.store(true, Ordering::Release);
             }
-
-            if let Err(e) = writer.finalize() {
-                eprintln!("Fehler beim Finalisieren der WAV-Datei: {}", e);
-            }
-        });
-        self.writer_handle = Some(writer_handle);
+            let finalize_result = writer.finalize().map_err(|e| e.to_string());
+            write_result.and(finalize_result)
+        }));
 
         let meter_arc = self.meter.clone();
         let waveform_arc = self.waveform_data.clone();
@@ -336,7 +336,12 @@ impl AudioRecorder {
         let ch_l = channel_pair.left_channel;
         let ch_r = channel_pair.right_channel;
 
-        let err_fn = |err| eprintln!("Audio-Stream Fehler: {}", err);
+        let callback_interrupted = self.interrupted.clone();
+        let stream_interrupted = self.interrupted.clone();
+        let err_fn = move |err| {
+            stream_interrupted.store(true, Ordering::Release);
+            eprintln!("Audio stream: {err}");
+        };
 
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
@@ -349,6 +354,7 @@ impl AudioRecorder {
                         ch_r,
                         sample_rate,
                         &tx,
+                        &callback_interrupted,
                         &meter_arc,
                         &waveform_arc,
                         &clipped_arc,
@@ -371,6 +377,7 @@ impl AudioRecorder {
                         ch_r,
                         sample_rate,
                         &tx,
+                        &callback_interrupted,
                         &meter_arc,
                         &waveform_arc,
                         &clipped_arc,
@@ -382,32 +389,79 @@ impl AudioRecorder {
                 err_fn,
                 None,
             ),
-            _ => return Err("Nicht unterstütztes Aufnahme-Format".into()),
+            _ => unreachable!("input format validated above"),
         }
-        .map_err(|e| e.to_string())?;
-
-        stream.play().map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+        .and_then(|stream| {
+            stream.play().map_err(|e| e.to_string())?;
+            Ok(stream)
+        });
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(e) => {
+                self.stop_recording();
+                if self.recorded_samples() == 0 {
+                    let _ = std::fs::remove_file(&target_path);
+                }
+                return Err(e);
+            }
+        };
         self.recording_stream = Some(stream);
         *self.state.write() = RecorderState::Recording;
 
         Ok(())
     }
 
-    pub fn stop_recording(&mut self) {
+    pub fn begin_stop(&mut self) {
         if let Some(stream) = self.recording_stream.take() {
             let _ = stream.pause();
             drop(stream);
         }
-        if let Some(sender) = self.sample_sender.take() {
-            let _ = sender.send(None);
+        self.sample_sender.take();
+        if self.state() == RecorderState::Recording {
+            *self.state.write() = RecorderState::Finalizing;
         }
+    }
+
+    pub fn poll_finished(&mut self) -> bool {
+        if self.state() != RecorderState::Finalizing
+            || self.writer_handle.as_ref().is_some_and(|writer| !writer.is_finished())
+        {
+            return false;
+        }
+        self.finish_writer();
+        true
+    }
+
+    fn stop_recording(&mut self) {
+        self.begin_stop();
+        self.finish_writer();
+    }
+
+    fn finish_writer(&mut self) {
         if let Some(handle) = self.writer_handle.take() {
-            let _ = handle.join();
+            self.recording_error = match handle.join() {
+                Ok(Ok(())) if self.interrupted.load(Ordering::Acquire) => {
+                    Some("Audio stream interrupted or recording queue overrun".into())
+                }
+                Ok(result) => result.err(),
+                Err(_) => Some("Recording writer stopped unexpectedly".into()),
+            };
         }
-        self.stop_signal.store(true, Ordering::SeqCst);
-        if *self.state.read() == RecorderState::Recording {
+        if self.state() == RecorderState::Finalizing {
             *self.state.write() = RecorderState::Finished;
         }
+    }
+
+    pub fn take_recording_error(&mut self) -> Option<String> {
+        self.recording_error.take()
+    }
+
+}
+
+impl Drop for AudioRecorder {
+    fn drop(&mut self) {
+        self.stop_recording();
     }
 }
 
@@ -464,13 +518,18 @@ fn process_meter_f32(
 }
 
 // Processing for Recording to Disk & Waveform Cache
+fn to_pcm24(sample: f32) -> i32 {
+    (sample * 8_388_608.0).round().clamp(-8_388_608.0, 8_388_607.0) as i32
+}
+
 fn process_record_f32(
     data: &[f32],
     total_channels: usize,
     ch_l: usize,
     ch_r: usize,
     sample_rate: u32,
-    tx: &Sender<Option<Vec<(f32, f32)>>>,
+    tx: &Sender<Vec<(f32, f32)>>,
+    interrupted: &AtomicBool,
     meter_arc: &Arc<RwLock<MeterLevels>>,
     waveform_arc: &Arc<RwLock<Vec<StereoWaveformPoint>>>,
     clipped_arc: &Arc<AtomicUsize>,
@@ -478,6 +537,9 @@ fn process_record_f32(
     max_r_arc: &Arc<RwLock<f32>>,
     silence_arc: &Arc<RwLock<f32>>,
 ) {
+    if interrupted.load(Ordering::Acquire) {
+        return;
+    }
     let mut chunk = Vec::with_capacity(data.len() / total_channels);
     let mut peak_l: f32 = 0.0;
     let mut peak_r: f32 = 0.0;
@@ -508,7 +570,10 @@ fn process_record_f32(
     }
 
     if count > 0 {
-        let _ = tx.send(Some(chunk));
+        if tx.try_send(chunk).is_err() {
+            interrupted.store(true, Ordering::Release);
+            return;
+        }
 
         if local_clips > 0 {
             clipped_arc.fetch_add(local_clips, Ordering::Relaxed);
@@ -558,12 +623,15 @@ fn process_record_f32(
         }
 
         // Downsampled stereo waveform point (1 point per chunk)
-        waveform_arc.write().push(StereoWaveformPoint {
-            min_l: -peak_l,
-            max_l: peak_l,
-            min_r: -peak_r,
-            max_r: peak_r,
-        });
+        // Preview must never make the capture callback wait for rendering.
+        if let Some(mut waveform) = waveform_arc.try_write() {
+            waveform.push(StereoWaveformPoint {
+                min_l: -peak_l,
+                max_l: peak_l,
+                min_r: -peak_r,
+                max_r: peak_r,
+            });
+        }
     }
 }
 
@@ -574,29 +642,27 @@ mod tests {
     use crate::analysis::analyze_wav_file;
 
     #[test]
+    #[ignore = "requires a connected input device and microphone permission"]
     fn test_record_and_finalize_lifecycle() {
         let devices = list_input_devices();
-        if devices.is_empty() {
-            return;
-        }
-        let dev = &devices[0];
+        let dev = devices.iter().find(|device| device.name.contains("L-12"))
+            .or_else(|| devices.first()).expect("no audio input device");
         let pair = ChannelPair {
             label: "Test".into(),
-            left_channel: 0,
-            right_channel: 0,
+            left_channel: if dev.channels >= 12 { 10 } else { 0 },
+            right_channel: if dev.channels >= 12 { 11 } else { 0 },
         };
 
-        let temp_file = std::env::temp_dir().join("test_lifecycle.wav");
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let temp_file = std::env::temp_dir().join(format!("tapedigizer-lifecycle-{stamp}.wav"));
         let mut recorder = AudioRecorder::new();
 
-        let res = recorder.start_recording(&dev.name, pair, temp_file.clone(), None, false);
-        if res.is_err() {
-            // Permission or device unavailable in headless test environment, gracefully pass
-            return;
-        }
+        recorder.start_recording(&dev.name, pair, temp_file.clone(), None, false)
+            .expect("failed to start hardware recording");
 
         std::thread::sleep(Duration::from_millis(300));
         recorder.stop_recording();
+        assert_eq!(recorder.take_recording_error(), None);
 
         assert!(temp_file.exists());
         let analysis = analyze_wav_file(&temp_file);

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.2.0-blue.svg" alt="Version 1.2.0" />
+  <img src="https://img.shields.io/badge/version-1.3.0-blue.svg" alt="Version 1.3.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -27,7 +27,7 @@
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
    * **Kassetten-Metadaten & Projektordner vorab:** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Großzügige Eingabefelder und direkte Ordnerstruktur.
-   * **Automatische Zwischensicherung vor Analyse:** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt sofort auf die Festplatte gesichert, noch bevor die Signal-Analyse startet – keine verlorenen Aufnahmen!
+   * **Automatische Zwischensicherung vor Analyse:** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt auf die Festplatte gesichert, bevor die Signalanalyse startet. Schreibfehler und unterbrochene Aufnahmen werden mit dem Pfad zur Rohdatei angezeigt.
    * **Menüleiste mit Dateidialogen & Tastenkürzel:** macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`), *Tab-Wechsel* (`⌘1`, `⌘2`, `⌘3`) und *Hilfe*.
    * **Live-Wellenform während der Aufnahme:** Visuelle Echtzeit-Darstellung des Audio-Signals (L & R getrennt), während das Band digitalisiert wird, inklusive dynamischem Playhead und Zeitleiste.
    * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Erkennt automatisch 14 Kanäle und schlägt standardmäßig **Kanäle 11/12 (Stereo Line)** für dein Kassettendeck vor (auch Kanäle 9/10, Master Mix 13/14 oder diskrete Kanalpaare wählbar).
@@ -58,7 +58,7 @@
      * Tastaturnavigation mit Enter / Tab zum nächsten Track.
    * **Pausen ausschneiden & weglassen:**
      * Abschnitte als `⏸ Pause (Weglassen)` markieren oder automatisch erkennen. Schraffierte Darstellung, beim 24-Bit WAV-Export komplett übersprungen.
-     * Button *✂ Pausen ausschneiden & weglassen*: Erkennt Stille-Intervalle vollautomatisch und setzt Start- und End-Marker als ausgeschnittene Pausen-Lücken.
+     * Button *✂ Pausen ausschneiden & weglassen*: Zeigt erkannte Schnittgrenzen als gestrichelte Vorschläge. Erst Übernehmen ersetzt die bisherige Trackliste. Ausgelassene Abschnitte erscheinen in der Exportvorschau.
    * **Marker-Feinverschiebung (Nudge ◀ / ▶) (Neu in v1.0.0):**
      * Schnelle Verschiebung per Tastatur (`◀` / `▶` Pfeiltasten für 0.1s, mit Shift für 1s).
      * Feinstufen-Buttons (`◀` / `▶`) direkt neben den Start- und End-Zeiten in der Songliste.
@@ -71,7 +71,7 @@
    * **Tonband- & Album-Organisation (A- & B-Seite):** Gib den Albumnamen ein und wähle **Seite A** oder **Seite B**. Beim Export werden automatisch strukturierte Unterordner angelegt: `<Zielordner>/<Album-Name>/Seite A/` bzw. `Seite B/`.
    * **Vollwertige Projekt-Verwaltung (`.tapedigizer`):** Speichere (`⌘S`) und lade (`⌘O`) deine Digitalisierungs-Sessions inkl. Audio, Markern, Tracktiteln und Mastering-Einstellungen für unterbrechungsfreies Weiterarbeiten.
    * **Undo & Redo (⌘Z / ⇧⌘Z):** Versehentlich gelöschte oder gesetzte Schnittmarker lassen sich jederzeit mit ⌘Z zurückholen.
-   * **Sicherheits-Rückfrage beim Löschen:** Verhindert versehentliches Löschen von Schnittmarkern mit einem Bestätigungs-Dialog.
+   * **Marker-Inspector:** Marker über das Fähnchen oder die Startzeit in der Trackliste auswählen. Zeitcode oder Quellframe eingeben, schrittweise verschieben oder links und rechts der Schnittgrenze vorhören. Ein Zug in der Wellenform ist ein Undo-Schritt. Beim Löschen fragt die App nach.
    * **Optimierte Trackliste & Navigation:**
      * Extra breite Eingabefelder für lange Titel.
      * Schnelle Tastatur-Navigation mit **Enter** oder **Tab** direkt zum nächsten Songtitel.
@@ -122,7 +122,7 @@
      * **Scissor Tool (✂️):** Activate via `[S]` to drop splice markers with live cursor guide lines.
    * **🎧 Stationary Hover Audition:**
      * Hover stationary over any section of the tape for ~300ms to immediately preview the audio!
-   * **Export:** One-click batch export with 3 normalization algorithms.
+   * **Export:** Preview filenames and skipped gaps, select a normalization mode, then export in the background. Existing output files are protected and the running export can be cancelled.
 
 ---
 
@@ -169,9 +169,19 @@ cd tapedigizer
 # Tests ausführen
 cargo test
 
-# macOS App-Bundle inklusive App-Icon bauen und signieren
+# Lokales macOS App-Bundle bauen und ad hoc signieren
 ./scripts/package_app.sh
 ```
+
+Das Skript erzeugt `TapeDigizer.app` im Projektordner. Für die separaten Hardwareprüfungen und das reproduzierbare Release-Profil:
+
+```bash
+cargo test --locked test_list_devices -- --ignored --nocapture
+cargo test --locked test_record_and_finalize_lifecycle -- --ignored --nocapture
+cargo test --locked --release profile_long_session -- --ignored --nocapture
+```
+
+Der Aufnahmetest benötigt ein verfügbares Eingabegerät und Mikrofonberechtigung. Das Profil erzeugt synthetische Aufnahmen und benötigt bis zu 1 GiB freien Speicherplatz für temporäre Exporte.
 
 ---
 

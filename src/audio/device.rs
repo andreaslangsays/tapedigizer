@@ -112,6 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "enumerates local Core Audio hardware"]
     fn test_list_devices() {
         let devices = list_input_devices();
         println!("Gefundene Audio-Eingabegeräte ({}):", devices.len());
