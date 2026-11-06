@@ -19,6 +19,7 @@ pub struct WaveformInteraction {
     pub hovered_time_sec: Option<f64>,
     pub mouse_pos_in_waveform: Option<Pos2>,
     pub is_mouse_over_waveform: bool,
+    pub clicked_segment_idx: Option<usize>,
 }
 
 pub fn render_stereo_waveform(
@@ -27,8 +28,11 @@ pub fn render_stereo_waveform(
     total_duration_sec: f64,
     current_playhead_sec: f64,
     markers: &[f64],
+    pause_indices: &[usize],
     selected_marker_idx: &mut Option<usize>,
     zoom_factor: &mut f32,
+    vertical_zoom: &mut f32,
+    waveform_height: f32,
     scroll_offset_frac: &mut f32,
     active_tool: EditTool,
     hover_audition_active: bool,
@@ -42,9 +46,10 @@ pub fn render_stereo_waveform(
         hovered_time_sec: None,
         mouse_pos_in_waveform: None,
         is_mouse_over_waveform: false,
+        clicked_segment_idx: None,
     };
 
-    let desired_height = 230.0;
+    let desired_height = waveform_height.clamp(200.0, 520.0);
     let available_width = ui.available_width().max(380.0);
     let size = Vec2::new(available_width, desired_height);
 
@@ -60,20 +65,20 @@ pub fn render_stereo_waveform(
     let wf_right = rect.max.x - 12.0;
     let wf_width = (wf_right - wf_left).max(10.0);
 
-    // Height breakdown:
-    // Waveform lanes: top 10.0 to 166.0 (height 156.0: 75.0 + 6.0 gap + 75.0)
-    // Timeline Ruler: 172.0 to 196.0 (height 24.0)
-    // Overview Bar:   202.0 to 220.0 (height 18.0)
+    let ruler_h = 24.0;
+    let overview_h = 22.0;
+    let padding_y = 26.0;
     let wf_top = rect.min.y + 10.0;
-    let wf_bottom = wf_top + 154.0;
+    let wf_h = (desired_height - ruler_h - overview_h - padding_y).max(110.0);
+    let wf_bottom = wf_top + wf_h;
     let wf_rect = Rect::from_min_max(Pos2::new(wf_left, wf_top), Pos2::new(wf_right, wf_bottom));
 
     let ruler_top = wf_bottom + 4.0;
-    let ruler_bottom = ruler_top + 24.0;
+    let ruler_bottom = ruler_top + ruler_h;
     let ruler_rect = Rect::from_min_max(Pos2::new(wf_left, ruler_top), Pos2::new(wf_right, ruler_bottom));
 
     let overview_top = ruler_bottom + 4.0;
-    let overview_bottom = overview_top + 18.0;
+    let overview_bottom = overview_top + overview_h;
     let overview_rect = Rect::from_min_max(Pos2::new(wf_left, overview_top), Pos2::new(wf_right, overview_bottom));
 
     // Two Stereo Lanes
@@ -128,22 +133,29 @@ pub fn render_stereo_waveform(
 
     // 1. Mouse Wheel Zoom (Option / Alt + Wheel)
     if is_hovered && alt_pressed && (scroll_delta.y.abs() > 0.1 || scroll_delta.x.abs() > 0.1) {
-        let old_zoom = *zoom_factor;
-        let delta = if scroll_delta.y.abs() > 0.1 { scroll_delta.y } else { scroll_delta.x };
-        let zoom_mult = if delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
-        let new_zoom = (old_zoom * zoom_mult).clamp(1.0, 30.0);
+        if shift_pressed {
+            // Shift + Alt + Wheel: Vertical amplitude zoom!
+            let delta = if scroll_delta.y.abs() > 0.1 { scroll_delta.y } else { scroll_delta.x };
+            let v_mult = if delta > 0.0 { 1.2 } else { 1.0 / 1.2 };
+            *vertical_zoom = (*vertical_zoom * v_mult).clamp(1.0, 16.0);
+        } else {
+            let old_zoom = *zoom_factor;
+            let delta = if scroll_delta.y.abs() > 0.1 { scroll_delta.y } else { scroll_delta.x };
+            let zoom_mult = if delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
+            let new_zoom = (old_zoom * zoom_mult).clamp(1.0, 30.0);
 
-        if (new_zoom - old_zoom).abs() > 0.001 {
-            if let Some(mouse_pos) = mouse_pos_opt {
-                let rel_x = ((mouse_pos.x - wf_rect.min.x) / wf_width).clamp(0.0, 1.0) as f64;
-                let old_span = 1.0 / old_zoom as f64;
-                let new_span = 1.0 / new_zoom as f64;
-                let t_frac = (*scroll_offset_frac as f64) + rel_x * old_span;
-                let new_scroll = t_frac - rel_x * new_span;
-                let max_scroll = (1.0 - new_span).max(0.0);
-                *scroll_offset_frac = new_scroll.clamp(0.0, max_scroll) as f32;
+            if (new_zoom - old_zoom).abs() > 0.001 {
+                if let Some(mouse_pos) = mouse_pos_opt {
+                    let rel_x = ((mouse_pos.x - wf_rect.min.x) / wf_width).clamp(0.0, 1.0) as f64;
+                    let old_span = 1.0 / old_zoom as f64;
+                    let new_span = 1.0 / new_zoom as f64;
+                    let t_frac = (*scroll_offset_frac as f64) + rel_x * old_span;
+                    let new_scroll = t_frac - rel_x * new_span;
+                    let max_scroll = (1.0 - new_span).max(0.0);
+                    *scroll_offset_frac = new_scroll.clamp(0.0, max_scroll) as f32;
+                }
+                *zoom_factor = new_zoom;
             }
-            *zoom_factor = new_zoom;
         }
     }
     // 2. Mouse Wheel Horizontal Scroll (Normal Scroll without Option)
@@ -194,7 +206,72 @@ pub fn render_stereo_waveform(
     };
 
     // -------------------------------------------------------------
-    // Render Dual Waveforms
+    // Track Segment Backgrounds (Track Blocks & Excluded Pauses)
+    // -------------------------------------------------------------
+    if total_duration_sec > 0.0 {
+        let mut block_points = vec![0.0];
+        for &m in markers {
+            if m > 0.0 && m < total_duration_sec {
+                block_points.push(m);
+            }
+        }
+        block_points.push(total_duration_sec);
+
+        let mut seg_active_count = 0;
+        for i in 0..block_points.len() - 1 {
+            let x1 = time_to_screen_x(block_points[i]).clamp(wf_rect.min.x, wf_rect.max.x);
+            let x2 = time_to_screen_x(block_points[i + 1]).clamp(wf_rect.min.x, wf_rect.max.x);
+            let is_p = pause_indices.contains(&i);
+
+            if x2 > x1 + 1.0 {
+                let seg_r = Rect::from_min_max(Pos2::new(x1, wf_rect.min.y), Pos2::new(x2, wf_rect.max.y));
+                if is_p {
+                    painter.rect_filled(seg_r, 0.0, Color32::from_rgba_unmultiplied(160, 40, 20, 32));
+                    // Diagonal hatched pattern
+                    let mut hx = x1;
+                    while hx < x2 + seg_r.height() {
+                        let p1 = Pos2::new(hx, seg_r.max.y);
+                        let p2 = Pos2::new(hx - seg_r.height(), seg_r.min.y);
+                        let cp1 = Pos2::new(p1.x.clamp(x1, x2), p1.y);
+                        let cp2 = Pos2::new(p2.x.clamp(x1, x2), p2.y);
+                        if (cp1.x - cp2.x).abs() > 1.0 {
+                            painter.line_segment([cp1, cp2], Stroke::new(1.0, Color32::from_rgba_unmultiplied(220, 60, 30, 25)));
+                        }
+                        hx += 16.0;
+                    }
+                    if x2 - x1 > 90.0 {
+                        let badge = Rect::from_center_size(
+                            Pos2::new((x1 + x2) * 0.5, wf_rect.min.y + 14.0),
+                            Vec2::new(140.0, 18.0),
+                        );
+                        painter.rect_filled(badge, 3.0, Color32::from_rgba_unmultiplied(35, 18, 14, 210));
+                        painter.rect_stroke(badge, 3.0, Stroke::new(1.0, LED_AMBER));
+                        painter.text(badge.center(), egui::Align2::CENTER_CENTER, "⏸ PAUSE (WEGGELASSEN)", egui::FontId::monospace(9.0), LED_AMBER);
+                    }
+                } else {
+                    seg_active_count += 1;
+                    let tint = if seg_active_count % 2 == 1 {
+                        Color32::from_rgba_unmultiplied(37, 99, 235, 14)
+                    } else {
+                        Color32::from_rgba_unmultiplied(16, 149, 193, 14)
+                    };
+                    painter.rect_filled(seg_r, 0.0, tint);
+                    if x2 - x1 > 50.0 {
+                        painter.text(
+                            Pos2::new(x1 + 6.0, wf_rect.min.y + 12.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("TRACK {:02}", seg_active_count),
+                            egui::FontId::monospace(9.5),
+                            Color32::from_rgba_unmultiplied(190, 210, 240, 130),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Render Dual Waveforms (with Vertical Amplitude Zoom)
     // -------------------------------------------------------------
     let n_points = waveform_data.len();
     if n_points > 0 {
@@ -202,22 +279,23 @@ pub fn render_stereo_waveform(
         let end_pt = ((view_end_frac * n_points as f64).ceil() as usize).min(n_points);
         let visible_count = (end_pt - start_pt).max(1);
         let bar_w = (wf_width / visible_count as f32).clamp(1.0, 4.0);
+        let amp_scale = (*vertical_zoom).clamp(1.0, 16.0);
 
         for (rel_idx, pt_idx) in (start_pt..end_pt).enumerate() {
             let pt = &waveform_data[pt_idx];
             let x = wf_rect.min.x + (rel_idx as f32 / visible_count as f32) * wf_width;
 
             // Lane L
-            let top_l = lane_l_center - (pt.max_l.clamp(0.0, 1.0) * (lane_h * 0.46));
-            let bot_l = lane_l_center - (pt.min_l.clamp(-1.0, 0.0) * (lane_h * 0.46));
+            let top_l = lane_l_center - ((pt.max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
+            let bot_l = lane_l_center - ((pt.min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
             painter.line_segment(
                 [Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))],
                 Stroke::new(bar_w, WAVE_LEFT),
             );
 
             // Lane R
-            let top_r = lane_r_center - (pt.max_r.clamp(0.0, 1.0) * (lane_h * 0.46));
-            let bot_r = lane_r_center - (pt.min_r.clamp(-1.0, 0.0) * (lane_h * 0.46));
+            let top_r = lane_r_center - ((pt.max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
+            let bot_r = lane_r_center - ((pt.min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
             painter.line_segment(
                 [Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))],
                 Stroke::new(bar_w, WAVE_RIGHT),
@@ -305,16 +383,54 @@ pub fn render_stereo_waveform(
         TEXT_MUTED,
     );
 
-    // Overview mini waveform representation or markers
+    // Overview track blocks representation (Gesamtansicht der geschnittenen Stücke)
     let ov_w = overview_rect.width();
-    for &m in markers {
-        if total_duration_sec > 0.0 {
-            let m_frac = (m / total_duration_sec).clamp(0.0, 1.0);
-            let mx = overview_rect.min.x + (m_frac as f32) * ov_w;
-            painter.line_segment(
-                [Pos2::new(mx, overview_rect.min.y + 2.0), Pos2::new(mx, overview_rect.max.y - 2.0)],
-                Stroke::new(1.0, LED_AMBER),
-            );
+    if total_duration_sec > 0.0 {
+        let mut ov_points = vec![0.0];
+        for &m in markers {
+            if m > 0.0 && m < total_duration_sec {
+                ov_points.push(m);
+            }
+        }
+        ov_points.push(total_duration_sec);
+
+        let mut active_idx = 0;
+        for i in 0..ov_points.len() - 1 {
+            let x1 = overview_rect.min.x + (ov_points[i] / total_duration_sec) as f32 * ov_w;
+            let x2 = overview_rect.min.x + (ov_points[i + 1] / total_duration_sec) as f32 * ov_w;
+            let is_p = pause_indices.contains(&i);
+
+            if x2 > x1 + 1.0 {
+                let block_r = Rect::from_min_max(Pos2::new(x1, overview_rect.min.y + 1.0), Pos2::new(x2, overview_rect.max.y - 1.0));
+                let (fill, stroke_col, label) = if is_p {
+                    (
+                        Color32::from_rgba_unmultiplied(160, 40, 20, 90),
+                        Color32::from_rgb(200, 70, 40),
+                        "⏸".to_string(),
+                    )
+                } else {
+                    active_idx += 1;
+                    let bg = if active_idx % 2 == 1 {
+                        Color32::from_rgba_unmultiplied(37, 99, 235, 75)
+                    } else {
+                        Color32::from_rgba_unmultiplied(16, 149, 193, 75)
+                    };
+                    (bg, Color32::from_rgb(96, 165, 250), format!("#{}", active_idx))
+                };
+
+                painter.rect_filled(block_r, 2.0, fill);
+                painter.rect_stroke(block_r, 2.0, Stroke::new(1.0, stroke_col.gamma_multiply(0.4)));
+
+                if block_r.width() > 16.0 {
+                    painter.text(
+                        block_r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::monospace(8.5),
+                        Color32::WHITE,
+                    );
+                }
+            }
         }
     }
 
@@ -341,6 +457,23 @@ pub fn render_stereo_waveform(
             let clicked_frac = ((pos.x - overview_rect.min.x) / ov_w).clamp(0.0, 1.0) as f64;
             let new_scroll = (clicked_frac - (view_width_frac as f64) * 0.5).clamp(0.0, max_scroll as f64);
             *scroll_offset_frac = new_scroll as f32;
+
+            if response.clicked() && total_duration_sec > 0.0 {
+                let clicked_t = clicked_frac * total_duration_sec;
+                let mut ov_points = vec![0.0];
+                for &m in markers {
+                    if m > 0.0 && m < total_duration_sec {
+                        ov_points.push(m);
+                    }
+                }
+                ov_points.push(total_duration_sec);
+                for i in 0..ov_points.len() - 1 {
+                    if clicked_t >= ov_points[i] && clicked_t < ov_points[i + 1] {
+                        interaction.clicked_segment_idx = Some(i);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -789,4 +922,150 @@ pub fn render_live_recording_waveform(
         }
         t += step_sec;
     }
+}
+
+pub fn render_detail_magnifier_scope(
+    ui: &mut Ui,
+    waveform_data: &[StereoWaveformPoint],
+    total_duration_sec: f64,
+    center_time_sec: f64,
+    markers: &[f64],
+    selected_marker_idx: Option<usize>,
+    vertical_zoom: f32,
+) {
+    let scope_h = 130.0;
+    let available_w = ui.available_width().max(380.0);
+    let size = Vec2::new(available_w, scope_h);
+
+    let (rect, _resp) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+
+    // Recessed dark oscilloscope plate
+    painter.rect_filled(rect, 6.0, Color32::from_rgb(15, 17, 22));
+    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_rgb(45, 50, 65)));
+
+    let window_span_sec = 3.0_f64; // +/- 1.5 seconds high resolution detail view
+    let start_t = (center_time_sec - window_span_sec * 0.5).max(0.0);
+    let end_t = (start_t + window_span_sec).min(total_duration_sec.max(0.1));
+
+    let header_w = 44.0;
+    let scope_left = rect.min.x + header_w + 6.0;
+    let scope_right = rect.max.x - 12.0;
+    let scope_w = (scope_right - scope_left).max(10.0);
+
+    let scope_top = rect.min.y + 6.0;
+    let scope_wf_h = 82.0;
+    let scope_bottom = scope_top + scope_wf_h;
+    let scope_rect = Rect::from_min_max(Pos2::new(scope_left, scope_top), Pos2::new(scope_right, scope_bottom));
+
+    let ruler_top = scope_bottom + 2.0;
+    let ruler_bottom = ruler_top + 18.0;
+    let ruler_rect = Rect::from_min_max(Pos2::new(scope_left, ruler_top), Pos2::new(scope_right, ruler_bottom));
+
+    // Stereo lanes inside scope
+    let lane_gap = 4.0;
+    let lane_h = (scope_rect.height() - lane_gap) * 0.5;
+
+    let lane_l_top = scope_rect.min.y;
+    let lane_l_bot = lane_l_top + lane_h;
+    let lane_l_center = lane_l_top + lane_h * 0.5;
+
+    let lane_r_top = lane_l_bot + lane_gap;
+    let lane_r_bot = lane_r_top + lane_h;
+    let lane_r_center = lane_r_top + lane_h * 0.5;
+
+    // Badges on left
+    draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 6.0, lane_l_top), Pos2::new(rect.min.x + header_w, lane_l_bot)), "L", WAVE_LEFT);
+    draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 6.0, lane_r_top), Pos2::new(rect.min.x + header_w, lane_r_bot)), "R", WAVE_RIGHT);
+
+    // Grid lines every 250ms & 100ms
+    let t_to_x = |t: f64| -> f32 {
+        let frac = ((t - start_t) / window_span_sec).clamp(0.0, 1.0) as f32;
+        scope_left + frac * scope_w
+    };
+
+    let step_100ms = 0.1_f64;
+    let mut grid_t = (start_t / step_100ms).floor() * step_100ms;
+    while grid_t <= end_t {
+        let gx = t_to_x(grid_t);
+        let is_major = (grid_t * 2.0).round() == (grid_t * 2.0); // every 500ms
+        let grid_stroke = if is_major {
+            Stroke::new(1.0, Color32::from_rgb(40, 46, 60))
+        } else {
+            Stroke::new(0.5, Color32::from_rgb(26, 30, 40))
+        };
+        painter.line_segment([Pos2::new(gx, scope_rect.min.y), Pos2::new(gx, scope_rect.max.y)], grid_stroke);
+
+        if is_major {
+            painter.line_segment([Pos2::new(gx, ruler_rect.min.y), Pos2::new(gx, ruler_rect.min.y + 4.0)], Stroke::new(1.0, Color32::from_rgb(90, 100, 120)));
+            let m = (grid_t / 60.0).floor() as u64;
+            let s = grid_t % 60.0;
+            painter.text(
+                Pos2::new(gx, ruler_rect.min.y + 6.0),
+                egui::Align2::CENTER_TOP,
+                format!("{:02}:{:04.1}", m, s),
+                egui::FontId::monospace(8.5),
+                Color32::from_rgb(130, 140, 160),
+            );
+        }
+        grid_t += step_100ms;
+    }
+
+    // Render detailed waveform columns
+    let n_pts = waveform_data.len();
+    if n_pts > 0 && total_duration_sec > 0.0 {
+        let amp_scale = (vertical_zoom * 1.5).clamp(1.0, 24.0);
+        let pts_per_sec = n_pts as f64 / total_duration_sec;
+        let start_idx = ((start_t * pts_per_sec).floor() as usize).min(n_pts);
+        let end_idx = ((end_t * pts_per_sec).ceil() as usize).min(n_pts);
+        let visible_count = (end_idx - start_idx).max(1);
+        let col_w = (scope_w / visible_count as f32).clamp(1.0, 6.0);
+
+        for (rel, p_idx) in (start_idx..end_idx).enumerate() {
+            let pt = &waveform_data[p_idx];
+            let x = scope_left + (rel as f32 / visible_count as f32) * scope_w;
+
+            let top_l = lane_l_center - ((pt.max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
+            let bot_l = lane_l_center - ((pt.min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
+            painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))], Stroke::new(col_w, WAVE_LEFT));
+
+            let top_r = lane_r_center - ((pt.max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
+            let bot_r = lane_r_center - ((pt.min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
+            painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))], Stroke::new(col_w, WAVE_RIGHT));
+        }
+    }
+
+    // Other markers in view
+    for (m_i, &m) in markers.iter().enumerate() {
+        if m >= start_t && m <= end_t {
+            let mx = t_to_x(m);
+            let is_sel = selected_marker_idx == Some(m_i);
+            let col = if is_sel { Color32::from_rgb(255, 215, 0) } else { LED_AMBER };
+            painter.line_segment([Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)], Stroke::new(1.5, col));
+        }
+    }
+
+    // Center Crosshair (Target Focus Line)
+    let center_x = t_to_x(center_time_sec);
+    painter.line_segment(
+        [Pos2::new(center_x, scope_rect.min.y), Pos2::new(center_x, ruler_rect.max.y)],
+        Stroke::new(2.0, LED_AMBER),
+    );
+
+    // Crosshair badge
+    let c_m = (center_time_sec / 60.0).floor() as u64;
+    let c_s = center_time_sec % 60.0;
+    let badge_rect = Rect::from_center_size(
+        Pos2::new(center_x.clamp(scope_left + 45.0, scope_right - 45.0), scope_rect.min.y + 10.0),
+        Vec2::new(96.0, 16.0),
+    );
+    painter.rect_filled(badge_rect, 3.0, Color32::from_rgb(30, 26, 12));
+    painter.rect_stroke(badge_rect, 3.0, Stroke::new(1.0, LED_AMBER));
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("{:02}:{:05.2}s", c_m, c_s),
+        egui::FontId::monospace(9.5),
+        LED_AMBER,
+    );
 }

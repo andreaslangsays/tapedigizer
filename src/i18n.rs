@@ -469,8 +469,74 @@ impl Language {
     }
     pub fn btn_auto_detect_pauses(&self) -> &'static str {
         match self {
-            Language::De => "Pausen automatisch erkennen",
-            Language::En => "Auto-detect Pauses",
+            Language::De => "Pausen als Trenner erkennen",
+            Language::En => "Auto-detect Pauses (Split)",
+        }
+    }
+    pub fn btn_auto_detect_pauses_gaps(&self) -> &'static str {
+        match self {
+            Language::De => "✂ Pausen ausschneiden & weglassen",
+            Language::En => "✂ Cut & Skip Pauses",
+        }
+    }
+    pub fn btn_magnifier_toggle(&self) -> &'static str {
+        match self {
+            Language::De => "🔍 Lupenansicht [L]",
+            Language::En => "🔍 Magnifier View [L]",
+        }
+    }
+    pub fn label_vertical_zoom(&self) -> &'static str {
+        match self {
+            Language::De => "Pegel-Lupe",
+            Language::En => "Gain Scope",
+        }
+    }
+    pub fn label_waveform_height(&self) -> &'static str {
+        match self {
+            Language::De => "Wellenhöhe",
+            Language::En => "Wave Height",
+        }
+    }
+    pub fn card_magnifier_scope(&self) -> &'static str {
+        match self {
+            Language::De => "🔍 DETAIL-LUPENANSICHT (FOKUS ±1.5s SAMPLE-PRÄZISION)",
+            Language::En => "🔍 DETAIL MAGNIFIER (FOCUS ±1.5s SAMPLE PRECISION)",
+        }
+    }
+    pub fn btn_make_pause(&self) -> &'static str {
+        match self {
+            Language::De => "⏸ Weglassen",
+            Language::En => "⏸ Skip Pause",
+        }
+    }
+    pub fn btn_make_track(&self) -> &'static str {
+        match self {
+            Language::De => "▶ Als Track",
+            Language::En => "▶ As Track",
+        }
+    }
+    pub fn badge_pause(&self) -> &'static str {
+        match self {
+            Language::De => "PAUSE (WEGGELASSEN)",
+            Language::En => "PAUSE (SKIPPED)",
+        }
+    }
+    pub fn label_nudge_start(&self) -> &'static str {
+        match self {
+            Language::De => "Start-Marker verschieben",
+            Language::En => "Nudge Start Marker",
+        }
+    }
+    pub fn label_nudge_end(&self) -> &'static str {
+        match self {
+            Language::De => "End-Marker verschieben",
+            Language::En => "Nudge End Marker",
+        }
+    }
+    pub fn tip_nudge_keys(&self) -> &'static str {
+        match self {
+            Language::De => "Tipp: ◀ / ▶ = Marker verschieben (mit Shift = 1s) | ⇧⌥ + Mausrad = Pegel-Lupe",
+            Language::En => "Tip: ◀ / ▶ = Nudge marker (with Shift = 1s) | ⇧⌥ + Scroll = Vertical Amplitude Zoom",
         }
     }
     pub fn btn_clear_markers(&self) -> &'static str {

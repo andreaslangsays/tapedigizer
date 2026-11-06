@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.0-blue.svg" alt="Version 0.5.0" />
+  <img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version 1.0.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -26,15 +26,36 @@
 ### ✨ Hauptfunktionen
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
-   * **Kassetten-Metadaten & Projektordner vorab (Neu in v0.5.0):** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Die Aufnahme landet direkt im finalen Projekt-Verzeichnis.
-   * **Automatische Zwischensicherung vor Analyse (Neu in v0.5.0):** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt sofort auf die Festplatte gesichert, noch bevor die Signal-Analyse startet – keine verlorenen Aufnahmen!
-   * **Menüleiste mit Dateidialogen (Neu in v0.5.0):** Standardmäßige macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`) und *Hilfe*.
+   * **Kassetten-Metadaten & Projektordner vorab:** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Die Aufnahme landet direkt im finalen Projekt-Verzeichnis.
+   * **Automatische Zwischensicherung vor Analyse:** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt sofort auf die Festplatte gesichert, noch bevor die Signal-Analyse startet – keine verlorenen Aufnahmen!
+   * **Menüleiste mit Dateidialogen:** Standardmäßige macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`) und *Hilfe*.
    * **Live-Wellenform während der Aufnahme:** Visuelle Echtzeit-Darstellung des Audio-Signals (L & R getrennt), während das Band digitalisiert wird, inklusive dynamischem Playhead und Zeitleiste.
    * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Erkennt automatisch 14 Kanäle und schlägt standardmäßig **Kanäle 11/12 (Stereo Line)** für dein Kassettendeck vor (auch Kanäle 9/10, Master Mix 13/14 oder diskrete Kanalpaare wählbar).
    * **Echtzeit Studio LED-Kette:** 36-Segment-Stereometer (-60 bis 0 dBFS) mit Spitzenwertanzeige und Übersteuerungs-Warnung (CLIP).
    * **Vorab-Pegelcheck:** Überprüfe und justiere den Eingangspegel ohne Datei-Aufzeichnung.
    * **Unbeaufsichtigte Aufnahme:** Timer für 15, 30, 45 (C-90) oder 60 (C-120) Minuten plus **automatischer Stopp bei Bandende** durch Stilleerkennung.
    * **24-Bit Studio-Qualität:** Verlustfreie, unkomprimierte WAV-Aufnahme mit 144 dB Dynamikbereich.
+
+2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
+   * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
+   * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
+
+3. **✂️ Tab 3: Track-Schnitt & Mastering-Export (Neu in v1.0.0)**
+   * **Vertikale Wellenform-Skalierung & Pegel-Lupe (Neu in v1.0.0):**
+     * Einstellbare Wellenhöhe (220px, 300px, 420px) für gigantische Übersicht.
+     * Stufenloser **Vertikal-Zoom (1x bis 16x Pegel-Lupe)** über Schieberegler oder Tastenkombination **⇧⌥ + Mausrad**, um leise Passagen, Fade-Outs und Rauschteppiche kristallklar zu erkennen.
+   * **🔍 Dedizierte Detail-Lupenansicht (Scope) [Taste L] (Neu in v1.0.0):**
+     * Präzisions-Oszilloskopfenster mit ±1.5s Fokus um den Playhead oder Marker mit Millisekunden-Gitter (100ms/250ms).
+     * Direkte Micro-Nudge-Tasten (`-1s`, `-0.1s`, `-0.01s`, `+0.01s`, `+0.1s`, `+1s`) und 1-Sekunden-Vorhör-Funktion.
+   * **Gesamtansicht der geschnittenen Stücke (Track-Blöcke) (Neu in v1.0.0):**
+     * Die Übersicht-Leiste und die Wellenform-Hintergründe stellen alle geschnittenen Stücke als farbige Blöcke (`#1`, `#2`, `#3`, `⏸`) dar.
+     * Ein Klick auf einen Block in der Übersicht springt sofort zum entsprechenden Song.
+   * **Pausen ausschneiden & weglassen (Neu in v1.0.0):**
+     * Jeder Abschnitt kann per Klick als **Pause (Weglassen)** markiert werden – Pausen werden optisch schraffiert und beim 24-Bit WAV-Export komplett übersprungen!
+     * Button *✂ Pausen ausschneiden & weglassen*: Erkennt Stille-Intervalle vollautomatisch und setzt Start- und End-Marker als ausgeschnittene Pausen-Lücken.
+   * **Marker-Feinverschiebung (Nudge ◀ / ▶) (Neu in v1.0.0):**
+     * Schnelle Verschiebung per Tastatur (`◀` / `▶` Pfeiltasten für 0.1s, mit Shift für 1s).
+     * Feinstufen-Buttons (`◀` / `▶`) direkt neben den Start- und End-Zeiten in der Songliste.
 
 2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
    * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.

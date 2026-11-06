@@ -41,6 +41,8 @@ pub struct TapeDigizerProject {
     pub audio_file_path: String,
     pub markers: Vec<f64>,
     pub custom_titles: Vec<String>,
+    #[serde(default)]
+    pub pause_indices: Vec<usize>,
     pub normalization_mode: String,
     pub created_at: String,
 }
@@ -52,6 +54,7 @@ impl TapeDigizerProject {
         audio_file_path: String,
         markers: Vec<f64>,
         custom_titles: Vec<String>,
+        pause_indices: Vec<usize>,
         normalization_mode: String,
     ) -> Self {
         Self {
@@ -61,6 +64,7 @@ impl TapeDigizerProject {
             audio_file_path,
             markers,
             custom_titles,
+            pause_indices,
             normalization_mode,
             created_at: chrono_like_now(),
         }
@@ -197,6 +201,7 @@ mod tests {
             "".into(),
             vec![12.5, 45.0],
             vec!["Track 01".into(), "Track 02".into(), "Track 03".into()],
+            vec![1],
             "track".into(),
         );
 
@@ -209,6 +214,7 @@ mod tests {
         assert_eq!(loaded.tape_side, TapeSide::SideA);
         assert_eq!(loaded.markers, vec![12.5, 45.0]);
         assert_eq!(loaded.custom_titles.len(), 3);
+        assert_eq!(loaded.pause_indices, vec![1]);
         assert!(audio_path.exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
