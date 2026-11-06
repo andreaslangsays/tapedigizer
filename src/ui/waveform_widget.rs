@@ -593,3 +593,200 @@ fn draw_track_header(painter: &egui::Painter, rect: Rect, ch_badge: &str, title:
         TEXT_MUTED,
     );
 }
+
+fn draw_track_badge(painter: &egui::Painter, rect: Rect, ch_badge: &str, accent_col: Color32) {
+    draw_recessed_well(painter, rect, 4.0, BG_INSET);
+    let badge_rect = Rect::from_center_size(
+        rect.center(),
+        Vec2::new(26.0, 22.0),
+    );
+    painter.rect_filled(badge_rect, 4.0, accent_col.gamma_multiply(0.2));
+    painter.rect_stroke(badge_rect, 4.0, Stroke::new(1.0, accent_col));
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        ch_badge,
+        egui::FontId::proportional(12.0),
+        accent_col,
+    );
+}
+
+pub fn render_live_recording_waveform(
+    ui: &mut Ui,
+    waveform_data: &[StereoWaveformPoint],
+    elapsed_sec: f64,
+    timer_limit_sec: Option<f64>,
+    is_recording: bool,
+    idle_text: &str,
+) {
+    let desired_height = 140.0;
+    let available_width = ui.available_width().max(380.0);
+    let size = Vec2::new(available_width, desired_height);
+
+    let (rect, _response) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+
+    // Studio Rack Plate Housing
+    painter.rect_filled(rect, 8.0, BG_CARD);
+    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER_DARK));
+
+    let header_width = 46.0;
+    let wf_left = rect.min.x + header_width + 8.0;
+    let wf_right = rect.max.x - 12.0;
+    let wf_width = (wf_right - wf_left).max(10.0);
+
+    let wf_top = rect.min.y + 10.0;
+    let wf_bottom = wf_top + 92.0;
+    let wf_rect = Rect::from_min_max(Pos2::new(wf_left, wf_top), Pos2::new(wf_right, wf_bottom));
+
+    let ruler_top = wf_bottom + 4.0;
+    let ruler_bottom = ruler_top + 22.0;
+    let ruler_rect = Rect::from_min_max(Pos2::new(wf_left, ruler_top), Pos2::new(wf_right, ruler_bottom));
+
+    // Two Stereo Lanes
+    let lane_gap = 4.0;
+    let lane_h = (wf_rect.height() - lane_gap) * 0.5;
+
+    let lane_l_top = wf_rect.min.y;
+    let lane_l_bot = lane_l_top + lane_h;
+    let lane_l_center = lane_l_top + lane_h * 0.5;
+    let lane_l_rect = Rect::from_min_max(Pos2::new(wf_rect.min.x, lane_l_top), Pos2::new(wf_rect.max.x, lane_l_bot));
+
+    let lane_r_top = lane_l_bot + lane_gap;
+    let lane_r_bot = lane_r_top + lane_h;
+    let lane_r_center = lane_r_top + lane_h * 0.5;
+    let lane_r_rect = Rect::from_min_max(Pos2::new(wf_rect.min.x, lane_r_top), Pos2::new(wf_rect.max.x, lane_r_bot));
+
+    // Recessed track wells
+    draw_recessed_well(painter, lane_l_rect, 4.0, BG_INSET);
+    draw_recessed_well(painter, lane_r_rect, 4.0, BG_INSET);
+
+    // Track Header Badges on Left
+    let header_l = Rect::from_min_max(Pos2::new(rect.min.x + 8.0, lane_l_top), Pos2::new(rect.min.x + header_width, lane_l_bot));
+    draw_track_badge(painter, header_l, "L", WAVE_LEFT);
+    let header_r = Rect::from_min_max(Pos2::new(rect.min.x + 8.0, lane_r_top), Pos2::new(rect.min.x + header_width, lane_r_bot));
+    draw_track_badge(painter, header_r, "R", WAVE_RIGHT);
+
+    // Center baselines
+    painter.line_segment(
+        [Pos2::new(wf_rect.min.x, lane_l_center), Pos2::new(wf_rect.max.x, lane_l_center)],
+        Stroke::new(1.0, Color32::from_rgb(38, 42, 52)),
+    );
+    painter.line_segment(
+        [Pos2::new(wf_rect.min.x, lane_r_center), Pos2::new(wf_rect.max.x, lane_r_center)],
+        Stroke::new(1.0, Color32::from_rgb(38, 42, 52)),
+    );
+
+    // Timeline Ruler well
+    draw_recessed_well(painter, ruler_rect, 3.0, Color32::from_rgb(26, 27, 32));
+
+    let n_points = waveform_data.len();
+
+    if n_points == 0 || (!is_recording && elapsed_sec <= 0.0) {
+        painter.text(
+            wf_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            idle_text,
+            egui::FontId::proportional(13.0),
+            TEXT_MUTED,
+        );
+        return;
+    }
+
+    // Determine the full time scale
+    let total_span_sec = if let Some(limit) = timer_limit_sec {
+        if limit > 0.0 {
+            limit.max(elapsed_sec)
+        } else {
+            elapsed_sec.max(10.0)
+        }
+    } else {
+        elapsed_sec.max(10.0)
+    };
+
+    // Calculate playhead position
+    let playhead_frac = (elapsed_sec / total_span_sec).clamp(0.0, 1.0) as f32;
+    let playhead_x = wf_rect.min.x + playhead_frac * wf_width;
+
+    // Render Waveform columns up to playhead_x
+    let recorded_width = (playhead_x - wf_rect.min.x).max(1.0);
+    let bar_step = (recorded_width / n_points as f32).clamp(1.0, 4.0);
+    let columns = (recorded_width / bar_step).floor() as usize;
+
+    if columns > 0 && n_points > 0 {
+        for col in 0..columns {
+            let frac = col as f32 / columns as f32;
+            let pt_idx = ((frac * n_points as f32).floor() as usize).min(n_points - 1);
+            let pt = &waveform_data[pt_idx];
+            let x = wf_rect.min.x + col as f32 * bar_step;
+
+            // Lane L
+            let top_l = lane_l_center - (pt.max_l.clamp(0.0, 1.0) * (lane_h * 0.46));
+            let bot_l = lane_l_center - (pt.min_l.clamp(-1.0, 0.0) * (lane_h * 0.46));
+            painter.line_segment(
+                [Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))],
+                Stroke::new(bar_step.max(1.0), WAVE_LEFT),
+            );
+
+            // Lane R
+            let top_r = lane_r_center - (pt.max_r.clamp(0.0, 1.0) * (lane_h * 0.46));
+            let bot_r = lane_r_center - (pt.min_r.clamp(-1.0, 0.0) * (lane_h * 0.46));
+            painter.line_segment(
+                [Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))],
+                Stroke::new(bar_step.max(1.0), WAVE_RIGHT),
+            );
+        }
+    }
+
+    // Glowing REC Playhead
+    if is_recording {
+        let rec_col = Color32::from_rgb(239, 68, 68);
+        painter.line_segment(
+            [Pos2::new(playhead_x, wf_rect.min.y), Pos2::new(playhead_x, ruler_rect.max.y)],
+            Stroke::new(2.0, rec_col),
+        );
+
+        // Glowing red recording head top pill
+        let pill_rect = Rect::from_center_size(
+            Pos2::new(playhead_x, wf_rect.min.y + 4.0),
+            Vec2::new(10.0, 8.0),
+        );
+        painter.rect_filled(pill_rect, 2.0, rec_col);
+    }
+
+    // Ruler Ticks
+    let ruler_y = ruler_rect.min.y + 11.0;
+    let step_sec = if total_span_sec < 60.0 {
+        10.0
+    } else if total_span_sec < 300.0 {
+        30.0
+    } else if total_span_sec < 1200.0 {
+        120.0
+    } else if total_span_sec < 2700.0 {
+        300.0
+    } else {
+        600.0
+    };
+
+    let mut t = 0.0;
+    while t <= total_span_sec {
+        let frac = (t / total_span_sec) as f32;
+        let x = wf_rect.min.x + frac * wf_width;
+        if x <= wf_rect.max.x {
+            painter.line_segment(
+                [Pos2::new(x, ruler_rect.min.y + 1.0), Pos2::new(x, ruler_rect.min.y + 4.0)],
+                Stroke::new(1.0, Color32::from_rgb(80, 85, 100)),
+            );
+            let mins = (t / 60.0).floor() as u64;
+            let secs = (t % 60.0).floor() as u64;
+            painter.text(
+                Pos2::new(x, ruler_y),
+                egui::Align2::CENTER_CENTER,
+                format!("{:02}:{:02}", mins, secs),
+                egui::FontId::monospace(9.0),
+                TEXT_MUTED,
+            );
+        }
+        t += step_sec;
+    }
+}

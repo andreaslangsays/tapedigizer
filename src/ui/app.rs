@@ -490,7 +490,7 @@ impl eframe::App for TapeDigizerApp {
                     ui.add_space(4.0);
                     ui.label(RichText::new("TAPEDIGIZER").size(18.0).monospace().strong().color(LED_AMBER));
                     ui.label(RichText::new("PRO AUDIO TAPE CONSOLE").size(9.5).monospace().color(TEXT_MUTED));
-                    ui.label(RichText::new("v0.3.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
+                    ui.label(RichText::new("v0.4.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
 
                     // Right Side: Language Switcher + Logic Pro Inspired Center LCD Console
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -815,6 +815,35 @@ impl TapeDigizerApp {
                         });
                     });
                 }
+            });
+        });
+
+        ui.add_space(12.0);
+
+        // Rack Panel 4: Live Recording Waveform
+        render_hardware_rack_card(ui, self.language.card_live_waveform(), |ui| {
+            let is_recording = self.recorder.state() == RecorderState::Recording;
+            let elapsed_sec = self.recorder.elapsed_duration().as_secs_f64();
+            let timer_limit_sec = if self.selected_timer_minutes > 0 {
+                Some(self.selected_timer_minutes as f64 * 60.0)
+            } else {
+                None
+            };
+            let idle_text = if self.recorder.state() == RecorderState::Monitoring {
+                self.language.live_waveform_monitoring()
+            } else {
+                self.language.live_waveform_idle()
+            };
+
+            self.recorder.with_waveform_data(|wf| {
+                crate::ui::waveform_widget::render_live_recording_waveform(
+                    ui,
+                    wf,
+                    elapsed_sec,
+                    timer_limit_sec,
+                    is_recording,
+                    idle_text,
+                );
             });
         });
     }

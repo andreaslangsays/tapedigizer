@@ -218,6 +218,26 @@ impl Language {
             Language::En => "Auto-stop at tape end (stops when silence is detected for >= 15s after 30s)",
         }
     }
+
+    // Live Waveform (Tab 1)
+    pub fn card_live_waveform(&self) -> &'static str {
+        match self {
+            Language::De => "LIVE-WELLENFORM (ECHTZEIT-AUFZEICHNUNG)",
+            Language::En => "LIVE WAVEFORM (REAL-TIME RECORDING)",
+        }
+    }
+    pub fn live_waveform_idle(&self) -> &'static str {
+        match self {
+            Language::De => "Bereit zur Aufnahme — die Wellenform baut sich hier live während der Digitalisierung auf.",
+            Language::En => "Ready to record — the waveform will build here in real-time as audio is digitized.",
+        }
+    }
+    pub fn live_waveform_monitoring(&self) -> &'static str {
+        match self {
+            Language::De => "Pegel-Check aktiv — starte die Aufnahme, um das Signal aufzuzeichnen.",
+            Language::En => "Level check active — start recording to capture audio.",
+        }
+    }
     pub fn btn_start_recording(&self) -> &'static str {
         match self {
             Language::De => "REC | AUFNAHME STARTEN (24-BIT WAV)",

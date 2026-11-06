@@ -88,6 +88,15 @@ impl AudioRecorder {
         self.waveform_data.read().clone()
     }
 
+    pub fn with_waveform_data<R>(&self, f: impl FnOnce(&[StereoWaveformPoint]) -> R) -> R {
+        let guard = self.waveform_data.read();
+        f(&guard)
+    }
+
+    pub fn waveform_len(&self) -> usize {
+        self.waveform_data.read().len()
+    }
+
     pub fn recorded_samples(&self) -> usize {
         self.recorded_samples.load(Ordering::Relaxed)
     }
