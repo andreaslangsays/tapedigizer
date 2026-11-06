@@ -1,0 +1,19 @@
+[package]
+name = "tape_digizer"
+version = "0.2.1"
+edition = "2021"
+description = "Professional audio digitization tool for reel-to-reel and cassette tapes with Zoom LiveTrak L-12 support"
+license = "MIT"
+repository = "https://github.com/andreaslangsays/tapedigizer"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+cpal = "0.15"
+hound = "3.5"
+rfd = "0.15"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
