@@ -9,6 +9,7 @@ use crate::ui::theme::{
 pub enum EditTool {
     Pointer, // Standard: Klick in Wellenform/Ruler setzt Playhead, Marker-Fähnchen verschieben Marker
     Scissor, // ✂️ Scheren-Werkzeug: Klick setzt Trenner (Schnitt-Marker)
+    Select,  // ⬚ Bereichsauswahl: Ziehen wählt einen Zeitbereich für Lupe & Transienten aus
 }
 
 pub struct WaveformInteraction {
@@ -20,6 +21,7 @@ pub struct WaveformInteraction {
     pub mouse_pos_in_waveform: Option<Pos2>,
     pub is_mouse_over_waveform: bool,
     pub clicked_segment_idx: Option<usize>,
+    pub new_selected_region: Option<(f64, f64)>,
 }
 
 pub fn render_stereo_waveform(
@@ -30,6 +32,7 @@ pub fn render_stereo_waveform(
     markers: &[f64],
     pause_indices: &[usize],
     selected_marker_idx: &mut Option<usize>,
+    selected_region: Option<(f64, f64)>,
     zoom_factor: &mut f32,
     vertical_zoom: &mut f32,
     waveform_height: f32,
@@ -47,6 +50,7 @@ pub fn render_stereo_waveform(
         mouse_pos_in_waveform: None,
         is_mouse_over_waveform: false,
         clicked_segment_idx: None,
+        new_selected_region: None,
     };
 
     let desired_height = waveform_height.clamp(200.0, 520.0);
@@ -270,6 +274,29 @@ pub fn render_stereo_waveform(
         }
     }
 
+    // Highlight Selected Region (Lupe Scope Target Window)
+    if let Some((r_start, r_end)) = selected_region {
+        if total_duration_sec > 0.0 && r_end > r_start {
+            let rx1 = time_to_screen_x(r_start).clamp(wf_rect.min.x, wf_rect.max.x);
+            let rx2 = time_to_screen_x(r_end).clamp(wf_rect.min.x, wf_rect.max.x);
+            if rx2 > rx1 + 1.0 {
+                let reg_r = Rect::from_min_max(Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y));
+                painter.rect_filled(reg_r, 0.0, Color32::from_rgba_unmultiplied(255, 215, 0, 32));
+                painter.line_segment([Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx1, ruler_rect.max.y)], Stroke::new(2.0, Color32::from_rgb(255, 215, 0)));
+                painter.line_segment([Pos2::new(rx2, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y)], Stroke::new(2.0, Color32::from_rgb(255, 215, 0)));
+
+                // Region header badge
+                let span_sec = r_end - r_start;
+                let badge_w = 94.0_f32;
+                let badge_x = ((rx1 + rx2) * 0.5).clamp(wf_rect.min.x + badge_w * 0.5, wf_rect.max.x - badge_w * 0.5);
+                let badge_r = Rect::from_center_size(Pos2::new(badge_x, wf_rect.min.y + 12.0), Vec2::new(badge_w, 16.0));
+                painter.rect_filled(badge_r, 3.0, Color32::from_rgba_unmultiplied(30, 25, 8, 225));
+                painter.rect_stroke(badge_r, 3.0, Stroke::new(1.0, Color32::from_rgb(255, 215, 0)));
+                painter.text(badge_r.center(), egui::Align2::CENTER_CENTER, format!("🔍 LUPE: {:.2}s", span_sec), egui::FontId::monospace(8.5), Color32::from_rgb(255, 215, 0));
+            }
+        }
+    }
+
     // -------------------------------------------------------------
     // Render Dual Waveforms (with Vertical Amplitude Zoom)
     // -------------------------------------------------------------
@@ -429,6 +456,19 @@ pub fn render_stereo_waveform(
                         egui::FontId::monospace(8.5),
                         Color32::WHITE,
                     );
+                }
+            }
+        }
+
+        // Region indicator on overview bar
+        if let Some((r_start, r_end)) = selected_region {
+            if r_end > r_start {
+                let orx1 = overview_rect.min.x + (r_start / total_duration_sec) as f32 * ov_w;
+                let orx2 = overview_rect.min.x + (r_end / total_duration_sec) as f32 * ov_w;
+                if orx2 > orx1 + 1.0 {
+                    let ob_r = Rect::from_min_max(Pos2::new(orx1, overview_rect.min.y), Pos2::new(orx2, overview_rect.max.y));
+                    painter.rect_filled(ob_r, 2.0, Color32::from_rgba_unmultiplied(255, 215, 0, 90));
+                    painter.rect_stroke(ob_r, 2.0, Stroke::new(1.0, Color32::from_rgb(255, 215, 0)));
                 }
             }
         }
@@ -647,6 +687,8 @@ pub fn render_stereo_waveform(
                     egui::FontId::monospace(9.5),
                     LED_AMBER,
                 );
+            } else if active_tool == EditTool::Select || ui.input(|i| i.modifiers.shift) {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if hovered_marker_idx.is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
@@ -659,7 +701,8 @@ pub fn render_stereo_waveform(
     // Distinct Click & Drag Actions:
     // 1. Ruler: strictly sets Playhead
     // 2. Waveform in Scissor Mode: strictly adds Split Marker
-    // 3. Waveform in Pointer Mode: drag marker handle or seek playhead
+    // 3. Waveform in Select Mode (or Shift+Drag): selects Region for Lupe & Transients
+    // 4. Waveform in Pointer Mode: drag marker handle or seek playhead
     // -------------------------------------------------------------
     if response.clicked() || response.dragged() {
         if let Some(pos) = mouse_pos_opt {
@@ -671,10 +714,39 @@ pub fn render_stereo_waveform(
             }
             // B) Click in Waveform
             else if wf_rect.contains(pos) {
-                // In Scissor mode (or Shift/Cmd held): click places a marker
+                // In Scissor mode: click places a marker
                 if is_scissor {
                     if response.clicked() {
                         interaction.add_marker_at_seconds = Some(target_time);
+                    }
+                }
+                // In Select mode or with Shift held: drag selects a region for Lupe & Transients
+                else if active_tool == EditTool::Select || ui.input(|i| i.modifiers.shift) {
+                    if response.dragged() {
+                        if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                            let t_start = screen_x_to_time(origin.x);
+                            let t_curr = target_time;
+                            if (t_curr - t_start).abs() > 0.05 {
+                                interaction.new_selected_region = Some((t_start.min(t_curr), t_start.max(t_curr)));
+                            }
+                        }
+                    } else if response.clicked() {
+                        // Click in select mode selects the clicked track segment
+                        let mut blk = vec![0.0];
+                        for &m in markers {
+                            if m > 0.0 && m < total_duration_sec {
+                                blk.push(m);
+                            }
+                        }
+                        blk.push(total_duration_sec);
+                        for i in 0..blk.len() - 1 {
+                            if target_time >= blk[i] && target_time < blk[i + 1] {
+                                interaction.clicked_segment_idx = Some(i);
+                                interaction.new_selected_region = Some((blk[i], blk[i + 1]));
+                                break;
+                            }
+                        }
+                        interaction.seek_to_seconds = Some(target_time);
                     }
                 }
                 // In Pointer mode:
@@ -684,8 +756,21 @@ pub fn render_stereo_waveform(
                         interaction.dragged_marker = Some((m_idx, target_time));
                     }
                 } else if response.clicked() {
-                    // Regular click in waveform sets playhead
+                    // Regular click in waveform sets playhead and selects segment
                     interaction.seek_to_seconds = Some(target_time);
+                    let mut blk = vec![0.0];
+                    for &m in markers {
+                        if m > 0.0 && m < total_duration_sec {
+                            blk.push(m);
+                        }
+                    }
+                    blk.push(total_duration_sec);
+                    for i in 0..blk.len() - 1 {
+                        if target_time >= blk[i] && target_time < blk[i + 1] {
+                            interaction.clicked_segment_idx = Some(i);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -924,29 +1009,42 @@ pub fn render_live_recording_waveform(
     }
 }
 
+#[derive(Default)]
+pub struct ScopeInteraction {
+    pub clicked_transient_time: Option<f64>,
+    pub seek_to_time: Option<f64>,
+}
+
 pub fn render_detail_magnifier_scope(
     ui: &mut Ui,
     waveform_data: &[StereoWaveformPoint],
+    samples_l: &[f32],
+    samples_r: &[f32],
+    sample_rate: u32,
     total_duration_sec: f64,
-    center_time_sec: f64,
+    region: (f64, f64),
     markers: &[f64],
     selected_marker_idx: Option<usize>,
     vertical_zoom: f32,
-) {
-    let scope_h = 130.0;
+    transients: &[crate::splitter::TransientPoint],
+    current_playhead_sec: f64,
+) -> ScopeInteraction {
+    let mut interaction = ScopeInteraction::default();
+
+    let scope_h = 140.0;
     let available_w = ui.available_width().max(380.0);
     let size = Vec2::new(available_w, scope_h);
 
-    let (rect, _resp) = ui.allocate_exact_size(size, Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter();
 
     // Recessed dark oscilloscope plate
-    painter.rect_filled(rect, 6.0, Color32::from_rgb(15, 17, 22));
-    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_rgb(45, 50, 65)));
+    painter.rect_filled(rect, 6.0, Color32::from_rgb(14, 16, 22));
+    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_rgb(45, 52, 70)));
 
-    let window_span_sec = 3.0_f64; // +/- 1.5 seconds high resolution detail view
-    let start_t = (center_time_sec - window_span_sec * 0.5).max(0.0);
-    let end_t = (start_t + window_span_sec).min(total_duration_sec.max(0.1));
+    let start_t = region.0.max(0.0);
+    let end_t = region.1.min(total_duration_sec).max(start_t + 0.05);
+    let window_span_sec = (end_t - start_t).max(0.05);
 
     let header_w = 44.0;
     let scope_left = rect.min.x + header_w + 6.0;
@@ -954,7 +1052,7 @@ pub fn render_detail_magnifier_scope(
     let scope_w = (scope_right - scope_left).max(10.0);
 
     let scope_top = rect.min.y + 6.0;
-    let scope_wf_h = 82.0;
+    let scope_wf_h = 92.0;
     let scope_bottom = scope_top + scope_wf_h;
     let scope_rect = Rect::from_min_max(Pos2::new(scope_left, scope_top), Pos2::new(scope_right, scope_bottom));
 
@@ -978,21 +1076,37 @@ pub fn render_detail_magnifier_scope(
     draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 6.0, lane_l_top), Pos2::new(rect.min.x + header_w, lane_l_bot)), "L", WAVE_LEFT);
     draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 6.0, lane_r_top), Pos2::new(rect.min.x + header_w, lane_r_bot)), "R", WAVE_RIGHT);
 
-    // Grid lines every 250ms & 100ms
     let t_to_x = |t: f64| -> f32 {
         let frac = ((t - start_t) / window_span_sec).clamp(0.0, 1.0) as f32;
         scope_left + frac * scope_w
     };
 
-    let step_100ms = 0.1_f64;
-    let mut grid_t = (start_t / step_100ms).floor() * step_100ms;
+    let x_to_t = |x: f32| -> f64 {
+        let frac = ((x - scope_left) / scope_w).clamp(0.0, 1.0) as f64;
+        start_t + frac * window_span_sec
+    };
+
+    // Adaptive Grid lines
+    let (step_sub, step_major) = if window_span_sec <= 2.0 {
+        (0.05, 0.25)
+    } else if window_span_sec <= 8.0 {
+        (0.1, 0.5)
+    } else if window_span_sec <= 25.0 {
+        (0.5, 2.0)
+    } else {
+        (1.0, 5.0)
+    };
+
+    let mut grid_t = (start_t / step_sub).floor() * step_sub;
     while grid_t <= end_t {
         let gx = t_to_x(grid_t);
-        let is_major = (grid_t * 2.0).round() == (grid_t * 2.0); // every 500ms
+        let is_major = (grid_t / step_major).round() * step_major == grid_t
+            || ((grid_t / step_major) - (grid_t / step_major).round()).abs() < 0.001;
+
         let grid_stroke = if is_major {
-            Stroke::new(1.0, Color32::from_rgb(40, 46, 60))
+            Stroke::new(1.0, Color32::from_rgb(42, 48, 64))
         } else {
-            Stroke::new(0.5, Color32::from_rgb(26, 30, 40))
+            Stroke::new(0.5, Color32::from_rgb(24, 28, 38))
         };
         painter.line_segment([Pos2::new(gx, scope_rect.min.y), Pos2::new(gx, scope_rect.max.y)], grid_stroke);
 
@@ -1000,72 +1114,171 @@ pub fn render_detail_magnifier_scope(
             painter.line_segment([Pos2::new(gx, ruler_rect.min.y), Pos2::new(gx, ruler_rect.min.y + 4.0)], Stroke::new(1.0, Color32::from_rgb(90, 100, 120)));
             let m = (grid_t / 60.0).floor() as u64;
             let s = grid_t % 60.0;
+            let label = if window_span_sec <= 5.0 {
+                format!("{:02}:{:05.2}", m, s)
+            } else {
+                format!("{:02}:{:04.1}", m, s)
+            };
             painter.text(
                 Pos2::new(gx, ruler_rect.min.y + 6.0),
                 egui::Align2::CENTER_TOP,
-                format!("{:02}:{:04.1}", m, s),
+                label,
                 egui::FontId::monospace(8.5),
                 Color32::from_rgb(130, 140, 160),
             );
         }
-        grid_t += step_100ms;
+        grid_t += step_sub;
     }
 
-    // Render detailed waveform columns
-    let n_pts = waveform_data.len();
-    if n_pts > 0 && total_duration_sec > 0.0 {
-        let amp_scale = (vertical_zoom * 1.5).clamp(1.0, 24.0);
-        let pts_per_sec = n_pts as f64 / total_duration_sec;
-        let start_idx = ((start_t * pts_per_sec).floor() as usize).min(n_pts);
-        let end_idx = ((end_t * pts_per_sec).ceil() as usize).min(n_pts);
-        let visible_count = (end_idx - start_idx).max(1);
-        let col_w = (scope_w / visible_count as f32).clamp(1.0, 6.0);
+    let amp_scale = (vertical_zoom * 1.5).clamp(1.0, 32.0);
 
-        for (rel, p_idx) in (start_idx..end_idx).enumerate() {
-            let pt = &waveform_data[p_idx];
-            let x = scope_left + (rel as f32 / visible_count as f32) * scope_w;
+    // High-Resolution Waveform rendering
+    let has_raw_samples = !samples_l.is_empty() && sample_rate > 0;
+    if has_raw_samples {
+        let sr = sample_rate as f64;
+        let num_cols = (scope_w as usize).max(1);
+        let col_w = (scope_w / num_cols as f32).max(1.0);
 
-            let top_l = lane_l_center - ((pt.max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
-            let bot_l = lane_l_center - ((pt.min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
+        for c in 0..num_cols {
+            let x = scope_left + c as f32 * col_w;
+            let pt0 = start_t + (c as f64 / num_cols as f64) * window_span_sec;
+            let pt1 = start_t + ((c + 1) as f64 / num_cols as f64) * window_span_sec;
+
+            let s0 = ((pt0 * sr).max(0.0) as usize).min(samples_l.len());
+            let s1 = ((pt1 * sr).ceil() as usize).min(samples_l.len()).max(s0 + 1);
+
+            let mut min_l = 0.0_f32;
+            let mut max_l = 0.0_f32;
+            let mut min_r = 0.0_f32;
+            let mut max_r = 0.0_f32;
+
+            for i in s0..s1 {
+                let sl = samples_l[i];
+                let sr = samples_r[i];
+                if sl < min_l { min_l = sl; }
+                if sl > max_l { max_l = sl; }
+                if sr < min_r { min_r = sr; }
+                if sr > max_r { max_r = sr; }
+            }
+
+            let top_l = lane_l_center - ((max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
+            let bot_l = lane_l_center - ((min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
             painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))], Stroke::new(col_w, WAVE_LEFT));
 
-            let top_r = lane_r_center - ((pt.max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
-            let bot_r = lane_r_center - ((pt.min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
+            let top_r = lane_r_center - ((max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
+            let bot_r = lane_r_center - ((min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
             painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))], Stroke::new(col_w, WAVE_RIGHT));
+        }
+    } else {
+        // Fallback to waveform cache
+        let n_pts = waveform_data.len();
+        if n_pts > 0 && total_duration_sec > 0.0 {
+            let pts_per_sec = n_pts as f64 / total_duration_sec;
+            let start_idx = ((start_t * pts_per_sec).floor() as usize).min(n_pts);
+            let end_idx = ((end_t * pts_per_sec).ceil() as usize).min(n_pts);
+            let visible_count = (end_idx - start_idx).max(1);
+            let col_w = (scope_w / visible_count as f32).clamp(1.0, 6.0);
+
+            for (rel, p_idx) in (start_idx..end_idx).enumerate() {
+                let pt = &waveform_data[p_idx];
+                let x = scope_left + (rel as f32 / visible_count as f32) * scope_w;
+
+                let top_l = lane_l_center - ((pt.max_l * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
+                let bot_l = lane_l_center - ((pt.min_l * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
+                painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))], Stroke::new(col_w, WAVE_LEFT));
+
+                let top_r = lane_r_center - ((pt.max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.47));
+                let bot_r = lane_r_center - ((pt.min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.47));
+                painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))], Stroke::new(col_w, WAVE_RIGHT));
+            }
         }
     }
 
-    // Other markers in view
+    let mouse_pos = resp.hover_pos();
+
+    // Render Transient Spikes & Diamond Markers
+    for tp in transients {
+        if tp.time_sec >= start_t && tp.time_sec <= end_t {
+            let tx = t_to_x(tp.time_sec);
+            let is_hovered = mouse_pos.map(|p| (p.x - tx).abs() < 6.0 && scope_rect.contains(p)).unwrap_or(false);
+
+            let t_col = if is_hovered {
+                Color32::WHITE
+            } else {
+                Color32::from_rgb(255, 215, 0)
+            };
+
+            // Vertical transient spike
+            painter.line_segment(
+                [Pos2::new(tx, scope_rect.min.y), Pos2::new(tx, scope_rect.max.y)],
+                Stroke::new(if is_hovered { 1.8 } else { 1.2 }, t_col),
+            );
+
+            // Diamond head at the top
+            let d_pts = vec![
+                Pos2::new(tx, scope_rect.min.y + 1.0),
+                Pos2::new(tx + 4.0, scope_rect.min.y + 6.0),
+                Pos2::new(tx, scope_rect.min.y + 11.0),
+                Pos2::new(tx - 4.0, scope_rect.min.y + 6.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(d_pts, t_col, Stroke::NONE));
+
+            if is_hovered {
+                painter.circle_stroke(Pos2::new(tx, scope_rect.min.y + 6.0), 7.0, Stroke::new(1.5, Color32::WHITE));
+                let tm = (tp.time_sec / 60.0).floor() as u64;
+                let ts = tp.time_sec % 60.0;
+                let tip_tag = Rect::from_center_size(Pos2::new(tx, scope_rect.min.y + 24.0), Vec2::new(110.0, 18.0));
+                painter.rect_filled(tip_tag, 3.0, Color32::from_rgb(28, 24, 10));
+                painter.rect_stroke(tip_tag, 3.0, Stroke::new(1.0, Color32::from_rgb(255, 215, 0)));
+                painter.text(tip_tag.center(), egui::Align2::CENTER_CENTER, format!("⚡ {:02}:{:05.2}s", tm, ts), egui::FontId::monospace(9.0), Color32::from_rgb(255, 215, 0));
+
+                if resp.clicked() {
+                    interaction.clicked_transient_time = Some(tp.time_sec);
+                }
+            }
+        }
+    }
+
+    // Existing Markers in view
     for (m_i, &m) in markers.iter().enumerate() {
         if m >= start_t && m <= end_t {
             let mx = t_to_x(m);
             let is_sel = selected_marker_idx == Some(m_i);
             let col = if is_sel { Color32::from_rgb(255, 215, 0) } else { LED_AMBER };
-            painter.line_segment([Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)], Stroke::new(1.5, col));
+            painter.line_segment([Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)], Stroke::new(1.8, col));
+
+            let flag = Rect::from_center_size(Pos2::new(mx, scope_rect.min.y + 10.0), Vec2::new(32.0, 16.0));
+            painter.rect_filled(flag, 3.0, col);
+            painter.text(flag.center(), egui::Align2::CENTER_CENTER, format!("T{:02}", m_i + 2), egui::FontId::monospace(9.0), Color32::BLACK);
         }
     }
 
-    // Center Crosshair (Target Focus Line)
-    let center_x = t_to_x(center_time_sec);
-    painter.line_segment(
-        [Pos2::new(center_x, scope_rect.min.y), Pos2::new(center_x, ruler_rect.max.y)],
-        Stroke::new(2.0, LED_AMBER),
-    );
+    // Playhead indicator
+    if current_playhead_sec >= start_t && current_playhead_sec <= end_t {
+        let px = t_to_x(current_playhead_sec);
+        painter.line_segment(
+            [Pos2::new(px, scope_rect.min.y), Pos2::new(px, ruler_rect.max.y)],
+            Stroke::new(2.0, Color32::WHITE),
+        );
+        let tri = vec![
+            Pos2::new(px - 5.0, ruler_rect.min.y),
+            Pos2::new(px + 5.0, ruler_rect.min.y),
+            Pos2::new(px, ruler_rect.min.y + 8.0),
+        ];
+        painter.add(egui::Shape::convex_polygon(tri, Color32::WHITE, Stroke::NONE));
+    }
 
-    // Crosshair badge
-    let c_m = (center_time_sec / 60.0).floor() as u64;
-    let c_s = center_time_sec % 60.0;
-    let badge_rect = Rect::from_center_size(
-        Pos2::new(center_x.clamp(scope_left + 45.0, scope_right - 45.0), scope_rect.min.y + 10.0),
-        Vec2::new(96.0, 16.0),
-    );
-    painter.rect_filled(badge_rect, 3.0, Color32::from_rgb(30, 26, 12));
-    painter.rect_stroke(badge_rect, 3.0, Stroke::new(1.0, LED_AMBER));
-    painter.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        format!("{:02}:{:05.2}s", c_m, c_s),
-        egui::FontId::monospace(9.5),
-        LED_AMBER,
-    );
+    // Click/Drag interaction to seek or set target
+    if resp.clicked() {
+        if let Some(pos) = mouse_pos {
+            if scope_rect.contains(pos) || ruler_rect.contains(pos) {
+                let clicked_t = x_to_t(pos.x);
+                if interaction.clicked_transient_time.is_none() {
+                    interaction.seek_to_time = Some(clicked_t);
+                }
+            }
+        }
+    }
+
+    interaction
 }

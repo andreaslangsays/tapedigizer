@@ -32,10 +32,10 @@ fn app_icon() -> egui::IconData {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("TapeDigizer")
+            .with_title("TapeDigizer Pro — Studio Audio Digitization Console")
             .with_icon(app_icon())
-            .with_inner_size([960.0, 780.0])
-            .with_min_inner_size([820.0, 620.0]),
+            .with_inner_size([1140.0, 840.0])
+            .with_min_inner_size([960.0, 680.0]),
         ..Default::default()
     };
 

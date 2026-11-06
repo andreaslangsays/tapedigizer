@@ -425,6 +425,12 @@ impl Language {
             Language::En => "✂ SPLIT TOOL [S]",
         }
     }
+    pub fn btn_tool_select(&self) -> &'static str {
+        match self {
+            Language::De => "⬚ BEREICH WÄHLEN [R]",
+            Language::En => "⬚ SELECT RANGE [R]",
+        }
+    }
     pub fn btn_hover_on(&self) -> &'static str {
         match self {
             Language::De => "🎧 HOVER-VORHÖREN: AN [H]",
@@ -499,8 +505,50 @@ impl Language {
     }
     pub fn card_magnifier_scope(&self) -> &'static str {
         match self {
-            Language::De => "🔍 DETAIL-LUPENANSICHT (FOKUS ±1.5s SAMPLE-PRÄZISION)",
-            Language::En => "🔍 DETAIL MAGNIFIER (FOCUS ±1.5s SAMPLE PRECISION)",
+            Language::De => "🔍 LUPENANSICHT (SCOPE) & TRANSIENTEN-ANALYSE",
+            Language::En => "🔍 MAGNIFIER SCOPE & TRANSIENT ANALYSIS",
+        }
+    }
+    pub fn label_selected_region(&self) -> &'static str {
+        match self {
+            Language::De => "Ausgewählter Bereich",
+            Language::En => "Selected Region",
+        }
+    }
+    pub fn label_transients_detected(&self, count: usize) -> String {
+        match self {
+            Language::De => format!("⚡ {} Transienten", count),
+            Language::En => format!("⚡ {} Transients", count),
+        }
+    }
+    pub fn btn_play_region(&self) -> &'static str {
+        match self {
+            Language::De => "▶ Bereich abspielen",
+            Language::En => "▶ Play Region",
+        }
+    }
+    pub fn btn_cut_at_transient(&self) -> &'static str {
+        match self {
+            Language::De => "✂ Marker auf Transiente",
+            Language::En => "✂ Marker on Transient",
+        }
+    }
+    pub fn btn_full_track_region(&self) -> &'static str {
+        match self {
+            Language::De => "🔍 Ganzer Track",
+            Language::En => "🔍 Full Track",
+        }
+    }
+    pub fn label_sensitivity(&self) -> &'static str {
+        match self {
+            Language::De => "Transienten-Empfindlichkeit:",
+            Language::En => "Transient Sensitivity:",
+        }
+    }
+    pub fn btn_show_in_scope(&self) -> &'static str {
+        match self {
+            Language::De => "🔍 In Lupe",
+            Language::En => "🔍 In Scope",
         }
     }
     pub fn btn_make_pause(&self) -> &'static str {

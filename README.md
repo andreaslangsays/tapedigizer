@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version 1.0.0" />
+  <img src="https://img.shields.io/badge/version-1.1.0-blue.svg" alt="Version 1.1.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -26,9 +26,9 @@
 ### ✨ Hauptfunktionen
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
-   * **Kassetten-Metadaten & Projektordner vorab:** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Die Aufnahme landet direkt im finalen Projekt-Verzeichnis.
+   * **Kassetten-Metadaten & Projektordner vorab:** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Großzügige Eingabefelder und direkte Ordnerstruktur.
    * **Automatische Zwischensicherung vor Analyse:** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt sofort auf die Festplatte gesichert, noch bevor die Signal-Analyse startet – keine verlorenen Aufnahmen!
-   * **Menüleiste mit Dateidialogen:** Standardmäßige macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`) und *Hilfe*.
+   * **Menüleiste mit Dateidialogen & Tastenkürzel:** macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`), *Tab-Wechsel* (`⌘1`, `⌘2`, `⌘3`) und *Hilfe*.
    * **Live-Wellenform während der Aufnahme:** Visuelle Echtzeit-Darstellung des Audio-Signals (L & R getrennt), während das Band digitalisiert wird, inklusive dynamischem Playhead und Zeitleiste.
    * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Erkennt automatisch 14 Kanäle und schlägt standardmäßig **Kanäle 11/12 (Stereo Line)** für dein Kassettendeck vor (auch Kanäle 9/10, Master Mix 13/14 oder diskrete Kanalpaare wählbar).
    * **Echtzeit Studio LED-Kette:** 36-Segment-Stereometer (-60 bis 0 dBFS) mit Spitzenwertanzeige und Übersteuerungs-Warnung (CLIP).
@@ -40,14 +40,20 @@
    * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
    * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
 
-3. **✂️ Tab 3: Track-Schnitt & Mastering-Export (Neu in v1.0.0)**
-   * **Vertikale Wellenform-Skalierung & Pegel-Lupe (Neu in v1.0.0):**
-     * Einstellbare Wellenhöhe (220px, 300px, 420px) für gigantische Übersicht.
-     * Stufenloser **Vertikal-Zoom (1x bis 16x Pegel-Lupe)** über Schieberegler oder Tastenkombination **⇧⌥ + Mausrad**, um leise Passagen, Fade-Outs und Rauschteppiche kristallklar zu erkennen.
-   * **🔍 Dedizierte Detail-Lupenansicht (Scope) [Taste L] (Neu in v1.0.0):**
-     * Präzisions-Oszilloskopfenster mit ±1.5s Fokus um den Playhead oder Marker mit Millisekunden-Gitter (100ms/250ms).
-     * Direkte Micro-Nudge-Tasten (`-1s`, `-0.1s`, `-0.01s`, `+0.01s`, `+0.1s`, `+1s`) und 1-Sekunden-Vorhör-Funktion.
-   * **Gesamtansicht der geschnittenen Stücke (Track-Blöcke) (Neu in v1.0.0):**
+3. **✂️ Tab 3: Track-Schnitt, Lupenansicht & Transienten (Neu in v1.1.0)**
+   * **🔍 Lupenansicht mit Bereichsauswahl & Transienten-Analyse (Neu in v1.1.0):**
+     * **Freie Bereichsauswahl (`⬚ Bereich` Werkzeug / Taste `R` oder Shift-Ziehen):** Wähle einen beliebigen Zeitabschnitt der Wellenform aus, der sofort in der Lupe fokussiert wird.
+     * **Echte Sample-Präzision:** Liest direkt die rohen 24-Bit 48kHz PCM-Samples aus dem Speicher für Oszilloskop-Schärfe.
+     * **Automatische Transienten-Erkennung:** Findet Onsets, Snare- und Bassdrum-Schläge, Gesangseinsätze und Band-Einschnitte und markiert sie mit goldenen Diamant-Spikes (`◆`).
+     * **Klick-to-Marker:** Ein Klick auf eine Transiente setzt den Schnittmarker exakt auf den Attack-Punkt.
+     * **Bereichs-Wiedergabe:** Taste `▶ Bereich abspielen` spielt exakt den selektierten Bereich ab.
+   * **🎛️ Grundlegend überarbeitete Trackliste & Eingabeansicht (Neu in v1.1.0):**
+     * **Fixierte Spaltenköpfe:** Die Kopfzeile (`#`, `Titel`, `Start`, `Ende`, `Dauer`, `Aktionen`) bleibt beim Scrollen fest oben verankert.
+     * **Auto-expandierende Titel-Eingabe:** Das Songtitel-Feld ist dynamisch flexibel und garantiert mindestens 300px breit – kein Abschneiden von langen Track-Titeln mehr!
+     * **`🔍 In Lupe` Schnell-Button:** Öffnet jeden Track mit einem Klick sofort im Detail-Lupenfenster.
+     * **Feinjustierung (Nudging):** Präzise `◀` / `▶` Tasten am Start- und Endzeitpunkt jedes Titels.
+   * **Pausen-Ausschluss:** Stille-Passagen per Klick als `⏸ Weglassen` markieren oder automatisch mit `✂ Pausen ausschneiden & weglassen` erkennen.
+   * **Vertikale Wellenform-Skalierung:** 1x bis 16x Pegel-Lupe per Regler oder `⇧⌥ + Mausrad`, Wellenhöhe 220px, 300px, 420px.
      * Die Übersicht-Leiste und die Wellenform-Hintergründe stellen alle geschnittenen Stücke als farbige Blöcke (`#1`, `#2`, `#3`, `⏸`) dar.
      * Ein Klick auf einen Block in der Übersicht springt sofort zum entsprechenden Song.
    * **Pausen ausschneiden & weglassen (Neu in v1.0.0):**

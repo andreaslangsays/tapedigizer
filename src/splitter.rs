@@ -520,6 +520,102 @@ pub fn export_tracks<P: AsRef<Path>>(
     Ok(exported_files)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransientPoint {
+    pub time_sec: f64,
+    pub strength: f32, // 0.0 .. 1.0
+}
+
+/// Detects transient onsets (sharp attacks, drum hits, vocal starts) in a specific time range of audio.
+pub fn detect_transients_in_range(
+    samples_l: &[f32],
+    samples_r: &[f32],
+    sample_rate: u32,
+    start_sec: f64,
+    end_sec: f64,
+    sensitivity: f32,
+) -> Vec<TransientPoint> {
+    if sample_rate == 0 || samples_l.is_empty() || end_sec <= start_sec {
+        return Vec::new();
+    }
+
+    let sr = sample_rate as f64;
+    let s_idx = ((start_sec * sr).max(0.0) as usize).min(samples_l.len());
+    let e_idx = ((end_sec * sr).max(0.0) as usize).min(samples_l.len());
+    if e_idx <= s_idx {
+        return Vec::new();
+    }
+
+    // Analysis frame: ~5ms hop (240 samples @ 48kHz), ~10ms window (480 samples @ 48kHz)
+    let hop = (sample_rate as usize / 200).max(64);
+    let win = hop * 2;
+    let slice_l = &samples_l[s_idx..e_idx];
+    let slice_r = &samples_r[s_idx..e_idx];
+    let n_samples = slice_l.len();
+    if n_samples < win {
+        return Vec::new();
+    }
+
+    let n_frames = (n_samples - win) / hop + 1;
+    let mut energies = Vec::with_capacity(n_frames);
+
+    for f in 0..n_frames {
+        let offset = f * hop;
+        let mut sum_sq = 0.0_f32;
+        let l_sub = &slice_l[offset..offset + win];
+        let r_sub = &slice_r[offset..offset + win];
+        for (&sl, &sr) in l_sub.iter().zip(r_sub.iter()) {
+            sum_sq += sl * sl + sr * sr;
+        }
+        let rms = (sum_sq / (win as f32 * 2.0)).sqrt();
+        energies.push(rms);
+    }
+
+    // Onset strength: half-wave rectified energy difference
+    let mut onsets = Vec::with_capacity(energies.len());
+    onsets.push(0.0_f32);
+    for i in 1..energies.len() {
+        let diff = energies[i] - energies[i - 1];
+        onsets.push(diff.max(0.0));
+    }
+
+    // Moving average of onsets with adaptive thresholding
+    let sens = sensitivity.clamp(0.2, 5.0);
+    let thresh_multiplier = 1.5 / sens;
+    let min_energy_floor = 0.003 / sens;
+    let refractory_hops = ((sample_rate as usize * 30) / (1000 * hop)).max(2); // ~30ms refractory period
+
+    let mut transients = Vec::new();
+    let mut last_peak_hop = 0_usize;
+
+    for i in 2..onsets.len().saturating_sub(2) {
+        if energies[i] < min_energy_floor {
+            continue;
+        }
+        let o_curr = onsets[i];
+        if o_curr <= 0.001 {
+            continue;
+        }
+
+        // Local moving average
+        let start_k = i.saturating_sub(4);
+        let end_k = (i + 4).min(onsets.len() - 1);
+        let avg: f32 = onsets[start_k..=end_k].iter().sum::<f32>() / (end_k - start_k + 1) as f32;
+        let thresh = avg * thresh_multiplier + 0.003;
+
+        if o_curr > thresh && o_curr >= onsets[i - 1] && o_curr >= onsets[i + 1] {
+            if i >= last_peak_hop + refractory_hops || last_peak_hop == 0 {
+                let time_sec = start_sec + ((i * hop) as f64 / sr);
+                let strength = (o_curr / (o_curr + 0.04)).clamp(0.1, 1.0);
+                transients.push(TransientPoint { time_sec, strength });
+                last_peak_hop = i;
+            }
+        }
+    }
+
+    transients
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,5 +720,31 @@ mod tests {
         // Test nudge
         assert!(splitter.nudge_marker(0, 5.0, total_duration));
         assert!((splitter.markers[0] - 55.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_detect_transients() {
+        let sample_rate = 48000;
+        let num_samples = 48000 * 2; // 2 seconds
+        let mut samples_l = vec![0.0_f32; num_samples];
+        let mut samples_r = vec![0.0_f32; num_samples];
+
+        // Synthesize a silent track with two sharp transient bursts at 0.5s and 1.2s
+        let t1_idx = 48000 / 2; // 0.5s
+        for i in 0..400 {
+            samples_l[t1_idx + i] = 0.8 * (- (i as f32) / 100.0).exp();
+            samples_r[t1_idx + i] = 0.8 * (- (i as f32) / 100.0).exp();
+        }
+
+        let t2_idx = (48000.0 * 1.2) as usize; // 1.2s
+        for i in 0..400 {
+            samples_l[t2_idx + i] = 0.9 * (- (i as f32) / 100.0).exp();
+            samples_r[t2_idx + i] = 0.9 * (- (i as f32) / 100.0).exp();
+        }
+
+        let transients = detect_transients_in_range(&samples_l, &samples_r, sample_rate, 0.0, 2.0, 1.0);
+        assert!(transients.len() >= 2);
+        assert!((transients[0].time_sec - 0.5).abs() < 0.05);
+        assert!((transients[1].time_sec - 1.2).abs() < 0.05);
     }
 }
