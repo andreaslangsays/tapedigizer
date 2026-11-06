@@ -110,6 +110,99 @@ impl Language {
     }
 
     // Top Header & Navigation Tabs
+    pub fn menu_file(&self) -> &'static str {
+        match self {
+            Language::De => "Ablage",
+            Language::En => "File",
+        }
+    }
+    pub fn menu_new_project(&self) -> &'static str {
+        match self {
+            Language::De => "Neues Projekt",
+            Language::En => "New Project",
+        }
+    }
+    pub fn menu_open_project(&self) -> &'static str {
+        match self {
+            Language::De => "Projekt öffnen...",
+            Language::En => "Open Project...",
+        }
+    }
+    pub fn menu_save_project(&self) -> &'static str {
+        match self {
+            Language::De => "Projekt speichern",
+            Language::En => "Save Project",
+        }
+    }
+    pub fn menu_save_project_as(&self) -> &'static str {
+        match self {
+            Language::De => "Projekt speichern unter...",
+            Language::En => "Save Project As...",
+        }
+    }
+    pub fn menu_reveal_in_finder(&self) -> &'static str {
+        match self {
+            Language::De => "Aufnahme-Ordner im Finder zeigen",
+            Language::En => "Reveal Recording Folder in Finder",
+        }
+    }
+    pub fn menu_edit(&self) -> &'static str {
+        match self {
+            Language::De => "Bearbeiten",
+            Language::En => "Edit",
+        }
+    }
+    pub fn menu_undo(&self) -> &'static str {
+        match self {
+            Language::De => "Widerrufen",
+            Language::En => "Undo",
+        }
+    }
+    pub fn menu_redo(&self) -> &'static str {
+        match self {
+            Language::De => "Wiederholen",
+            Language::En => "Redo",
+        }
+    }
+    pub fn menu_help(&self) -> &'static str {
+        match self {
+            Language::De => "Hilfe",
+            Language::En => "Help",
+        }
+    }
+    pub fn menu_about(&self) -> &'static str {
+        match self {
+            Language::De => "Über TapeDigizer",
+            Language::En => "About TapeDigizer",
+        }
+    }
+
+    // Tape Metadata Card (Tab 1)
+    pub fn card_tape_metadata(&self) -> &'static str {
+        match self {
+            Language::De => "KASSETTEN-METADATEN & PROJEKT-SPEICHERORT",
+            Language::En => "CASSETTE METADATA & PROJECT FOLDER",
+        }
+    }
+    pub fn label_project_folder(&self) -> &'static str {
+        match self {
+            Language::De => "Projekt-Ordner:",
+            Language::En => "Project Folder:",
+        }
+    }
+    pub fn btn_change_folder(&self) -> &'static str {
+        match self {
+            Language::De => "Ordner wählen...",
+            Language::En => "Choose Folder...",
+        }
+    }
+    pub fn hint_auto_saved(&self) -> &'static str {
+        match self {
+            Language::De => "Automatische Zwischenspeicherung sofort bei Aufnahme-Stopp",
+            Language::En => "Auto-saved as project immediately when recording stops",
+        }
+    }
+
     pub fn tab_recording(&self) -> &'static str {
         match self {
             Language::De => "1. AUFNAHME & PEGEL",

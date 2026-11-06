@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use egui::{Color32, Pos2, Rect, RichText, Stroke, Ui, Vec2};
 use crate::analysis::{analyze_wav_file, AudioAnalysisReport, LevelDiagnosis};
@@ -32,6 +32,7 @@ pub struct TapeDigizerApp {
     pub tape_name: String,
     pub tape_side: TapeSide,
     pub current_project_path: Option<PathBuf>,
+    pub current_audio_path: Option<PathBuf>,
 
     // Marker Delete Confirmation
     pub pending_delete_marker: Option<(usize, f64, String)>,
@@ -162,6 +163,7 @@ impl TapeDigizerApp {
             tape_name,
             tape_side: TapeSide::SideA,
             current_project_path: None,
+            current_audio_path: None,
             pending_delete_marker: None,
             active_tab: ActiveTab::Recording,
             available_devices: devices,
@@ -223,6 +225,118 @@ impl TapeDigizerApp {
         self.export_directory.join(tape_dir).join(side_dir)
     }
 
+    pub fn session_project_dir(&self) -> PathBuf {
+        let tape_safe = sanitize_filename(&self.tape_name);
+        self.export_directory.join(tape_safe)
+    }
+
+    pub fn current_recording_path(&self) -> PathBuf {
+        let session_dir = self.session_project_dir();
+        let _ = std::fs::create_dir_all(&session_dir);
+        let side_str = self.tape_side.folder_name(Language::En);
+        let filename = format!("{}_{}.wav", sanitize_filename(&self.tape_name), side_str);
+        session_dir.join(filename)
+    }
+
+    pub fn save_project_quick(&mut self) {
+        if let Some(path) = self.current_project_path.clone() {
+            self.save_project_to_path(&path);
+        } else {
+            self.save_project_dialog();
+        }
+    }
+
+    pub fn save_project_to_path(&mut self, path: &Path) {
+        let norm_str = match self.normalization_mode {
+            NormalizationMode::None => "none",
+            NormalizationMode::PeakPerTrack => "track",
+            NormalizationMode::PeakAlbum => "album",
+        };
+        let rec_wav = self.current_recording_path();
+        let temp_wav = self.temp_record_path();
+        let session_wav = if let Some(ref p) = self.current_audio_path {
+            if p.exists() {
+                Some(p.as_path())
+            } else if rec_wav.exists() {
+                Some(rec_wav.as_path())
+            } else if temp_wav.exists() {
+                Some(temp_wav.as_path())
+            } else {
+                None
+            }
+        } else if rec_wav.exists() {
+            Some(rec_wav.as_path())
+        } else if temp_wav.exists() {
+            Some(temp_wav.as_path())
+        } else {
+            None
+        };
+
+        let proj = TapeDigizerProject::new(
+            self.tape_name.clone(),
+            self.tape_side,
+            session_wav.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().to_string(),
+            self.splitter.markers.clone(),
+            self.splitter.custom_titles.clone(),
+            norm_str.to_string(),
+        );
+
+        match proj.save_to_file(path, session_wav) {
+            Ok(saved_path) => {
+                self.current_project_path = Some(saved_path.clone());
+                let msg = if self.language == Language::De {
+                    format!("Projekt gespeichert: {}", saved_path.file_name().unwrap_or_default().to_string_lossy())
+                } else {
+                    format!("Project saved: {}", saved_path.file_name().unwrap_or_default().to_string_lossy())
+                };
+                self.export_status_message = Some((true, msg));
+            }
+            Err(e) => {
+                let err = if self.language == Language::De {
+                    format!("Fehler beim Speichern: {}", e)
+                } else {
+                    format!("Error saving project: {}", e)
+                };
+                self.export_status_message = Some((false, err));
+            }
+        }
+    }
+
+    pub fn new_project(&mut self) {
+        self.player.stop();
+        self.recorder.stop_monitoring();
+        self.recorder.stop_recording();
+        self.tape_name = if self.language == Language::De { "Neues Tonband".into() } else { "New Tape".into() };
+        self.tape_side = TapeSide::SideA;
+        self.current_project_path = None;
+        self.current_audio_path = None;
+        self.analysis_report = None;
+        self.waveform_cache.clear();
+        self.splitter.clear_markers();
+        self.splitter.custom_titles.clear();
+        self.active_tab = ActiveTab::Recording;
+        self.ui_error_message = None;
+        self.export_status_message = Some((
+            true,
+            if self.language == Language::De { "Neues Projekt initialisiert.".into() } else { "New project initialized.".into() }
+        ));
+    }
+
+    pub fn reveal_session_in_finder(&self) {
+        let path_to_open = if let Some(ref p) = self.current_project_path {
+            p.parent().unwrap_or(&self.export_directory).to_path_buf()
+        } else {
+            let session_dir = self.session_project_dir();
+            if session_dir.exists() {
+                session_dir
+            } else {
+                self.export_directory.clone()
+            }
+        };
+        let _ = std::fs::create_dir_all(&path_to_open);
+        let _ = std::process::Command::new("open").arg(&path_to_open).spawn();
+    }
+
     pub fn save_project_dialog(&mut self) {
         let suggested_filename = format!(
             "{}_{}.tapedigizer",
@@ -238,43 +352,16 @@ impl TapeDigizerApp {
                 dialog = dialog.set_directory(parent);
             }
         } else {
-            dialog = dialog.set_directory(&self.export_directory);
+            let session_dir = self.session_project_dir();
+            if session_dir.exists() {
+                dialog = dialog.set_directory(&session_dir);
+            } else {
+                dialog = dialog.set_directory(&self.export_directory);
+            }
         }
 
         if let Some(path) = dialog.save_file() {
-            let norm_str = match self.normalization_mode {
-                NormalizationMode::None => "none",
-                NormalizationMode::PeakPerTrack => "track",
-                NormalizationMode::PeakAlbum => "album",
-            };
-            let proj = TapeDigizerProject::new(
-                self.tape_name.clone(),
-                self.tape_side,
-                "".to_string(),
-                self.splitter.markers.clone(),
-                self.splitter.custom_titles.clone(),
-                norm_str.to_string(),
-            );
-            let session_wav = self.temp_record_path();
-            match proj.save_to_file(&path, Some(&session_wav)) {
-                Ok(saved_path) => {
-                    self.current_project_path = Some(saved_path.clone());
-                    let msg = if self.language == Language::De {
-                        format!("Projekt gespeichert: {}", saved_path.file_name().unwrap_or_default().to_string_lossy())
-                    } else {
-                        format!("Project saved: {}", saved_path.file_name().unwrap_or_default().to_string_lossy())
-                    };
-                    self.export_status_message = Some((true, msg));
-                }
-                Err(e) => {
-                    let err = if self.language == Language::De {
-                        format!("Fehler beim Speichern: {}", e)
-                    } else {
-                        format!("Error saving project: {}", e)
-                    };
-                    self.export_status_message = Some((false, err));
-                }
-            }
+            self.save_project_to_path(&path);
         }
     }
 
@@ -295,6 +382,7 @@ impl TapeDigizerApp {
                         _ => NormalizationMode::None,
                     };
                     self.current_project_path = Some(path);
+                    self.current_audio_path = Some(audio_path.clone());
 
                     if let Err(e) = self.player.load_file(&audio_path) {
                         eprintln!("Fehler beim Laden im Player: {}", e);
@@ -364,38 +452,99 @@ impl TapeDigizerApp {
     }
 
     fn finish_recording_and_analyze(&mut self) {
+        let rec_path = self.current_recording_path();
         let temp_path = self.temp_record_path();
-        if temp_path.exists() {
-            match analyze_wav_file(&temp_path) {
-                Ok(report) => {
-                    self.analysis_report = Some(report);
-                    self.ui_error_message = None;
-                    self.active_tab = ActiveTab::Diagnosis;
-                }
-                Err(e) => {
-                    self.ui_error_message = Some(format!("Analyse-Fehler: {}", e));
-                    self.active_tab = ActiveTab::Diagnosis;
-                }
+        let target_path = if let Some(ref p) = self.current_audio_path {
+            if p.exists() {
+                p.clone()
+            } else if rec_path.exists() {
+                rec_path
+            } else if temp_path.exists() {
+                temp_path
+            } else {
+                rec_path
             }
-
-            if let Err(e) = self.player.load_file(&temp_path) {
-                eprintln!("Fehler beim Laden im Player: {}", e);
-            }
-
-            self.waveform_cache = self.recorder.get_waveform_data();
-            if self.waveform_cache.is_empty() {
-                self.waveform_cache = generate_stereo_waveform_from_samples(
-                    &self.player.get_samples_l(),
-                    &self.player.get_samples_r(),
-                    self.player.total_samples(),
-                );
-            }
-
-            self.splitter.clear_markers();
+        } else if rec_path.exists() {
+            rec_path
+        } else if temp_path.exists() {
+            temp_path
         } else {
-            self.ui_error_message = Some("Aufnahmedatei wurde nicht auf der Festplatte gefunden.".into());
+            self.ui_error_message = Some(if self.language == Language::De {
+                "Aufnahmedatei wurde nicht auf der Festplatte gefunden.".into()
+            } else {
+                "Recording file was not found on disk.".into()
+            });
             self.active_tab = ActiveTab::Diagnosis;
+            return;
+        };
+
+        if !target_path.exists() {
+            self.ui_error_message = Some(if self.language == Language::De {
+                "Aufnahmedatei wurde nicht auf der Festplatte gefunden.".into()
+            } else {
+                "Recording file was not found on disk.".into()
+            });
+            self.active_tab = ActiveTab::Diagnosis;
+            return;
         }
+
+        self.current_audio_path = Some(target_path.clone());
+
+        // 1. VOR DER ANALYSE: Projekt sofort automatisch auf Festplatte sichern!
+        let session_dir = self.session_project_dir();
+        let _ = std::fs::create_dir_all(&session_dir);
+        let auto_proj_filename = format!(
+            "{}_{}.tapedigizer",
+            sanitize_filename(&self.tape_name),
+            self.tape_side.folder_name(Language::En)
+        );
+        let auto_proj_path = session_dir.join(&auto_proj_filename);
+        let norm_str = match self.normalization_mode {
+            NormalizationMode::None => "none",
+            NormalizationMode::PeakPerTrack => "track",
+            NormalizationMode::PeakAlbum => "album",
+        };
+        let proj = TapeDigizerProject::new(
+            self.tape_name.clone(),
+            self.tape_side,
+            target_path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+            self.splitter.markers.clone(),
+            self.splitter.custom_titles.clone(),
+            norm_str.to_string(),
+        );
+        if let Ok(saved) = proj.save_to_file(&auto_proj_path, Some(&target_path)) {
+            self.current_project_path = Some(saved);
+        }
+
+        // 2. Analyse durchführen
+        match analyze_wav_file(&target_path) {
+            Ok(report) => {
+                self.analysis_report = Some(report);
+                self.ui_error_message = None;
+                self.active_tab = ActiveTab::Diagnosis;
+            }
+            Err(e) => {
+                self.ui_error_message = Some(format!("Analyse-Fehler: {}", e));
+                self.active_tab = ActiveTab::Diagnosis;
+            }
+        }
+
+        // 3. Audio in Player laden
+        if let Err(e) = self.player.load_file(&target_path) {
+            eprintln!("Fehler beim Laden im Player: {}", e);
+        }
+
+        // 4. Wellenform-Cache übernehmen
+        self.waveform_cache = self.recorder.get_waveform_data();
+        if self.waveform_cache.is_empty() {
+            self.waveform_cache = generate_stereo_waveform_from_samples(
+                &self.player.get_samples_l(),
+                &self.player.get_samples_r(),
+                self.player.total_samples(),
+            );
+        }
+
+        self.splitter.clear_markers();
     }
 }
 
@@ -414,9 +563,10 @@ impl eframe::App for TapeDigizerApp {
         }
 
         // Global Command Shortcuts - read all keys in a single lock-free query
-        let (cmd, shift, key_s, key_o, key_z, key_y, key_space, key_m, key_h, key_c, key_v, key_esc, key_del) = ctx.input(|i| (
+        let (cmd, shift, key_n, key_s, key_o, key_z, key_y, key_space, key_m, key_h, key_c, key_v, key_esc, key_del) = ctx.input(|i| (
             i.modifiers.command,
             i.modifiers.shift,
+            i.key_pressed(egui::Key::N),
             i.key_pressed(egui::Key::S),
             i.key_pressed(egui::Key::O),
             i.key_pressed(egui::Key::Z),
@@ -430,8 +580,15 @@ impl eframe::App for TapeDigizerApp {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
         ));
 
+        if cmd && key_n {
+            self.new_project();
+        }
         if cmd && key_s {
-            self.save_project_dialog();
+            if shift {
+                self.save_project_dialog();
+            } else {
+                self.save_project_quick();
+            }
         }
         if cmd && key_o {
             self.open_project_dialog();
@@ -491,6 +648,56 @@ impl eframe::App for TapeDigizerApp {
             }
         }
 
+        // Top Application Menu Bar (Ablage / File, Bearbeiten / Edit, etc.)
+        egui::TopBottomPanel::top("app_menu_bar")
+            .frame(egui::Frame::none().fill(Color32::from_rgb(20, 22, 26)).inner_margin(egui::Margin { left: 12.0, right: 12.0, top: 4.0, bottom: 4.0 }))
+            .show(ctx, |ui| {
+                egui::menu::bar(ui, |ui| {
+                    ui.menu_button(self.language.menu_file(), |ui| {
+                        if ui.button(format!("{} (⌘N)", self.language.menu_new_project())).clicked() {
+                            self.new_project();
+                            ui.close_menu();
+                        }
+                        if ui.button(format!("{} (⌘O)", self.language.menu_open_project())).clicked() {
+                            self.open_project_dialog();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button(format!("{} (⌘S)", self.language.menu_save_project())).clicked() {
+                            self.save_project_quick();
+                            ui.close_menu();
+                        }
+                        if ui.button(format!("{} (⇧⌘S)", self.language.menu_save_project_as())).clicked() {
+                            self.save_project_dialog();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button(self.language.menu_reveal_in_finder()).clicked() {
+                            self.reveal_session_in_finder();
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button(self.language.menu_edit(), |ui| {
+                        if ui.button(format!("{} (⌘Z)", self.language.menu_undo())).clicked() {
+                            self.splitter.undo();
+                            ui.close_menu();
+                        }
+                        if ui.button(format!("{} (⇧⌘Z)", self.language.menu_redo())).clicked() {
+                            self.splitter.redo();
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button(self.language.menu_help(), |ui| {
+                        if ui.button(self.language.menu_about()).clicked() {
+                            self.export_status_message = Some((true, "TapeDigizer v0.5.0 — High-fidelity Audio Digitization Console".into()));
+                            ui.close_menu();
+                        }
+                    });
+                });
+            });
+
         // Top Studio Header (Matches macOS Dark Window Decoration)
         egui::TopBottomPanel::top("top_header")
             .frame(egui::Frame::none().fill(BG_WINDOW).inner_margin(12.0))
@@ -503,7 +710,7 @@ impl eframe::App for TapeDigizerApp {
                     ui.add_space(4.0);
                     ui.label(RichText::new("TAPEDIGIZER").size(18.0).monospace().strong().color(LED_AMBER));
                     ui.label(RichText::new("PRO AUDIO TAPE CONSOLE").size(9.5).monospace().color(TEXT_MUTED));
-                    ui.label(RichText::new("v0.4.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
+                    ui.label(RichText::new("v0.5.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
 
                     // Right Side: Language Switcher + Logic Pro Inspired Center LCD Console
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -626,6 +833,72 @@ impl TapeDigizerApp {
     // -------------------------------------------------------------
     fn render_tab_recording(&mut self, ui: &mut Ui) {
         ui.add_space(2.0);
+
+        // Rack Panel 0: Cassette Metadata & Project Location
+        render_hardware_rack_card(ui, self.language.card_tape_metadata(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.language.label_tape_name()).color(TEXT_SECONDARY).strong());
+                let name_edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.tape_name)
+                        .desired_width(220.0)
+                        .hint_text(self.language.hint_tape_name())
+                );
+                if name_edit.changed() {
+                    self.save_config();
+                }
+
+                ui.add_space(14.0);
+                ui.label(RichText::new(self.language.label_tape_side()).color(TEXT_SECONDARY).strong());
+
+                let is_side_a = self.tape_side == TapeSide::SideA;
+                let btn_a = egui::Button::new(
+                    RichText::new(format!("● {}", TapeSide::SideA.label(self.language)))
+                        .strong()
+                        .color(if is_side_a { Color32::WHITE } else { TEXT_MUTED })
+                )
+                .fill(if is_side_a { Color32::from_rgb(37, 99, 235) } else { Color32::from_rgb(38, 38, 44) })
+                .stroke(Stroke::new(1.0, if is_side_a { Color32::from_rgb(96, 165, 250) } else { BORDER_MID }))
+                .rounding(4.0);
+
+                if ui.add(btn_a).clicked() {
+                    self.tape_side = TapeSide::SideA;
+                }
+
+                let is_side_b = self.tape_side == TapeSide::SideB;
+                let btn_b = egui::Button::new(
+                    RichText::new(format!("● {}", TapeSide::SideB.label(self.language)))
+                        .strong()
+                        .color(if is_side_b { Color32::BLACK } else { TEXT_MUTED })
+                )
+                .fill(if is_side_b { LED_AMBER } else { Color32::from_rgb(38, 38, 44) })
+                .stroke(Stroke::new(1.0, if is_side_b { Color32::WHITE } else { BORDER_MID }))
+                .rounding(4.0);
+
+                if ui.add(btn_b).clicked() {
+                    self.tape_side = TapeSide::SideB;
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.language.label_project_folder()).color(TEXT_MUTED));
+                let folder_display = self.session_project_dir();
+                ui.label(RichText::new(format!("📁 {}", folder_display.to_string_lossy())).color(Color32::from_rgb(56, 189, 248)).monospace().small());
+
+                if ui.button(self.language.btn_change_folder()).clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.export_directory = folder;
+                        self.save_config();
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("🛡️ {}", self.language.hint_auto_saved())).color(LED_GREEN).small().italics());
+                });
+            });
+        });
+
+        ui.add_space(12.0);
 
         // Rack Panel 1: Hardware Input Routing
         render_hardware_rack_card(ui, self.language.card_audio_routing(), |ui| {
@@ -770,7 +1043,8 @@ impl TapeDigizerApp {
                                 None
                             };
 
-                            let target_path = self.temp_record_path();
+                            let target_path = self.current_recording_path();
+                            self.current_audio_path = Some(target_path.clone());
                             let silence_stop = self.enable_silence_autostop;
                             if let Err(e) = self.recorder.start_recording(
                                 &name,
@@ -1481,7 +1755,12 @@ impl TapeDigizerApp {
             .min_size(Vec2::new(380.0, 42.0));
 
             if ui.add_enabled(export_enabled, export_btn).clicked() {
-                let src_file = self.temp_record_path();
+                let src_file = self.current_audio_path.clone().filter(|p| p.exists())
+                    .or_else(|| {
+                        let p = self.current_recording_path();
+                        if p.exists() { Some(p) } else { None }
+                    })
+                    .unwrap_or_else(|| self.temp_record_path());
                 let target_dir = self.effective_export_directory();
                 let _ = std::fs::create_dir_all(&target_dir);
 
@@ -1629,6 +1908,7 @@ mod tests {
             tape_name: "Test Tape".into(),
             tape_side: TapeSide::SideA,
             current_project_path: None,
+            current_audio_path: None,
             pending_delete_marker: None,
             active_tab: ActiveTab::Recording,
             available_devices: Vec::new(),

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.0-blue.svg" alt="Version 0.4.0" />
+  <img src="https://img.shields.io/badge/version-0.5.0-blue.svg" alt="Version 0.5.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -26,7 +26,10 @@
 ### ✨ Hauptfunktionen
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
-   * **Live-Wellenform während der Aufnahme (Neu in v0.4.0):** Visuelle Echtzeit-Darstellung des Audio-Signals (L & R getrennt), während das Band digitalisiert wird, inklusive dynamischem Playhead und Zeitleiste.
+   * **Kassetten-Metadaten & Projektordner vorab (Neu in v0.5.0):** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Die Aufnahme landet direkt im finalen Projekt-Verzeichnis.
+   * **Automatische Zwischensicherung vor Analyse (Neu in v0.5.0):** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt sofort auf die Festplatte gesichert, noch bevor die Signal-Analyse startet – keine verlorenen Aufnahmen!
+   * **Menüleiste mit Dateidialogen (Neu in v0.5.0):** Standardmäßige macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`) und *Hilfe*.
+   * **Live-Wellenform während der Aufnahme:** Visuelle Echtzeit-Darstellung des Audio-Signals (L & R getrennt), während das Band digitalisiert wird, inklusive dynamischem Playhead und Zeitleiste.
    * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Erkennt automatisch 14 Kanäle und schlägt standardmäßig **Kanäle 11/12 (Stereo Line)** für dein Kassettendeck vor (auch Kanäle 9/10, Master Mix 13/14 oder diskrete Kanalpaare wählbar).
    * **Echtzeit Studio LED-Kette:** 36-Segment-Stereometer (-60 bis 0 dBFS) mit Spitzenwertanzeige und Übersteuerungs-Warnung (CLIP).
    * **Vorab-Pegelcheck:** Überprüfe und justiere den Eingangspegel ohne Datei-Aufzeichnung.
