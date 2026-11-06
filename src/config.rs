@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub silence_autostop: Option<bool>,
     pub normalization_mode: Option<String>,
     pub language: Option<Language>,
+    pub last_tape_name: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -25,6 +26,7 @@ impl Default for AppConfig {
             silence_autostop: Some(true),
             normalization_mode: Some("none".into()),
             language: Some(Language::De),
+            last_tape_name: Some("Tonband 01".into()),
         }
     }
 }

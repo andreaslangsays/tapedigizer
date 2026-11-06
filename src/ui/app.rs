@@ -14,6 +14,7 @@ use crate::ui::theme::{
     TEXT_PRIMARY, TEXT_SECONDARY,
 };
 use crate::i18n::Language;
+use crate::project::{sanitize_filename, TapeDigizerProject, TapeSide};
 use crate::ui::waveform_widget::{render_stereo_waveform, EditTool};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -26,6 +27,14 @@ pub enum ActiveTab {
 pub struct TapeDigizerApp {
     // Internationalization
     pub language: Language,
+
+    // Tape & Album Organization
+    pub tape_name: String,
+    pub tape_side: TapeSide,
+    pub current_project_path: Option<PathBuf>,
+
+    // Marker Delete Confirmation
+    pub pending_delete_marker: Option<(usize, f64, String)>,
 
     // Current Navigation Tab
     active_tab: ActiveTab,
@@ -146,9 +155,14 @@ impl TapeDigizerApp {
         };
 
         let lang = cfg.language.unwrap_or(Language::De);
+        let tape_name = cfg.last_tape_name.clone().unwrap_or_else(|| "Tonband 01".to_string());
 
         let app = Self {
             language: lang,
+            tape_name,
+            tape_side: TapeSide::SideA,
+            current_project_path: None,
+            pending_delete_marker: None,
             active_tab: ActiveTab::Recording,
             available_devices: devices,
             selected_device_idx: selected_dev_idx,
@@ -198,8 +212,117 @@ impl TapeDigizerApp {
             silence_autostop: Some(self.enable_silence_autostop),
             normalization_mode: Some(norm_str.to_string()),
             language: Some(self.language),
+            last_tape_name: Some(self.tape_name.clone()),
         };
         cfg.save();
+    }
+
+    pub fn effective_export_directory(&self) -> PathBuf {
+        let tape_dir = sanitize_filename(&self.tape_name);
+        let side_dir = self.tape_side.folder_name(self.language);
+        self.export_directory.join(tape_dir).join(side_dir)
+    }
+
+    pub fn save_project_dialog(&mut self) {
+        let suggested_filename = format!(
+            "{}_{}.tapedigizer",
+            sanitize_filename(&self.tape_name),
+            self.tape_side.folder_name(Language::En)
+        );
+        let mut dialog = rfd::FileDialog::new()
+            .set_file_name(&suggested_filename)
+            .add_filter("TapeDigizer Project", &["tapedigizer"]);
+
+        if let Some(ref current) = self.current_project_path {
+            if let Some(parent) = current.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        } else {
+            dialog = dialog.set_directory(&self.export_directory);
+        }
+
+        if let Some(path) = dialog.save_file() {
+            let norm_str = match self.normalization_mode {
+                NormalizationMode::None => "none",
+                NormalizationMode::PeakPerTrack => "track",
+                NormalizationMode::PeakAlbum => "album",
+            };
+            let proj = TapeDigizerProject::new(
+                self.tape_name.clone(),
+                self.tape_side,
+                "".to_string(),
+                self.splitter.markers.clone(),
+                self.splitter.custom_titles.clone(),
+                norm_str.to_string(),
+            );
+            let session_wav = self.temp_record_path();
+            match proj.save_to_file(&path, Some(&session_wav)) {
+                Ok(saved_path) => {
+                    self.current_project_path = Some(saved_path.clone());
+                    let msg = if self.language == Language::De {
+                        format!("Projekt gespeichert: {}", saved_path.file_name().unwrap_or_default().to_string_lossy())
+                    } else {
+                        format!("Project saved: {}", saved_path.file_name().unwrap_or_default().to_string_lossy())
+                    };
+                    self.export_status_message = Some((true, msg));
+                }
+                Err(e) => {
+                    let err = if self.language == Language::De {
+                        format!("Fehler beim Speichern: {}", e)
+                    } else {
+                        format!("Error saving project: {}", e)
+                    };
+                    self.export_status_message = Some((false, err));
+                }
+            }
+        }
+    }
+
+    pub fn open_project_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("TapeDigizer Project", &["tapedigizer"]);
+
+        if let Some(path) = dialog.pick_file() {
+            match TapeDigizerProject::load_from_file(&path) {
+                Ok((proj, audio_path)) => {
+                    self.tape_name = proj.tape_name;
+                    self.tape_side = proj.tape_side;
+                    self.splitter.markers = proj.markers;
+                    self.splitter.custom_titles = proj.custom_titles;
+                    self.normalization_mode = match proj.normalization_mode.as_str() {
+                        "track" => NormalizationMode::PeakPerTrack,
+                        "album" => NormalizationMode::PeakAlbum,
+                        _ => NormalizationMode::None,
+                    };
+                    self.current_project_path = Some(path);
+
+                    if let Err(e) = self.player.load_file(&audio_path) {
+                        eprintln!("Fehler beim Laden im Player: {}", e);
+                    }
+                    self.waveform_cache = generate_stereo_waveform_from_samples(
+                        &self.player.get_samples_l(),
+                        &self.player.get_samples_r(),
+                        self.player.total_samples(),
+                    );
+                    self.active_tab = ActiveTab::SplitAndExport;
+
+                    let msg = if self.language == Language::De {
+                        format!("Projekt '{}' geladen!", self.tape_name)
+                    } else {
+                        format!("Project '{}' loaded!", self.tape_name)
+                    };
+                    self.export_status_message = Some((true, msg));
+                }
+                Err(e) => {
+                    let err = if self.language == Language::De {
+                        format!("Fehler beim Laden: {}", e)
+                    } else {
+                        format!("Error loading project: {}", e)
+                    };
+                    self.export_status_message = Some((false, err));
+                }
+            }
+        }
     }
 
     fn refresh_device_list(&mut self) {
@@ -290,8 +413,35 @@ impl eframe::App for TapeDigizerApp {
             self.finish_recording_and_analyze();
         }
 
+        // Global Command Shortcuts
+        let cmd = ctx.input(|i| i.modifiers.command);
+        let shift = ctx.input(|i| i.modifiers.shift);
+
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+            self.save_project_dialog();
+        }
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) {
+            self.open_project_dialog();
+        }
+
+        if !ctx.wants_keyboard_input() {
+            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+                if shift {
+                    self.splitter.redo();
+                } else {
+                    self.splitter.undo();
+                }
+            } else if cmd && ctx.input(|i| i.key_pressed(egui::Key::Y)) {
+                self.splitter.redo();
+            }
+        }
+
         // Global Shortcuts in Tab 3 (Split & Export)
         if self.active_tab == ActiveTab::SplitAndExport && !ctx.wants_keyboard_input() {
+            if self.pending_delete_marker.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.pending_delete_marker = None;
+            }
+
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
                 self.player.toggle_play();
             }
@@ -308,7 +458,7 @@ impl eframe::App for TapeDigizerApp {
                     self.hover_audition_time = None;
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::S) || i.key_pressed(egui::Key::C)) {
+            if !cmd && (ctx.input(|i| i.key_pressed(egui::Key::S)) || ctx.input(|i| i.key_pressed(egui::Key::C))) {
                 self.active_edit_tool = if self.active_edit_tool == EditTool::Scissor {
                     EditTool::Pointer
                 } else {
@@ -318,9 +468,11 @@ impl eframe::App for TapeDigizerApp {
             if ctx.input(|i| i.key_pressed(egui::Key::V) || i.key_pressed(egui::Key::Escape)) {
                 self.active_edit_tool = EditTool::Pointer;
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::Delete) || ctx.input(|i| i.key_pressed(egui::Key::Backspace))) {
                 if let Some(idx) = self.selected_marker_idx.take() {
-                    self.splitter.remove_marker_at_index(idx);
+                    let sec = self.splitter.markers.get(idx).copied().unwrap_or(0.0);
+                    let title = self.splitter.custom_titles.get(idx + 1).cloned().unwrap_or_else(|| format!("Track {:02}", idx + 2));
+                    self.pending_delete_marker = Some((idx, sec, title));
                 }
             }
         }
@@ -772,9 +924,66 @@ impl TapeDigizerApp {
         let total_sec = self.player.total_seconds();
         let cur_sec = self.player.current_seconds();
 
-        // Stereo Waveform Rack Card
+        // 1. Tape Project & Side Selector Bar
+        render_hardware_rack_card(ui, self.language.card_tape_project(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.language.label_tape_name()).color(TEXT_SECONDARY).strong());
+                let name_edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.tape_name)
+                        .desired_width(220.0)
+                        .hint_text(self.language.hint_tape_name())
+                );
+                if name_edit.changed() {
+                    self.save_config();
+                }
+
+                ui.add_space(14.0);
+                ui.label(RichText::new(self.language.label_tape_side()).color(TEXT_SECONDARY).strong());
+
+                let is_side_a = self.tape_side == TapeSide::SideA;
+                let btn_a = egui::Button::new(
+                    RichText::new(format!("● {}", TapeSide::SideA.label(self.language)))
+                        .strong()
+                        .color(if is_side_a { Color32::WHITE } else { TEXT_MUTED })
+                )
+                .fill(if is_side_a { Color32::from_rgb(37, 99, 235) } else { Color32::from_rgb(38, 38, 44) })
+                .stroke(Stroke::new(1.0, if is_side_a { Color32::from_rgb(96, 165, 250) } else { BORDER_MID }))
+                .rounding(4.0);
+
+                if ui.add(btn_a).clicked() {
+                    self.tape_side = TapeSide::SideA;
+                }
+
+                let is_side_b = self.tape_side == TapeSide::SideB;
+                let btn_b = egui::Button::new(
+                    RichText::new(format!("● {}", TapeSide::SideB.label(self.language)))
+                        .strong()
+                        .color(if is_side_b { Color32::BLACK } else { TEXT_MUTED })
+                )
+                .fill(if is_side_b { LED_AMBER } else { Color32::from_rgb(38, 38, 44) })
+                .stroke(Stroke::new(1.0, if is_side_b { Color32::WHITE } else { BORDER_MID }))
+                .rounding(4.0);
+
+                if ui.add(btn_b).clicked() {
+                    self.tape_side = TapeSide::SideB;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(self.language.btn_open_project()).clicked() {
+                        self.open_project_dialog();
+                    }
+                    if ui.button(self.language.btn_save_project()).clicked() {
+                        self.save_project_dialog();
+                    }
+                });
+            });
+        });
+
+        ui.add_space(8.0);
+
+        // 2. Stereo Waveform Rack Card
         render_hardware_rack_card(ui, self.language.card_arrange(), |ui| {
-            // Header Bar: Tool Modes, Hover Audition, Timecode
+            // Header Bar: Tool Modes, Undo/Redo, Hover Audition, Timecode
             ui.horizontal(|ui| {
                 // Mode 1: Pointer Tool
                 let is_pointer = self.active_edit_tool == EditTool::Pointer;
@@ -832,6 +1041,27 @@ impl TapeDigizerApp {
                     }
                 }
 
+                ui.add_space(10.0);
+
+                // Undo / Redo buttons
+                let can_undo = self.splitter.can_undo();
+                let undo_btn = egui::Button::new(
+                    RichText::new("↶ Undo").size(11.0).color(if can_undo { Color32::WHITE } else { Color32::from_rgb(90, 95, 105) })
+                )
+                .rounding(4.0);
+                if ui.add_enabled(can_undo, undo_btn).on_hover_text(self.language.btn_undo()).clicked() {
+                    self.splitter.undo();
+                }
+
+                let can_redo = self.splitter.can_redo();
+                let redo_btn = egui::Button::new(
+                    RichText::new("↷ Redo").size(11.0).color(if can_redo { Color32::WHITE } else { Color32::from_rgb(90, 95, 105) })
+                )
+                .rounding(4.0);
+                if ui.add_enabled(can_redo, redo_btn).on_hover_text(self.language.btn_redo()).clicked() {
+                    self.splitter.redo();
+                }
+
                 // Timecode Display
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let cur_m = (cur_sec / 60.0).floor() as u64;
@@ -876,12 +1106,15 @@ impl TapeDigizerApp {
             }
             if let Some((idx, new_time)) = interaction.dragged_marker {
                 if idx < self.splitter.markers.len() {
+                    self.splitter.push_undo();
                     self.splitter.markers[idx] = new_time.clamp(0.5, total_sec - 0.5);
                     self.splitter.markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 }
             }
             if let Some(del_idx) = interaction.delete_marker_idx {
-                self.splitter.remove_marker_at_index(del_idx);
+                let del_sec = self.splitter.markers.get(del_idx).copied().unwrap_or(0.0);
+                let del_title = self.splitter.custom_titles.get(del_idx + 1).cloned().unwrap_or_else(|| format!("Track {:02}", del_idx + 2));
+                self.pending_delete_marker = Some((del_idx, del_sec, del_title));
             }
 
             // Hover Audition Engine
@@ -980,89 +1213,154 @@ impl TapeDigizerApp {
             });
         });
 
-        ui.add_space(12.0);
+        // 3. Delete Confirmation Banner (if pending)
+        if let Some((idx, sec, ref title)) = self.pending_delete_marker.clone() {
+            ui.add_space(8.0);
+            egui::Frame::none()
+                .fill(Color32::from_rgb(58, 24, 24))
+                .stroke(Stroke::new(1.5, LED_RED))
+                .rounding(6.0)
+                .inner_margin(12.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let mins = (sec / 60.0).floor() as u64;
+                        let secs = (sec % 60.0).floor() as u64;
+                        ui.label(RichText::new("⚠️").size(18.0));
+                        ui.label(
+                            RichText::new(self.language.confirm_delete_question(mins, secs, &title))
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
 
-        // Tracklist Table
+                        ui.add_space(12.0);
+
+                        let confirm_btn = egui::Button::new(
+                            RichText::new(self.language.btn_confirm_delete()).strong().color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(180, 30, 30))
+                        .rounding(4.0);
+                        if ui.add(confirm_btn).clicked() {
+                            self.splitter.remove_marker_at_index(idx);
+                            self.pending_delete_marker = None;
+                        }
+
+                        if ui.button(self.language.btn_cancel()).clicked() {
+                            self.pending_delete_marker = None;
+                        }
+                    });
+                });
+        }
+
+        ui.add_space(10.0);
+
+        // 4. Tracklist Table
         let tracks = self.splitter.get_tracks(total_sec);
 
         render_hardware_rack_card(ui, &self.language.card_tracklist(tracks.len()), |ui| {
-            egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                egui::Grid::new("tracks_table").striped(true).spacing(Vec2::new(16.0, 6.0)).show(ui, |ui| {
-                    ui.label(RichText::new("#").strong());
-                    ui.label(RichText::new(self.language.col_title()).strong());
-                    ui.label(RichText::new(self.language.col_start()).strong());
-                    ui.label(RichText::new(self.language.col_end()).strong());
-                    ui.label(RichText::new(self.language.col_duration()).strong());
-                    ui.label(RichText::new(self.language.col_actions()).strong());
-                    ui.end_row();
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .show(ui, |ui| {
+                    egui::Grid::new("tracks_table")
+                        .striped(true)
+                        .spacing(Vec2::new(16.0, 7.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("#").strong());
+                            ui.label(RichText::new(self.language.col_title()).strong());
+                            ui.label(RichText::new(self.language.col_start()).strong());
+                            ui.label(RichText::new(self.language.col_end()).strong());
+                            ui.label(RichText::new(self.language.col_duration()).strong());
+                            ui.label(RichText::new(self.language.col_actions()).strong());
+                            ui.end_row();
 
-                    while self.splitter.custom_titles.len() < tracks.len() {
-                        self.splitter.custom_titles.push(format!("Track {:02}", self.splitter.custom_titles.len() + 1));
-                    }
-
-                    for (i, track) in tracks.iter().enumerate() {
-                        ui.label(format!("{:02}", track.index));
-
-                        let title_buf = &mut self.splitter.custom_titles[i];
-                        ui.text_edit_singleline(title_buf);
-
-                        let s_m = (track.start_seconds / 60.0).floor() as u64;
-                        let s_s = (track.start_seconds % 60.0).floor() as u64;
-                        ui.label(format!("{:02}:{:02}", s_m, s_s));
-
-                        let e_m = (track.end_seconds / 60.0).floor() as u64;
-                        let e_s = (track.end_seconds % 60.0).floor() as u64;
-                        ui.label(format!("{:02}:{:02}", e_m, e_s));
-
-                        ui.label(track.duration_formatted());
-
-                        let cur_t = self.player.current_seconds();
-                        let is_this_track_playing = self.player.is_playing()
-                            && cur_t >= track.start_seconds - 0.05
-                            && cur_t < track.end_seconds;
-
-                        ui.horizontal(|ui| {
-                            let play_btn_text = if is_this_track_playing { "Pause" } else { "Play" };
-                            let play_btn_bg = if is_this_track_playing {
-                                Color32::from_rgb(217, 83, 30)
-                            } else {
-                                Color32::from_rgb(37, 99, 235)
-                            };
-
-                            let track_btn = egui::Button::new(
-                                RichText::new(play_btn_text).color(Color32::WHITE).small().strong()
-                            )
-                            .fill(play_btn_bg)
-                            .rounding(3.0);
-
-                            let tip = if self.language == Language::De {
-                                format!("Spielt nur Track {:02} (stoppt automatisch am Ende)", track.index)
-                            } else {
-                                format!("Plays only Track {:02} (stops automatically at song end)", track.index)
-                            };
-
-                            if ui.add(track_btn).on_hover_text(tip).clicked() {
-                                if is_this_track_playing {
-                                    self.player.pause();
-                                } else {
-                                    self.player.play_range(track.start_seconds, track.end_seconds);
-                                }
+                            while self.splitter.custom_titles.len() < tracks.len() {
+                                self.splitter.custom_titles.push(format!("Track {:02}", self.splitter.custom_titles.len() + 1));
                             }
-                            if i > 0 && i - 1 < self.splitter.markers.len() {
-                                if ui.small_button(self.language.btn_delete()).clicked() {
-                                    self.splitter.remove_marker_at_index(i - 1);
+
+                            for (i, track) in tracks.iter().enumerate() {
+                                ui.label(format!("{:02}", track.index));
+
+                                let title_buf = &mut self.splitter.custom_titles[i];
+                                let edit_resp = ui.add(
+                                    egui::TextEdit::singleline(title_buf)
+                                        .id_source(egui::Id::new("track_title_field").with(i))
+                                        .desired_width(320.0)
+                                        .hint_text(format!("Track {:02}", i + 1))
+                                );
+
+                                if edit_resp.lost_focus()
+                                    && (ui.input(|inp| inp.key_pressed(egui::Key::Enter)) || ui.input(|inp| inp.key_pressed(egui::Key::Tab)))
+                                {
+                                    let next_idx = (i + 1) % tracks.len();
+                                    ui.ctx().memory_mut(|mem| mem.request_focus(egui::Id::new("track_title_field").with(next_idx)));
                                 }
+
+                                let s_m = (track.start_seconds / 60.0).floor() as u64;
+                                let s_s = (track.start_seconds % 60.0).floor() as u64;
+                                ui.label(format!("{:02}:{:02}", s_m, s_s));
+
+                                let e_m = (track.end_seconds / 60.0).floor() as u64;
+                                let e_s = (track.end_seconds % 60.0).floor() as u64;
+                                ui.label(format!("{:02}:{:02}", e_m, e_s));
+
+                                ui.label(track.duration_formatted());
+
+                                let cur_t = self.player.current_seconds();
+                                let is_this_track_playing = self.player.is_playing()
+                                    && cur_t >= track.start_seconds - 0.05
+                                    && cur_t < track.end_seconds;
+
+                                ui.horizontal(|ui| {
+                                    let play_btn_text = if is_this_track_playing { "Pause" } else { "Play" };
+                                    let play_btn_bg = if is_this_track_playing {
+                                        Color32::from_rgb(217, 83, 30)
+                                    } else {
+                                        Color32::from_rgb(37, 99, 235)
+                                    };
+
+                                    let track_btn = egui::Button::new(
+                                        RichText::new(play_btn_text).color(Color32::WHITE).small().strong(),
+                                    )
+                                    .fill(play_btn_bg)
+                                    .rounding(3.0);
+
+                                    let tip = if self.language == Language::De {
+                                        format!("Spielt nur Track {:02} (stoppt automatisch am Ende)", track.index)
+                                    } else {
+                                        format!("Plays only Track {:02} (stops automatically at song end)", track.index)
+                                    };
+
+                                    if ui.add(track_btn).on_hover_text(tip).clicked() {
+                                        if is_this_track_playing {
+                                            self.player.pause();
+                                        } else {
+                                            self.player.play_range(track.start_seconds, track.end_seconds);
+                                        }
+                                    }
+
+                                    if i > 0 && i - 1 < self.splitter.markers.len() {
+                                        let del_idx = i - 1;
+                                        let del_sec = self.splitter.markers[del_idx];
+                                        let del_title = self.splitter.custom_titles.get(i).cloned().unwrap_or_else(|| format!("Track {:02}", i + 1));
+                                        if ui.small_button(self.language.btn_delete()).clicked() {
+                                            self.pending_delete_marker = Some((del_idx, del_sec, del_title));
+                                        }
+                                    }
+                                });
+                                ui.end_row();
                             }
                         });
-                        ui.end_row();
-                    }
                 });
-            });
+
+            if tracks.len() > 3 {
+                ui.add_space(4.0);
+                ui.label(RichText::new(self.language.label_scroll_hint(tracks.len())).color(TEXT_MUTED).size(11.0));
+            }
         });
 
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
-        // Export Drawer
+        // 5. Export Drawer
         render_hardware_rack_card(ui, self.language.card_export(), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(self.language.label_export_dir()).color(TEXT_SECONDARY));
@@ -1073,6 +1371,14 @@ impl TapeDigizerApp {
                         self.save_config();
                     }
                 }
+            });
+
+            ui.add_space(4.0);
+
+            let effective_dir = self.effective_export_directory();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.language.label_export_target_preview()).color(LED_AMBER));
+                ui.label(RichText::new(effective_dir.display().to_string()).monospace().color(Color32::WHITE).strong());
             });
 
             ui.add_space(6.0);
@@ -1087,7 +1393,7 @@ impl TapeDigizerApp {
                 }
             });
 
-            ui.add_space(14.0);
+            ui.add_space(12.0);
 
             let export_btn = egui::Button::new(
                 RichText::new(self.language.btn_export_tracks(tracks.len()))
@@ -1102,12 +1408,15 @@ impl TapeDigizerApp {
 
             if ui.add(export_btn).clicked() {
                 let src_file = self.temp_record_path();
-                match export_tracks(&src_file, &self.export_directory, &tracks, self.normalization_mode.clone()) {
+                let target_dir = self.effective_export_directory();
+                let _ = std::fs::create_dir_all(&target_dir);
+
+                match export_tracks(&src_file, &target_dir, &tracks, self.normalization_mode.clone()) {
                     Ok(files) => {
                         let success_msg = if self.language == Language::De {
-                            format!("[OK] Erfolgreich {} Tracks nach {:?} exportiert!", files.len(), self.export_directory)
+                            format!("[OK] Erfolgreich {} Tracks nach {:?} exportiert!", files.len(), target_dir)
                         } else {
-                            format!("[OK] Successfully exported {} tracks to {:?}!", files.len(), self.export_directory)
+                            format!("[OK] Successfully exported {} tracks to {:?}!", files.len(), target_dir)
                         };
                         self.export_status_message = Some((true, success_msg));
                     }
@@ -1127,9 +1436,10 @@ impl TapeDigizerApp {
                 let col = if is_success { LED_GREEN } else { LED_RED };
                 ui.horizontal(|ui| {
                     ui.colored_label(col, msg);
+                    let target_dir = self.effective_export_directory();
                     if is_success && ui.button(self.language.btn_show_in_finder()).clicked() {
                         #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("open").arg(&self.export_directory).spawn();
+                        let _ = std::process::Command::new("open").arg(&target_dir).spawn();
                     }
                 });
             }

@@ -37,6 +37,15 @@
    * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
 
 3. **✂️ Tab 3: Track-Schnitt & Mastering-Export**
+   * **Tonband- & Album-Organisation (A- & B-Seite):** Gib den Albumnamen ein und wähle **Seite A** oder **Seite B**. Beim Export werden automatisch strukturierte Unterordner angelegt: `<Zielordner>/<Album-Name>/Seite A/` bzw. `Seite B/`.
+   * **Vollwertige Projekt-Verwaltung (`.tapedigizer`):** Speichere (`⌘S`) und lade (`⌘O`) deine Digitalisierungs-Sessions inkl. Audio, Markern, Tracktiteln und Mastering-Einstellungen für unterbrechungsfreies Weiterarbeiten.
+   * **Undo & Redo (⌘Z / ⇧⌘Z):** Versehentlich gelöschte oder gesetzte Schnittmarker lassen sich jederzeit mit ⌘Z zurückholen.
+   * **Sicherheits-Rückfrage beim Löschen:** Verhindert versehentliches Löschen von Schnittmarkern mit einem Bestätigungs-Dialog.
+   * **Optimierte Trackliste & Navigation:**
+     * Extra breite Eingabefelder für lange Titel.
+     * Schnelle Tastatur-Navigation mit **Enter** oder **Tab** direkt zum nächsten Songtitel.
+     * Sichtbare Scrollbar mit Titelanzahlanzeige bei umfangreichen Tracklisten.
+     * Einzel-Track-Wiedergabe mit automatischem Stopp am Songende.
    * **Zweikanal-Stereo-Wellenform:** Echte getrennte Spurdarstellung (Kanal 1 links oben, Kanal 2 rechts unten) im Logic Pro Look.
    * **Intuitives Zoomen & Scrollen:**
      * **Option (⌥) + Mausrad:** Butterweiches Hinein- und Herauszoomen (1x bis 25x), zentriert exakt an der Mauszeiger-Position!
@@ -90,6 +99,11 @@
 
 | Taste / Key | Funktion (DE) | Function (EN) |
 |---|---|---|
+| **⌘ + S** | Projekt speichern (.tapedigizer) | Save Project (.tapedigizer) |
+| **⌘ + O** | Projekt öffnen | Open Project |
+| **⌘ + Z** | Letzte Aktion rückgängig machen (Undo) | Undo last marker action |
+| **⇧ + ⌘ + Z** / **⌘ + Y** | Wiederherstellen (Redo) | Redo marker action |
+| **Tab** / **Enter** | Zum nächsten Tracktitel springen | Jump to next track title |
 | **Leertaste / Space** | Wiedergabe starten / pausieren | Toggle Play / Pause |
 | **⌥ + Mausrad** | Hinein- / Herauszoomen (auf Cursor) | Zoom in / out (centered on mouse) |
 | **Mausrad / Scroll** | Horizontal nach links / rechts scrollen | Pan horizontally left / right |
@@ -97,7 +111,7 @@
 | **S** oder **C** | Schnitt-Werkzeug (✂️) umschalten | Toggle Split / Scissor Tool |
 | **V** oder **Esc** | Zurück zum Zeiger / Navigieren | Return to Pointer / Select Tool |
 | **M** | Marker an Abspielposition setzen | Drop marker at playhead |
-| **Delete / ⌫** | Ausgewählten Marker löschen | Delete selected marker |
+| **Delete / ⌫** | Ausgewählten Marker löschen (mit Bestätigung) | Delete selected marker (with prompt) |
 
 ---
 

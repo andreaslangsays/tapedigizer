@@ -29,6 +29,86 @@ impl Language {
         }
     }
 
+    // Tape Album & Side Metadata
+    pub fn card_tape_project(&self) -> &'static str {
+        match self {
+            Language::De => "TONBAND- & PROJEKT-VERWALTUNG",
+            Language::En => "TAPE & PROJECT MANAGEMENT",
+        }
+    }
+    pub fn label_tape_name(&self) -> &'static str {
+        match self {
+            Language::De => "Tonband- / Album-Name:",
+            Language::En => "Tape / Album Name:",
+        }
+    }
+    pub fn hint_tape_name(&self) -> &'static str {
+        match self {
+            Language::De => "z.B. Sommerhits 1985 oder Band 04",
+            Language::En => "e.g. Summer Hits 1985 or Reel 04",
+        }
+    }
+    pub fn label_tape_side(&self) -> &'static str {
+        match self {
+            Language::De => "Bandseite:",
+            Language::En => "Tape Side:",
+        }
+    }
+    pub fn btn_save_project(&self) -> &'static str {
+        match self {
+            Language::De => "Projekt speichern (⌘S)",
+            Language::En => "Save Project (⌘S)",
+        }
+    }
+    pub fn btn_open_project(&self) -> &'static str {
+        match self {
+            Language::De => "Projekt öffnen (⌘O)",
+            Language::En => "Open Project (⌘O)",
+        }
+    }
+    pub fn btn_undo(&self) -> &'static str {
+        match self {
+            Language::De => "Rückgängig (⌘Z)",
+            Language::En => "Undo (⌘Z)",
+        }
+    }
+    pub fn btn_redo(&self) -> &'static str {
+        match self {
+            Language::De => "Wiederholen (⇧⌘Z)",
+            Language::En => "Redo (⇧⌘Z)",
+        }
+    }
+    pub fn label_export_target_preview(&self) -> &'static str {
+        match self {
+            Language::De => "Automatischer Ziel-Unterordner:",
+            Language::En => "Automatic Target Subfolder:",
+        }
+    }
+    pub fn label_scroll_hint(&self, count: usize) -> String {
+        match self {
+            Language::De => format!("{} Tracks in der Liste — scrolle mit dem Mausrad für weitere Titel", count),
+            Language::En => format!("{} tracks in list — scroll with mouse wheel to see more titles", count),
+        }
+    }
+    pub fn confirm_delete_question(&self, mins: u64, secs: u64, title: &str) -> String {
+        match self {
+            Language::De => format!("Trenner bei {:02}:{:02} ({}) wirklich entfernen?", mins, secs, title),
+            Language::En => format!("Really delete split marker at {:02}:{:02} ({})?", mins, secs, title),
+        }
+    }
+    pub fn btn_confirm_delete(&self) -> &'static str {
+        match self {
+            Language::De => "Ja, löschen",
+            Language::En => "Yes, delete",
+        }
+    }
+    pub fn btn_cancel(&self) -> &'static str {
+        match self {
+            Language::De => "Abbrechen",
+            Language::En => "Cancel",
+        }
+    }
+
     // Top Header & Navigation Tabs
     pub fn tab_recording(&self) -> &'static str {
         match self {

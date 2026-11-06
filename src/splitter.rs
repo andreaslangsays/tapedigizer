@@ -29,9 +29,17 @@ impl TrackInfo {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkerSnapshot {
+    pub markers: Vec<f64>,
+    pub custom_titles: Vec<String>,
+}
+
 pub struct TrackSplitter {
     pub markers: Vec<f64>, // Split points in seconds
     pub custom_titles: Vec<String>,
+    pub undo_stack: Vec<MarkerSnapshot>,
+    pub redo_stack: Vec<MarkerSnapshot>,
 }
 
 impl TrackSplitter {
@@ -39,7 +47,59 @@ impl TrackSplitter {
         Self {
             markers: Vec::new(),
             custom_titles: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
+    }
+
+    pub fn snapshot(&self) -> MarkerSnapshot {
+        MarkerSnapshot {
+            markers: self.markers.clone(),
+            custom_titles: self.custom_titles.clone(),
+        }
+    }
+
+    pub fn push_undo(&mut self) {
+        let snap = self.snapshot();
+        if self.undo_stack.last() != Some(&snap) {
+            self.undo_stack.push(snap);
+            if self.undo_stack.len() > 60 {
+                self.undo_stack.remove(0);
+            }
+        }
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(prev) = self.undo_stack.pop() {
+            let current = self.snapshot();
+            self.redo_stack.push(current);
+            self.markers = prev.markers;
+            self.custom_titles = prev.custom_titles;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(next) = self.redo_stack.pop() {
+            let current = self.snapshot();
+            self.undo_stack.push(current);
+            self.markers = next.markers;
+            self.custom_titles = next.custom_titles;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
     }
 
     pub fn add_marker(&mut self, seconds: f64, total_duration: f64) {
@@ -48,6 +108,7 @@ impl TrackSplitter {
         }
         // Avoid adding duplicate markers very close to existing ones (< 1.0s)
         if !self.markers.iter().any(|&m| (m - seconds).abs() < 1.0) {
+            self.push_undo();
             self.markers.push(seconds);
             self.markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
         }
@@ -55,11 +116,15 @@ impl TrackSplitter {
 
     pub fn remove_marker_at_index(&mut self, index: usize) {
         if index < self.markers.len() {
+            self.push_undo();
             self.markers.remove(index);
         }
     }
 
     pub fn clear_markers(&mut self) {
+        if !self.markers.is_empty() {
+            self.push_undo();
+        }
         self.markers.clear();
         self.custom_titles.clear();
     }
@@ -328,5 +393,32 @@ mod tests {
         let marker = splitter.markers[0];
         // The silence was between 2.0s and 4.0s, center around 3.0s
         assert!((marker - 3.0).abs() < 0.2);
+    }
+
+    #[test]
+    fn test_undo_redo_markers() {
+        let mut splitter = TrackSplitter::new();
+        assert!(!splitter.can_undo());
+        assert!(!splitter.can_redo());
+
+        splitter.add_marker(60.0, 300.0);
+        assert_eq!(splitter.markers, vec![60.0]);
+        assert!(splitter.can_undo());
+
+        splitter.add_marker(120.0, 300.0);
+        assert_eq!(splitter.markers, vec![60.0, 120.0]);
+
+        // Remove marker 0 (at 60.0)
+        splitter.remove_marker_at_index(0);
+        assert_eq!(splitter.markers, vec![120.0]);
+
+        // Undo removal -> restores [60.0, 120.0]
+        assert!(splitter.undo());
+        assert_eq!(splitter.markers, vec![60.0, 120.0]);
+        assert!(splitter.can_redo());
+
+        // Redo removal -> returns to [120.0]
+        assert!(splitter.redo());
+        assert_eq!(splitter.markers, vec![120.0]);
     }
 }

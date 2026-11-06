@@ -2,6 +2,7 @@ mod analysis;
 mod audio;
 mod config;
 mod i18n;
+mod project;
 mod splitter;
 mod ui;
 
