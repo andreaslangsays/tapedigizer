@@ -71,4 +71,25 @@ echo "=== 4. Ad-hoc code signing ==="
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --verify --verbose "$APP_BUNDLE"
 
-echo "=== Successfully built $APP_BUNDLE ==="
+touch "$APP_BUNDLE"
+
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -f "$LSREGISTER" ]; then
+    echo "=== 5. Registering with LaunchServices ==="
+    "$LSREGISTER" -f "$APP_BUNDLE"
+fi
+
+if [ -d "/Applications/TapeDigizer.app" ]; then
+    echo "=== Updating /Applications/TapeDigizer.app ==="
+    rm -rf "/Applications/TapeDigizer.app"
+    cp -R "$APP_BUNDLE" "/Applications/TapeDigizer.app"
+    touch "/Applications/TapeDigizer.app"
+    if [ -f "$LSREGISTER" ]; then
+        "$LSREGISTER" -f "/Applications/TapeDigizer.app"
+    fi
+fi
+
+# Refresh Dock & Launchpad icon cache
+killall Dock 2>/dev/null || true
+
+echo "=== Successfully built and registered $APP_BUNDLE ==="

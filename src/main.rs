@@ -9,6 +9,18 @@ mod ui;
 use ui::app::TapeDigizerApp;
 
 fn app_icon() -> egui::IconData {
+    #[cfg(target_os = "macos")]
+    {
+        // When running inside a macOS .app bundle, returning empty IconData allows
+        // macOS to natively display the high-resolution AppIcon.icns in the Dock
+        // without eframe overriding it with a flat/low-res setApplicationIconImage bitmap.
+        if let Ok(exe) = std::env::current_exe() {
+            if exe.to_string_lossy().contains(".app/Contents/MacOS") {
+                return egui::IconData::default();
+            }
+        }
+    }
+
     let rgba = include_bytes!("../assets/icon_128.rgba").to_vec();
     egui::IconData {
         rgba,
