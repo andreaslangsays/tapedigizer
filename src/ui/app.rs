@@ -1016,10 +1016,37 @@ impl TapeDigizerApp {
 
                         ui.label(track.duration_formatted());
 
+                        let cur_t = self.player.current_seconds();
+                        let is_this_track_playing = self.player.is_playing()
+                            && cur_t >= track.start_seconds - 0.05
+                            && cur_t < track.end_seconds;
+
                         ui.horizontal(|ui| {
-                            if ui.small_button("Play").clicked() {
-                                self.player.seek_seconds(track.start_seconds);
-                                self.player.play();
+                            let play_btn_text = if is_this_track_playing { "Pause" } else { "Play" };
+                            let play_btn_bg = if is_this_track_playing {
+                                Color32::from_rgb(217, 83, 30)
+                            } else {
+                                Color32::from_rgb(37, 99, 235)
+                            };
+
+                            let track_btn = egui::Button::new(
+                                RichText::new(play_btn_text).color(Color32::WHITE).small().strong()
+                            )
+                            .fill(play_btn_bg)
+                            .rounding(3.0);
+
+                            let tip = if self.language == Language::De {
+                                format!("Spielt nur Track {:02} (stoppt automatisch am Ende)", track.index)
+                            } else {
+                                format!("Plays only Track {:02} (stops automatically at song end)", track.index)
+                            };
+
+                            if ui.add(track_btn).on_hover_text(tip).clicked() {
+                                if is_this_track_playing {
+                                    self.player.pause();
+                                } else {
+                                    self.player.play_range(track.start_seconds, track.end_seconds);
+                                }
                             }
                             if i > 0 && i - 1 < self.splitter.markers.len() {
                                 if ui.small_button(self.language.btn_delete()).clicked() {
