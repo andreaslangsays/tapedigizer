@@ -4,56 +4,37 @@ import subprocess
 from PIL import Image, ImageDraw, ImageFilter
 
 def create_mac_app_icon():
-    # Apple macOS Human Interface Guidelines for App Icons (macOS 11 Big Sur to macOS 15 Sequoia+):
+    # macOS 26 Tahoe & Big Sur+ Squircle Specification:
     # - Master Canvas: 1024 x 1024
-    # - Squircle Base: 824 x 824 centered inside the canvas (100px margins on all 4 sides)
-    # - Corner Radius: 185.4 px (~185 px)
-    # - Drop Shadow: Black (0, 0, 0), opacity ~45-50%, y-offset +12px, blur 28px
+    # - Squircle Base: 824 x 824 centered inside the canvas ([100, 100, 924, 924])
+    # - Corner Radius: 185 px
+    # - IMPORTANT: No baked-in outer drop shadow! macOS 26 Tahoe renders the system shadow
+    #   and Liquid Glass edge automatically; any non-transparent pixels outside [100, 100, 924, 924]
+    #   trigger the system white background frame ("Squircle Jail").
     canvas_size = 1024
     margin = 100
     squircle_size = 824
     radius = 185
     sq_rect = [margin, margin, margin + squircle_size, margin + squircle_size] # [100, 100, 924, 924]
 
-    master_img = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    # Draw on an unmasked canvas first, then apply the strict squircle mask at the end
+    canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
 
-    # --- 1. macOS System Drop Shadow ---
-    shadow_img = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-    shadow_draw = ImageDraw.Draw(shadow_img)
-    shadow_y_offset = 14
-    shadow_draw.rounded_rectangle(
-        [margin, margin + shadow_y_offset, margin + squircle_size, margin + squircle_size + shadow_y_offset],
-        radius=radius,
-        fill=(0, 0, 0, 115)
-    )
-    shadow_img = shadow_img.filter(ImageFilter.GaussianBlur(24))
-    master_img.paste(shadow_img, (0, 0), shadow_img)
-
-    # --- 2. Squircle Background Canvas (Deep Studio Charcoal) ---
-    sq_canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-    sq_draw = ImageDraw.Draw(sq_canvas)
-    for y in range(margin, margin + squircle_size):
+    # --- 1. Squircle Background Canvas (Deep Studio Charcoal) ---
+    for y in range(0, canvas_size):
         frac = (y - margin) / squircle_size
         r = int(36 - frac * 14)
         g = int(38 - frac * 14)
         b = int(46 - frac * 16)
-        sq_draw.line([(margin, y), (margin + squircle_size, y)], fill=(r, g, b, 255))
+        draw.line([(0, y), (canvas_size, y)], fill=(r, g, b, 255))
 
-    # Mask background into exact macOS squircle
-    mask = Image.new("L", (canvas_size, canvas_size), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.rounded_rectangle(sq_rect, radius=radius, fill=255)
-    master_img.paste(sq_canvas, (0, 0), mask)
-
-    draw = ImageDraw.Draw(master_img)
-
-    # Tactile Studio Bezel & Edge Highlight
-    draw.rounded_rectangle(sq_rect, radius=radius, outline=(70, 75, 90, 255), width=3)
+    # Tactile Studio Inner Bezel & Edge Highlight
     draw.rounded_rectangle(
         [sq_rect[0] + 2, sq_rect[1] + 2, sq_rect[2] - 2, sq_rect[3] - 2],
         radius=radius - 2,
-        outline=(22, 24, 30, 200),
-        width=2
+        outline=(68, 74, 90, 255),
+        width=4
     )
 
     # --- 3. Studio Cassette Tape in Center ---
@@ -75,7 +56,8 @@ def create_mac_app_icon():
         fill=(0, 0, 0, 160)
     )
     cass_shadow = cass_shadow.filter(ImageFilter.GaussianBlur(14))
-    master_img.paste(cass_shadow, (0, 0), cass_shadow)
+    canvas.paste(cass_shadow, (0, 0), cass_shadow)
+    draw = ImageDraw.Draw(canvas)
 
     # Cassette Body (Matte Studio Anthracite)
     draw.rounded_rectangle(
@@ -168,6 +150,13 @@ def create_mac_app_icon():
         g = int(189 - frac * 50)
         b = int(248)
         draw.line([(bx, wave_y - h // 2), (bx, wave_y + h // 2)], fill=(r, g, b, 240), width=7)
+
+    # Apply strict squircle mask so 100% of pixels outside [100, 100, 924, 924] are (0, 0, 0, 0)
+    mask = Image.new("L", (canvas_size, canvas_size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle(sq_rect, radius=radius, fill=255)
+    master_img = canvas.copy()
+    master_img.putalpha(mask)
 
     # --- 5. Export Assets ---
     os.makedirs("assets", exist_ok=True)

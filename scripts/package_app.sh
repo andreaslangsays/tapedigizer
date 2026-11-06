@@ -89,7 +89,9 @@ if [ -d "/Applications/TapeDigizer.app" ]; then
     fi
 fi
 
-# Refresh Dock & Launchpad icon cache
+# Refresh macOS IconServices, Dock & Launchpad icon cache
+killall iconservicesagent 2>/dev/null || true
 killall Dock 2>/dev/null || true
+killall Finder 2>/dev/null || true
 
 echo "=== Successfully built and registered $APP_BUNDLE ==="
