@@ -204,6 +204,10 @@ impl AudioPlayer {
         }
     }
 
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     pub fn total_samples(&self) -> usize {
         self.samples_l.len()
     }

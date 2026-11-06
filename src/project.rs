@@ -123,18 +123,38 @@ impl TapeDigizerProject {
 }
 
 pub fn sanitize_filename(name: &str) -> String {
-    let s: String = name
+    let sanitized: String = name
         .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
+        .filter_map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => Some('_'),
+            c if c.is_control() => None,
+            c => Some(c),
         })
         .collect();
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
+
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         "Tape_Album".to_string()
     } else {
-        trimmed.to_string()
+        trimmed.chars().take(80).collect()
+    }
+}
+
+pub fn sanitize_track_title(title: &str, fallback_index: usize) -> String {
+    let sanitized: String = title
+        .chars()
+        .filter_map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => Some('_'),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect();
+
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        format!("Track {:02}", fallback_index)
+    } else {
+        trimmed.chars().take(80).collect()
     }
 }
 

@@ -437,15 +437,16 @@ impl eframe::App for TapeDigizerApp {
         }
 
         // Global Shortcuts in Tab 3 (Split & Export)
+        let has_audio = self.player.total_seconds() > 0.1;
         if self.active_tab == ActiveTab::SplitAndExport && !ctx.wants_keyboard_input() {
             if self.pending_delete_marker.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.pending_delete_marker = None;
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            if has_audio && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
                 self.player.toggle_play();
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+            if has_audio && ctx.input(|i| i.key_pressed(egui::Key::M)) {
                 let cur_sec = self.player.current_seconds();
                 let total_sec = self.player.total_seconds();
                 self.splitter.add_marker(cur_sec, total_sec);
@@ -489,7 +490,7 @@ impl eframe::App for TapeDigizerApp {
                     ui.add_space(4.0);
                     ui.label(RichText::new("TAPEDIGIZER").size(18.0).monospace().strong().color(LED_AMBER));
                     ui.label(RichText::new("PRO AUDIO TAPE CONSOLE").size(9.5).monospace().color(TEXT_MUTED));
-                    ui.label(RichText::new("v0.2.1").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
+                    ui.label(RichText::new("v0.3.0").size(9.0).monospace().color(Color32::from_rgb(90, 95, 110)));
 
                     // Right Side: Language Switcher + Logic Pro Inspired Center LCD Console
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -923,6 +924,7 @@ impl TapeDigizerApp {
 
         let total_sec = self.player.total_seconds();
         let cur_sec = self.player.current_seconds();
+        let has_audio = total_sec > 0.1 && !self.waveform_cache.is_empty();
 
         // 1. Tape Project & Side Selector Bar
         render_hardware_rack_card(ui, self.language.card_tape_project(), |ui| {
@@ -978,6 +980,26 @@ impl TapeDigizerApp {
                 });
             });
         });
+
+        if !has_audio {
+            ui.add_space(4.0);
+            egui::Frame::none()
+                .fill(Color32::from_rgb(34, 36, 44))
+                .stroke(Stroke::new(1.0, BORDER_MID))
+                .rounding(5.0)
+                .inner_margin(Vec2::new(14.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("ℹ").monospace().strong().color(LED_AMBER));
+                        let note = if self.language == Language::De {
+                            "Noch keine Audiodatei geladen. Starte eine Aufnahme in Tab 1 oder öffne ein gespeichertes Projekt (⌘O)."
+                        } else {
+                            "No audio recorded or loaded yet. Start recording in Tab 1 or open an existing project (⌘O)."
+                        };
+                        ui.label(RichText::new(note).color(TEXT_SECONDARY));
+                    });
+                });
+        }
 
         ui.add_space(8.0);
 
@@ -1064,14 +1086,18 @@ impl TapeDigizerApp {
 
                 // Timecode Display
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let cur_m = (cur_sec / 60.0).floor() as u64;
-                    let cur_s = (cur_sec % 60.0).floor() as u64;
-                    let cur_ms = ((cur_sec % 1.0) * 10.0).floor() as u64;
+                    if has_audio {
+                        let cur_m = (cur_sec / 60.0).floor() as u64;
+                        let cur_s = (cur_sec % 60.0).floor() as u64;
+                        let cur_ms = ((cur_sec % 1.0) * 10.0).floor() as u64;
 
-                    let tot_m = (total_sec / 60.0).floor() as u64;
-                    let tot_s = (total_sec % 60.0).floor() as u64;
+                        let tot_m = (total_sec / 60.0).floor() as u64;
+                        let tot_s = (total_sec % 60.0).floor() as u64;
 
-                    ui.label(RichText::new(format!("{:02}:{:02}.{} / {:02}:{:02}", cur_m, cur_s, cur_ms, tot_m, tot_s)).size(15.0).monospace().strong().color(Color32::WHITE));
+                        ui.label(RichText::new(format!("{:02}:{:02}.{} / {:02}:{:02}", cur_m, cur_s, cur_ms, tot_m, tot_s)).size(15.0).monospace().strong().color(Color32::WHITE));
+                    } else {
+                        ui.label(RichText::new("--:--.- / --:--").size(15.0).monospace().strong().color(TEXT_MUTED));
+                    }
                 });
             });
 
@@ -1099,15 +1125,19 @@ impl TapeDigizerApp {
             );
 
             if let Some(target_sec) = interaction.seek_to_seconds {
-                self.player.seek_seconds(target_sec);
+                if has_audio {
+                    self.player.seek_seconds(target_sec);
+                }
             }
             if let Some(new_marker_sec) = interaction.add_marker_at_seconds {
-                self.splitter.add_marker(new_marker_sec, total_sec);
+                if has_audio && total_sec > 1.0 {
+                    self.splitter.add_marker(new_marker_sec, total_sec);
+                }
             }
             if let Some((idx, new_time)) = interaction.dragged_marker {
-                if idx < self.splitter.markers.len() {
+                if idx < self.splitter.markers.len() && has_audio && total_sec > 1.0 {
                     self.splitter.push_undo();
-                    self.splitter.markers[idx] = new_time.clamp(0.5, total_sec - 0.5);
+                    self.splitter.markers[idx] = new_time.clamp(0.5, (total_sec - 0.5).max(0.5));
                     self.splitter.markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 }
             }
@@ -1118,7 +1148,7 @@ impl TapeDigizerApp {
             }
 
             // Hover Audition Engine
-            if self.hover_preview_enabled {
+            if self.hover_preview_enabled && has_audio {
                 if interaction.is_mouse_over_waveform {
                     if let Some(mouse_pos) = interaction.mouse_pos_in_waveform {
                         let moved = self.hover_mouse_pos
@@ -1172,16 +1202,16 @@ impl TapeDigizerApp {
                 };
 
                 let play_btn = egui::Button::new(RichText::new(play_text).strong().size(13.0).color(Color32::WHITE))
-                    .fill(play_col)
-                    .stroke(Stroke::new(1.0, play_stroke))
+                    .fill(if has_audio { play_col } else { Color32::from_rgb(45, 45, 52) })
+                    .stroke(Stroke::new(1.0, if has_audio { play_stroke } else { BORDER_MID }))
                     .rounding(5.0)
                     .min_size(Vec2::new(130.0, 32.0));
 
-                if ui.add(play_btn).clicked() {
+                if ui.add_enabled(has_audio, play_btn).clicked() {
                     self.player.toggle_play();
                 }
 
-                if ui.button(self.language.btn_stop()).clicked() {
+                if ui.add_enabled(has_audio, egui::Button::new(self.language.btn_stop())).clicked() {
                     self.player.stop();
                 }
 
@@ -1189,17 +1219,18 @@ impl TapeDigizerApp {
 
                 let add_m_btn = egui::Button::new(RichText::new(self.language.btn_add_marker()).color(LED_AMBER).strong())
                     .rounding(5.0);
-                if ui.add(add_m_btn).clicked() {
+                if ui.add_enabled(has_audio, add_m_btn).clicked() {
                     self.splitter.add_marker(cur_sec, total_sec);
                 }
 
-                if ui.button(self.language.btn_auto_detect_pauses()).clicked() {
+                if ui.add_enabled(has_audio, egui::Button::new(self.language.btn_auto_detect_pauses())).clicked() {
                     let samples_l = self.player.get_samples_l();
                     let samples_r = self.player.get_samples_r();
-                    self.splitter.detect_silence_pauses(&samples_l, &samples_r, self.player.total_samples() as u32, -45.0, 1.8);
+                    let rate = self.player.sample_rate();
+                    self.splitter.detect_silence_pauses(&samples_l, &samples_r, rate, -45.0, 1.8);
                 }
 
-                if ui.button(self.language.btn_clear_markers()).clicked() {
+                if ui.add_enabled(has_audio, egui::Button::new(self.language.btn_clear_markers())).clicked() {
                     self.splitter.clear_markers();
                 }
 
@@ -1395,18 +1426,19 @@ impl TapeDigizerApp {
 
             ui.add_space(12.0);
 
+            let export_enabled = has_audio && !tracks.is_empty();
             let export_btn = egui::Button::new(
                 RichText::new(self.language.btn_export_tracks(tracks.len()))
                     .size(15.0)
                     .color(Color32::WHITE)
                     .strong(),
             )
-            .fill(Color32::from_rgb(37, 99, 235))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(96, 165, 250)))
+            .fill(if export_enabled { Color32::from_rgb(37, 99, 235) } else { Color32::from_rgb(50, 50, 58) })
+            .stroke(Stroke::new(1.0, if export_enabled { Color32::from_rgb(96, 165, 250) } else { BORDER_MID }))
             .rounding(6.0)
             .min_size(Vec2::new(380.0, 42.0));
 
-            if ui.add(export_btn).clicked() {
+            if ui.add_enabled(export_enabled, export_btn).clicked() {
                 let src_file = self.temp_record_path();
                 let target_dir = self.effective_export_directory();
                 let _ = std::fs::create_dir_all(&target_dir);
@@ -1541,4 +1573,69 @@ fn draw_vector_cassette(painter: &egui::Painter, rect: Rect) {
     painter.circle_stroke(Pos2::new(rect.max.x - 8.0, y), 3.5, Stroke::new(1.2, LED_AMBER));
     let window_rect = Rect::from_center_size(rect.center(), Vec2::new(12.0, 7.0));
     painter.rect_stroke(window_rect, 1.0, Stroke::new(1.0, Color32::from_rgb(70, 74, 86)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_tabs_without_recording() {
+        let ctx = egui::Context::default();
+        let mut app = TapeDigizerApp {
+            language: Language::De,
+            tape_name: "Test Tape".into(),
+            tape_side: TapeSide::SideA,
+            current_project_path: None,
+            pending_delete_marker: None,
+            active_tab: ActiveTab::Recording,
+            available_devices: Vec::new(),
+            selected_device_idx: 0,
+            channel_pairs: Vec::new(),
+            selected_pair_idx: 0,
+            recorder: AudioRecorder::new(),
+            player: AudioPlayer::new(),
+            splitter: TrackSplitter::new(),
+            selected_timer_minutes: 45,
+            enable_silence_autostop: true,
+            analysis_report: None,
+            waveform_cache: Vec::new(),
+            selected_marker_idx: None,
+            waveform_zoom: 1.0,
+            waveform_scroll: 0.0,
+            active_edit_tool: EditTool::Pointer,
+            hover_preview_enabled: true,
+            hover_mouse_pos: None,
+            hover_stationary_since: None,
+            hover_is_auditioning: false,
+            hover_audition_time: None,
+            export_directory: PathBuf::from("/tmp"),
+            normalization_mode: NormalizationMode::None,
+            export_status_message: None,
+            ui_error_message: None,
+        };
+
+        // 1. Run in Tab 1
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.render_tab_recording(ui);
+            });
+        });
+
+        // 2. Switch to Tab 2 (Diagnosis) without recording
+        app.active_tab = ActiveTab::Diagnosis;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.render_tab_diagnosis(ui);
+            });
+        });
+
+        // 3. Switch to Tab 3 (Split & Export) without recording
+        app.active_tab = ActiveTab::SplitAndExport;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.render_tab_split_export(ui);
+            });
+        });
+    }
 }

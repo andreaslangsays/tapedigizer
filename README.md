@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.1-blue.svg" alt="Version 0.2.1" />
+  <img src="https://img.shields.io/badge/version-0.3.0-blue.svg" alt="Version 0.3.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />

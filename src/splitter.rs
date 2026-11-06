@@ -231,7 +231,28 @@ pub fn export_tracks<P: AsRef<Path>>(
     tracks: &[TrackInfo],
     norm_mode: NormalizationMode,
 ) -> Result<Vec<PathBuf>, String> {
-    let mut reader = hound::WavReader::open(source_wav_path).map_err(|e| e.to_string())?;
+    if tracks.is_empty() {
+        return Err("Keine Tracks zum Exportieren vorhanden.".to_string());
+    }
+
+    let src = source_wav_path.as_ref();
+    if !src.exists() {
+        return Err(format!("Quelldatei '{}' wurde nicht gefunden. Bitte nimm zuerst Audio in Tab 1 auf.", src.display()));
+    }
+
+    let out_dir = output_dir.as_ref();
+    std::fs::create_dir_all(out_dir).map_err(|e| {
+        format!("Zielordner '{}' konnte nicht erstellt werden: {}", out_dir.display(), e)
+    })?;
+
+    // Probe writeability
+    let probe_file = out_dir.join(".tapedigizer_probe");
+    std::fs::write(&probe_file, b"test").map_err(|e| {
+        format!("Zielordner '{}' ist schreibgeschützt oder nicht beschreibbar: {}", out_dir.display(), e)
+    })?;
+    let _ = std::fs::remove_file(&probe_file);
+
+    let mut reader = hound::WavReader::open(src).map_err(|e| format!("Fehler beim Öffnen der Audiodatei: {}", e))?;
     let spec = reader.spec();
     let sample_rate = spec.sample_rate;
 
@@ -288,8 +309,8 @@ pub fn export_tracks<P: AsRef<Path>>(
             continue;
         }
 
-        // Clean track filename
-        let safe_title = track.title.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        // Clean & sanitize track filename
+        let safe_title = crate::project::sanitize_track_title(&track.title, track.index);
         let filename = format!("{:02} - {}.wav", track.index, safe_title);
         let out_path = out_dir.join(filename);
 

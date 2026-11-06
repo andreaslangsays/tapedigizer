@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "tape_digizer"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
