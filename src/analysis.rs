@@ -34,7 +34,9 @@ pub struct AudioAnalysisReport {
 }
 
 pub fn analyze_wav_file<P: AsRef<Path>>(path: P) -> Result<AudioAnalysisReport, String> {
-    let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let buf_reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+    let mut reader = hound::WavReader::new(buf_reader).map_err(|e| e.to_string())?;
     let spec = reader.spec();
 
     let max_val = match spec.bits_per_sample {

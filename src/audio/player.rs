@@ -30,12 +30,18 @@ impl AudioPlayer {
     pub fn load_file<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
         self.stop();
 
-        let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let buf_reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+        let mut reader = hound::WavReader::new(buf_reader).map_err(|e| e.to_string())?;
         let spec = reader.spec();
         self.sample_rate = spec.sample_rate;
 
-        let mut l = Vec::new();
-        let mut r = Vec::new();
+        let total_samples = reader.len() as usize;
+        let channels = (spec.channels as usize).max(1);
+        let frames = total_samples / channels;
+
+        let mut l = Vec::with_capacity(frames);
+        let mut r = Vec::with_capacity(frames);
 
         let max_val = match spec.bits_per_sample {
             16 => 32768.0,

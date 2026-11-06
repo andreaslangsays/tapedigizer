@@ -413,25 +413,38 @@ impl eframe::App for TapeDigizerApp {
             self.finish_recording_and_analyze();
         }
 
-        // Global Command Shortcuts
-        let cmd = ctx.input(|i| i.modifiers.command);
-        let shift = ctx.input(|i| i.modifiers.shift);
+        // Global Command Shortcuts - read all keys in a single lock-free query
+        let (cmd, shift, key_s, key_o, key_z, key_y, key_space, key_m, key_h, key_c, key_v, key_esc, key_del) = ctx.input(|i| (
+            i.modifiers.command,
+            i.modifiers.shift,
+            i.key_pressed(egui::Key::S),
+            i.key_pressed(egui::Key::O),
+            i.key_pressed(egui::Key::Z),
+            i.key_pressed(egui::Key::Y),
+            i.key_pressed(egui::Key::Space),
+            i.key_pressed(egui::Key::M),
+            i.key_pressed(egui::Key::H),
+            i.key_pressed(egui::Key::C),
+            i.key_pressed(egui::Key::V),
+            i.key_pressed(egui::Key::Escape),
+            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+        ));
 
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+        if cmd && key_s {
             self.save_project_dialog();
         }
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) {
+        if cmd && key_o {
             self.open_project_dialog();
         }
 
         if !ctx.wants_keyboard_input() {
-            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+            if cmd && key_z {
                 if shift {
                     self.splitter.redo();
                 } else {
                     self.splitter.undo();
                 }
-            } else if cmd && ctx.input(|i| i.key_pressed(egui::Key::Y)) {
+            } else if cmd && key_y {
                 self.splitter.redo();
             }
         }
@@ -439,19 +452,19 @@ impl eframe::App for TapeDigizerApp {
         // Global Shortcuts in Tab 3 (Split & Export)
         let has_audio = self.player.total_seconds() > 0.1;
         if self.active_tab == ActiveTab::SplitAndExport && !ctx.wants_keyboard_input() {
-            if self.pending_delete_marker.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.pending_delete_marker.is_some() && key_esc {
                 self.pending_delete_marker = None;
             }
 
-            if has_audio && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            if has_audio && key_space {
                 self.player.toggle_play();
             }
-            if has_audio && ctx.input(|i| i.key_pressed(egui::Key::M)) {
+            if has_audio && key_m {
                 let cur_sec = self.player.current_seconds();
                 let total_sec = self.player.total_seconds();
                 self.splitter.add_marker(cur_sec, total_sec);
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            if key_h {
                 self.hover_preview_enabled = !self.hover_preview_enabled;
                 if !self.hover_preview_enabled && self.hover_is_auditioning {
                     self.player.pause();
@@ -459,17 +472,17 @@ impl eframe::App for TapeDigizerApp {
                     self.hover_audition_time = None;
                 }
             }
-            if !cmd && (ctx.input(|i| i.key_pressed(egui::Key::S)) || ctx.input(|i| i.key_pressed(egui::Key::C))) {
+            if !cmd && (key_s || key_c) {
                 self.active_edit_tool = if self.active_edit_tool == EditTool::Scissor {
                     EditTool::Pointer
                 } else {
                     EditTool::Scissor
                 };
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::V) || i.key_pressed(egui::Key::Escape)) {
+            if key_v || key_esc {
                 self.active_edit_tool = EditTool::Pointer;
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::Delete) || ctx.input(|i| i.key_pressed(egui::Key::Backspace))) {
+            if key_del {
                 if let Some(idx) = self.selected_marker_idx.take() {
                     let sec = self.splitter.markers.get(idx).copied().unwrap_or(0.0);
                     let title = self.splitter.custom_titles.get(idx + 1).cloned().unwrap_or_else(|| format!("Track {:02}", idx + 2));
