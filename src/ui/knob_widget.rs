@@ -12,7 +12,7 @@ pub fn render_gain_knob_card(
     adjustment_db: f32, // Positive = boost, Negative = cut, 0 = optimal
     is_clipping: bool,
 ) {
-    let desired_size = Vec2::new(ui.available_width().min(740.0), 140.0);
+    let desired_size = Vec2::new(ui.available_width().max(300.0), 132.0);
     let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
 
     let painter = ui.painter();

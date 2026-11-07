@@ -5,9 +5,9 @@ use crate::ui::theme::{
     LED_AMBER_DIM, LED_GREEN, LED_GREEN_DIM, LED_RED, LED_RED_DIM, TEXT_MUTED,
 };
 
-pub fn render_stereo_meter(ui: &mut Ui, meter: &MeterLevels) {
-    let desired_size = Vec2::new(ui.available_width().min(740.0), 84.0);
-    let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+pub fn render_stereo_meter(ui: &mut Ui, meter: &MeterLevels) -> bool {
+    let desired_size = Vec2::new(ui.available_width().max(260.0), 86.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
 
     let painter = ui.painter();
 
@@ -16,17 +16,17 @@ pub fn render_stereo_meter(ui: &mut Ui, meter: &MeterLevels) {
     painter.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER_DARK));
 
     let margin = 12.0;
-    let label_width = 32.0;
-    let clip_width = 46.0;
-    let num_width = 72.0;
+    let label_width = 34.0;
+    let clip_width = 48.0;
+    let num_width = 68.0;
     let bar_height = 16.0;
 
     let bar_left = rect.min.x + margin + label_width;
-    let bar_right = rect.max.x - margin - clip_width - num_width - 16.0;
-    let bar_width = (bar_right - bar_left).max(120.0);
+    let bar_right = rect.max.x - margin - clip_width - num_width - 14.0;
+    let bar_width = (bar_right - bar_left).max(100.0);
 
     // Channel Left (L)
-    let y_l = rect.min.y + margin + 4.0;
+    let y_l = rect.min.y + margin + 2.0;
     painter.text(
         Pos2::new(rect.min.x + margin, y_l + 1.0),
         egui::Align2::LEFT_TOP,
@@ -53,7 +53,7 @@ pub fn render_stereo_meter(ui: &mut Ui, meter: &MeterLevels) {
     );
 
     // Channel Right (R)
-    let y_r = y_l + bar_height + 14.0;
+    let y_r = y_l + bar_height + 12.0;
     painter.text(
         Pos2::new(rect.min.x + margin, y_r + 1.0),
         egui::Align2::LEFT_TOP,
@@ -79,9 +79,9 @@ pub fn render_stereo_meter(ui: &mut Ui, meter: &MeterLevels) {
         meter.peak_r_db,
     );
 
-    // Latching CLIP Indicator Lamp
+    // Latching CLIP Indicator Lamp (clickable to reset)
     let clip_rect = Rect::from_min_size(
-        Pos2::new(rect.max.x - margin - clip_width, y_l + 2.0),
+        Pos2::new(rect.max.x - margin - clip_width, y_l + 1.0),
         Vec2::new(clip_width, bar_height * 2.0 + 10.0),
     );
     draw_clip_lamp(painter, clip_rect, meter.is_clipping);
@@ -113,6 +113,8 @@ pub fn render_stereo_meter(ui: &mut Ui, meter: &MeterLevels) {
             col,
         );
     }
+
+    response.clicked()
 }
 
 fn db_to_norm_fraction(db: f32) -> f32 {

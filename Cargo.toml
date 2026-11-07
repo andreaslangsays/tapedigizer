@@ -1,8 +1,8 @@
 [package]
 name = "tape_digizer"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
-description = "Professional audio digitization tool for reel-to-reel and cassette tapes with Zoom LiveTrak L-12 support"
+description = "Professional audio digitization tool for reel-to-reel tapes, cassettes, and vinyl records with Zoom LiveTrak L-12 support"
 license = "MIT"
 repository = "https://github.com/andreaslangsays/tapedigizer"
 

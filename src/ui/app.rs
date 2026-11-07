@@ -7,16 +7,18 @@ use crate::analysis::{analyze_samples, AudioAnalysisReport, LevelDiagnosis};
 use crate::audio::device::{get_channel_pairs_for_device, list_input_devices, AudioDeviceInfo, ChannelPair};
 use crate::audio::player::{AudioPlayer, DecodedAudio};
 use crate::audio::recorder::{AudioRecorder, RecorderState, StereoWaveformPoint};
-use crate::splitter::{export_tracks, MarkerSnapshot, NormalizationMode, TrackSplitter, TransientPoint};
+use crate::splitter::{
+    export_tracks_with_options, ExportOptions, MarkerSnapshot, NormalizationMode, TrackSplitter, TransientPoint,
+};
 use crate::ui::knob_widget::render_gain_knob_card;
 use crate::ui::meter_widget::render_stereo_meter;
 use crate::ui::theme::{
     draw_recessed_well, mode_button, panel_frame, panel_title, primary_button, record_button,
     studio_panel, studio_wordmark, time_display, ACCENT, BG_INSET, BG_PANEL, BG_WINDOW,
-    BORDER_MID, LED_AMBER, LED_GREEN, LED_RED, TEXT_MUTED, TEXT_SECONDARY,
+    BORDER_MID, LED_AMBER, LED_GREEN, LED_RED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 use crate::i18n::Language;
-use crate::project::{sanitize_filename, TapeDigizerProject, TapeSide};
+use crate::project::{sanitize_filename, MediaSourceType, TapeDigizerProject, TapeSide};
 use crate::ui::waveform_widget::{render_stereo_waveform, EditTool};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -83,7 +85,8 @@ struct SavedEdits {
 }
 
 struct TransientCache {
-    region: (f64, f64),
+    marker_time: f64,
+    radius: f64,
     sensitivity: f32,
     points: std::sync::Arc<[TransientPoint]>,
 }
@@ -93,7 +96,9 @@ pub struct TapeDigizerApp {
     pub language: Language,
 
     // Tape & Album Organization
+    pub media_source: MediaSourceType,
     pub tape_name: String,
+    pub artist_name: String,
     pub tape_side: TapeSide,
     pub current_project_path: Option<PathBuf>,
     pub current_audio_path: Option<PathBuf>,
@@ -115,9 +120,17 @@ pub struct TapeDigizerApp {
     player: AudioPlayer,
     splitter: TrackSplitter,
 
-    // Timer Settings
+    // Timer & Auto-Stop Settings
     selected_timer_minutes: u32,
     enable_silence_autostop: bool,
+    autostop_threshold_db: f32,
+    autostop_silence_secs: f32,
+    run_on_seconds: u32,
+
+    // Pause Detection Options
+    pause_threshold_db: f32,
+    pause_min_seconds: f32,
+    pause_as_gaps: bool,
 
     // Post-recording Analysis Report
     analysis_report: Option<AudioAnalysisReport>,
@@ -135,6 +148,9 @@ pub struct TapeDigizerApp {
     export_page: usize,
     magnifier_scope_active: bool,
     selected_region: Option<(f64, f64)>,
+    scope_radius_sec: f64,
+    scope_locked_center: Option<f64>,
+    zero_crossing_snap: bool,
     transient_sensitivity: f32,
     show_transients: bool,
     scope_zoom: f32,
@@ -143,6 +159,8 @@ pub struct TapeDigizerApp {
     scope_scroll: f32,
     waveform_scroll: f32,
     active_edit_tool: EditTool,
+    batch_titles_open: bool,
+    batch_titles_text: String,
 
     // Hover Audition (Stationary Mouse Preview)
     hover_preview_enabled: bool,
@@ -150,9 +168,12 @@ pub struct TapeDigizerApp {
     hover_stationary_since: Option<std::time::Instant>,
     hover_audition_time: Option<f64>,
 
-    // Export Options
+    // Export & Mastering Options
     export_directory: PathBuf,
     normalization_mode: NormalizationMode,
+    export_highpass_20hz: bool,
+    export_fade_ms: u32,
+    export_balance_db: f32,
     export_outcome: Option<ExportOutcome>,
 
     // General status/error
@@ -161,7 +182,6 @@ pub struct TapeDigizerApp {
     saved_edits: Option<SavedEdits>,
     pause_preview: Option<MarkerSnapshot>,
     show_tracks: bool,
-    show_inspector: bool,
     show_export: bool,
     #[cfg(target_os = "macos")]
     mac_menu: Option<super::macos_menu::MacMenu>,
@@ -171,8 +191,8 @@ impl TapeDigizerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(crate::ui::theme::studio_visuals());
         cc.egui_ctx.style_mut(|style| {
-            style.spacing.item_spacing = Vec2::new(8.0, 7.0);
-            style.spacing.button_padding = Vec2::new(9.0, 4.0);
+            style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+            style.spacing.button_padding = Vec2::new(8.0, 4.0);
         });
 
         let cfg = crate::config::AppConfig::load();
@@ -215,8 +235,21 @@ impl TapeDigizerApp {
             .or_else(dirs_default_music_dir)
             .unwrap_or_else(|| PathBuf::from("./TapeDigizer_Exports"));
 
-        let timer_minutes = cfg.timer_minutes.unwrap_or(45);
+        let media_source = cfg.media_source.unwrap_or(MediaSourceType::Cassette);
+        let (def_timer, def_auto_db, def_auto_sec, def_pause_db, def_pause_sec) = media_source.defaults();
+
+        let timer_minutes = cfg.timer_minutes.unwrap_or(def_timer);
         let silence_stop = cfg.silence_autostop.unwrap_or(true);
+        let autostop_threshold_db = cfg.autostop_threshold_db.unwrap_or(def_auto_db);
+        let autostop_silence_secs = cfg.autostop_silence_secs.unwrap_or(def_auto_sec);
+        let run_on_seconds = cfg.run_on_seconds.unwrap_or(15);
+        let pause_threshold_db = cfg.pause_threshold_db.unwrap_or(def_pause_db);
+        let pause_min_seconds = cfg.pause_min_seconds.unwrap_or(def_pause_sec);
+        let pause_as_gaps = cfg.pause_as_gaps.unwrap_or(false);
+        let zero_crossing_snap = cfg.zero_crossing_snap.unwrap_or(true);
+        let export_highpass_20hz = cfg.export_highpass_20hz.unwrap_or(true);
+        let export_fade_ms = cfg.export_fade_ms.unwrap_or(15);
+
         let norm_mode = match cfg.normalization_mode.as_deref() {
             Some("track") => NormalizationMode::PeakPerTrack,
             Some("album") => NormalizationMode::PeakAlbum,
@@ -225,10 +258,16 @@ impl TapeDigizerApp {
 
         let lang = cfg.language.unwrap_or(Language::De);
         let tape_name = cfg.last_tape_name.clone().unwrap_or_else(|| "Tonband 01".to_string());
+        let artist_name = cfg.last_artist_name.clone().unwrap_or_default();
+
+        let mut recorder = AudioRecorder::new();
+        recorder.configure_autostop(autostop_threshold_db, autostop_silence_secs, run_on_seconds);
 
         let app = Self {
             language: lang,
+            media_source,
             tape_name,
+            artist_name,
             tape_side: TapeSide::SideA,
             current_project_path: None,
             current_audio_path: None,
@@ -238,11 +277,17 @@ impl TapeDigizerApp {
             selected_device_idx: selected_dev_idx,
             channel_pairs,
             selected_pair_idx,
-            recorder: AudioRecorder::new(),
+            recorder,
             player: AudioPlayer::new(),
             splitter: TrackSplitter::new(),
             selected_timer_minutes: timer_minutes,
             enable_silence_autostop: silence_stop,
+            autostop_threshold_db,
+            autostop_silence_secs,
+            run_on_seconds,
+            pause_threshold_db,
+            pause_min_seconds,
+            pause_as_gaps,
             analysis_report: None,
             waveform_cache: WaveformCache::default(),
             selected_marker_idx: None,
@@ -256,6 +301,9 @@ impl TapeDigizerApp {
             export_page: 0,
             magnifier_scope_active: false,
             selected_region: None,
+            scope_radius_sec: 1.5,
+            scope_locked_center: None,
+            zero_crossing_snap,
             transient_sensitivity: 1.0,
             show_transients: true,
             scope_zoom: 1.0,
@@ -264,19 +312,23 @@ impl TapeDigizerApp {
             scope_scroll: 0.0,
             waveform_scroll: 0.0,
             active_edit_tool: EditTool::Pointer,
+            batch_titles_open: false,
+            batch_titles_text: String::new(),
             hover_preview_enabled: false,
             hover_mouse_pos: None,
             hover_stationary_since: None,
             hover_audition_time: None,
             export_directory: default_export_dir,
             normalization_mode: norm_mode,
+            export_highpass_20hz,
+            export_fade_ms,
+            export_balance_db: 0.0,
             export_outcome: None,
             ui_error_message: None,
             job: None,
             saved_edits: None,
             pause_preview: None,
             show_tracks: true,
-            show_inspector: true,
             show_export: false,
             #[cfg(target_os = "macos")]
             mac_menu: None,
@@ -286,6 +338,29 @@ impl TapeDigizerApp {
         app
     }
 
+    fn apply_media_source_preset(&mut self, source: MediaSourceType) {
+        self.media_source = source;
+        let (timer, auto_db, auto_sec, pause_db, pause_sec) = source.defaults();
+        self.selected_timer_minutes = timer;
+        self.autostop_threshold_db = auto_db;
+        self.autostop_silence_secs = auto_sec;
+        self.pause_threshold_db = pause_db;
+        self.pause_min_seconds = pause_sec;
+        self.recorder.configure_autostop(self.autostop_threshold_db, self.autostop_silence_secs, self.run_on_seconds);
+        self.save_config();
+    }
+
+    fn snap_time_if_enabled(&self, seconds: f64) -> f64 {
+        if self.zero_crossing_snap && self.player.sample_rate() > 0 {
+            let l = self.player.get_samples_l();
+            let r = self.player.get_samples_r();
+            if !l.is_empty() {
+                return crate::splitter::snap_to_zero_crossing(&l, &r, self.player.sample_rate(), seconds, 2.5);
+            }
+        }
+        seconds
+    }
+
     fn preview_marker_drag(&mut self, index: usize, time: f64) {
         if self.marker_drag_cancelled {
             return;
@@ -293,12 +368,15 @@ impl TapeDigizerApp {
         self.marker_drag.get_or_insert_with(|| self.splitter.snapshot());
         self.selected_marker_idx = Some(index);
         self.selected_segment_idx = Some(index + 1);
-        self.splitter.preview_marker_move(index, time, self.player.total_seconds(), self.player.sample_rate());
+        let snapped = self.snap_time_if_enabled(time);
+        self.splitter.preview_marker_move(index, snapped, self.player.total_seconds(), self.player.sample_rate());
     }
 
     fn nudge_marker(&mut self, index: usize, delta: f64, duration: f64) {
         if let Some(&time) = self.splitter.markers.get(index) {
-            self.splitter.move_marker(index, time + delta, duration, self.player.sample_rate());
+            let target = self.snap_time_if_enabled(time + delta);
+            self.splitter.move_marker(index, target, duration, self.player.sample_rate());
+            self.scope_locked_center = None;
         }
     }
 
@@ -309,8 +387,10 @@ impl TapeDigizerApp {
         self.pending_delete_marker = None;
         self.marker_drag = None;
         self.selected_region = None;
+        self.scope_locked_center = None;
         self.pause_preview = None;
         self.show_export = false;
+        self.batch_titles_open = false;
         self.export_outcome = None;
         self.transient_cache = None;
         self.magnifier_scope_active = false;
@@ -337,9 +417,20 @@ impl TapeDigizerApp {
             export_directory: Some(self.export_directory.clone()),
             timer_minutes: Some(self.selected_timer_minutes),
             silence_autostop: Some(self.enable_silence_autostop),
+            autostop_threshold_db: Some(self.autostop_threshold_db),
+            autostop_silence_secs: Some(self.autostop_silence_secs),
+            run_on_seconds: Some(self.run_on_seconds),
+            pause_threshold_db: Some(self.pause_threshold_db),
+            pause_min_seconds: Some(self.pause_min_seconds),
+            pause_as_gaps: Some(self.pause_as_gaps),
+            zero_crossing_snap: Some(self.zero_crossing_snap),
+            export_highpass_20hz: Some(self.export_highpass_20hz),
+            export_fade_ms: Some(self.export_fade_ms),
             normalization_mode: Some(norm_str.to_string()),
             language: Some(self.language),
             last_tape_name: Some(self.tape_name.clone()),
+            last_artist_name: Some(self.artist_name.clone()),
+            media_source: Some(self.media_source),
         };
         cfg.save();
     }
@@ -776,12 +867,14 @@ impl TapeDigizerApp {
         let left = self.player.get_samples_l();
         let right = self.player.get_samples_r();
         let rate = self.player.sample_rate();
+        let thresh_db = self.pause_threshold_db;
+        let min_sec = f64::from(self.pause_min_seconds);
         self.start_job(ctx, self.text("Pausen werden gesucht …", "Finding pauses …"), move || {
             let mut proposal = TrackSplitter::new();
             if gaps {
-                proposal.detect_silence_pauses_as_gaps(&left, &right, rate, -45.0, 1.8);
+                proposal.detect_silence_pauses_as_gaps(&left, &right, rate, thresh_db, min_sec);
             } else {
-                proposal.detect_silence_pauses(&left, &right, rate, -45.0, 1.8);
+                proposal.detect_silence_pauses(&left, &right, rate, thresh_db, min_sec);
             }
             Ok(JobResult::Pauses(proposal.snapshot()))
         });
@@ -847,12 +940,14 @@ impl eframe::App for TapeDigizerApp {
                 self.splitter.restore(before);
                 self.marker_drag_cancelled = true;
             }
+            self.scope_locked_center = None;
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
             if let Some(before) = self.marker_drag.take() {
                 self.splitter.commit_edit(before);
             }
             self.marker_drag_cancelled = false;
+            self.scope_locked_center = None;
         }
 
         if !self.show_export {
@@ -908,14 +1003,13 @@ impl eframe::App for TapeDigizerApp {
                 }
                 if key_h {
                     self.hover_preview_enabled = !self.hover_preview_enabled;
-
                 }
                 if key_l {
                     self.magnifier_scope_active = !self.magnifier_scope_active;
                 }
                 if let Some(m_idx) = self.selected_marker_idx {
                     let total_sec = self.player.total_seconds();
-                    let delta = if shift { 1.0 } else { 0.1 };
+                    let delta = if shift { 0.5 } else { 0.05 };
                     if key_left {
                         self.nudge_marker(m_idx, -delta, total_sec);
                     }
@@ -938,7 +1032,6 @@ impl eframe::App for TapeDigizerApp {
                     }
                 }
             }
-
         }
 
         #[cfg(target_os = "macos")]
@@ -1028,7 +1121,7 @@ impl eframe::App for TapeDigizerApp {
                         let seconds = self.recorder.remaining_duration()
                             .map_or(0, |remaining| remaining.as_secs_f64().ceil() as u64);
                         let label = self.text("Nachlauf", "Recording tail");
-                        ui.label(format!("● {label} {seconds} s"));
+                        ui.colored_label(LED_AMBER, format!("● {label} {seconds} s"));
                     } else if is_recording {
                         let time = self.recorder.elapsed_duration().as_secs_f64();
                         ui.colored_label(LED_RED,
@@ -1037,7 +1130,7 @@ impl eframe::App for TapeDigizerApp {
                         ui.spinner();
                         ui.label(self.text("WAV wird abgeschlossen …", "Finalizing WAV …"));
                     } else if is_monitoring {
-                        ui.label(self.text("Pegelcheck aktiv", "Monitoring"));
+                        ui.colored_label(LED_GREEN, self.text("● Pegelcheck aktiv", "● Monitoring"));
                     } else if self.current_audio_path.is_some() {
                         ui.label(format!("{} · {}", self.tape_name, self.tape_side.label(self.language)));
                         if self.saved_edits.as_ref() != Some(&self.edits()) {
@@ -1049,29 +1142,52 @@ impl eframe::App for TapeDigizerApp {
                             self.language = if self.language == Language::De { Language::En } else { Language::De };
                             self.save_config();
                         }
+                        if self.current_audio_path.is_none() && !self.recorder.is_busy() && self.job.is_none() {
+                            if ui.button(self.text("WAV / Projekt öffnen · ⌘O", "Open WAV / project · ⌘O")).clicked() {
+                                self.open_project_dialog(ctx);
+                            }
+                        }
                     });
                 });
                 if self.active_tab == ActiveTab::Recording {
                     ui.add_space(5.0);
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
-                        let label = match recorder_state {
-                            RecorderState::WaitingForSignal => self.text("Warten abbrechen", "Cancel waiting"),
-                            RecorderState::Recording => self.text("Stopp mit 1 Min. Nachlauf", "Stop with 1 min tail"),
-                            RecorderState::RunOn => self.text("Nachlauf läuft", "Recording tail"),
-                            _ => self.text("Aufnahme starten", "Start recording"),
+                        let stop_label = if self.run_on_seconds > 0 {
+                            if self.language == Language::De {
+                                format!("Stopp ({}s Nachlauf)", self.run_on_seconds)
+                            } else {
+                                format!("Stop ({}s tail)", self.run_on_seconds)
+                            }
+                        } else {
+                            self.text("Aufnahme stoppen", "Stop recording").to_string()
                         };
-                        let record = record_button(label);
+                        let label = match recorder_state {
+                            RecorderState::WaitingForSignal => self.text("Warten abbrechen", "Cancel waiting").to_string(),
+                            RecorderState::Recording => stop_label,
+                            RecorderState::RunOn => self.text("Nachlauf läuft …", "Recording tail …").to_string(),
+                            _ => self.text("Aufnahme starten", "Start recording").to_string(),
+                        };
+                        let record = record_button(&label);
                         let ready = waiting_for_signal || recorder_state == RecorderState::Recording
                             || (!self.recorder.is_busy() && self.job.is_none() && self.current_channel_pair().is_some());
                         if ui.add_enabled(ready, record).clicked() {
                             self.record_or_stop();
                         }
+                        if matches!(recorder_state, RecorderState::Recording | RecorderState::RunOn)
+                            && (self.run_on_seconds > 0 || recorder_state == RecorderState::RunOn)
+                        {
+                            if ui.button(self.text("⏹ Sofort beenden", "⏹ Stop immediately")).clicked() {
+                                self.recorder.stop_immediately();
+                            }
+                        }
+                        ui.separator();
+                        ui.label(RichText::new(self.media_source.label(self.language)).color(ACCENT));
                         if let Some(device) = self.current_device() {
                             ui.label(&device.name);
                         }
                         if let Some(pair) = self.current_channel_pair() {
-                            ui.label(pair.label);
+                            ui.label(RichText::new(pair.label).color(TEXT_SECONDARY));
                         }
                     });
                 }
@@ -1102,7 +1218,6 @@ impl eframe::App for TapeDigizerApp {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(job.label);
-
                     });
                 }
                 let enabled = !self.show_export && self.job.is_none() && !finalizing && (!self.recorder.is_busy() || self.active_tab == ActiveTab::Recording);
@@ -1170,6 +1285,11 @@ impl TapeDigizerApp {
             return;
         }
         self.player.pause();
+        self.recorder.configure_autostop(
+            self.autostop_threshold_db,
+            self.autostop_silence_secs,
+            self.run_on_seconds,
+        );
         let timer = (self.selected_timer_minutes != 0)
             .then(|| Duration::from_secs(u64::from(self.selected_timer_minutes) * 60));
         self.ui_error_message = self.next_recording_path().and_then(|target| {
@@ -1190,13 +1310,14 @@ impl TapeDigizerApp {
             }
             time_display(ui, format!("{}  /  {}", timecode(position), timecode(total)));
             ui.separator();
-            if ui.add_enabled(total > 0.0, egui::Button::new(self.text("Marker setzen · M", "Add marker · M"))).clicked()
+            if ui.add_enabled(total > 0.0, egui::Button::new(self.text("│ Marker setzen · M", "│ Add marker · M"))).clicked()
             {
                 self.add_marker(position);
             }
+            let lupe = self.text("🔍 Schnitt-Lupe · L", "🔍 Cut Magnifier · L");
+            ui.toggle_value(&mut self.magnifier_scope_active, lupe);
             let tracks = self.text("Trackliste", "Track list");
             ui.toggle_value(&mut self.show_tracks, tracks);
-            ui.toggle_value(&mut self.show_inspector, "Inspector");
             if ui.add_enabled(total > 0.0, primary_button(self.text("Exportieren … · ⇧⌘E", "Export … · ⇧⌘E"))).clicked() {
                 self.export_page = 0;
                 self.show_export = true;
@@ -1205,84 +1326,24 @@ impl TapeDigizerApp {
     }
 
     fn add_marker(&mut self, position: f64) {
-        if let Some(index) = self.splitter.add_marker(position, self.player.total_seconds(), self.player.sample_rate()) {
+        let snapped = self.snap_time_if_enabled(position);
+        if let Some(index) = self.splitter.add_marker(snapped, self.player.total_seconds(), self.player.sample_rate()) {
             self.select_marker(index);
-            self.show_inspector = true;
+            self.magnifier_scope_active = true;
         }
     }
 
     fn select_marker(&mut self, index: usize) {
         self.selected_marker_idx = Some(index);
         self.selected_segment_idx = Some(index + 1);
+        self.selected_region = None;
+        self.scope_locked_center = None;
     }
 
     fn set_scope_region(&mut self, region: (f64, f64)) {
         self.selected_region = Some(region);
         self.scope_zoom = 1.0;
         self.scope_scroll = 0.0;
-    }
-
-    fn render_marker_inspector(&mut self, ui: &mut Ui, total: f64) {
-        let Some(index) = self.selected_marker_idx else { return; };
-        let Some(&time) = self.splitter.markers.get(index) else { return; };
-        let rate = self.player.sample_rate();
-        studio_panel(ui, self.text("Schnittmarke", "Cut marker"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("T{:02}", index + 2)).strong().monospace());
-                let mut seconds = time;
-                let edit = egui::DragValue::new(&mut seconds)
-                    .range(0.0..=total)
-                    .speed(0.001)
-                    .custom_formatter(|seconds, _| timecode(seconds))
-                    .custom_parser(parse_timecode)
-                    .update_while_editing(false);
-                if ui.add(edit).on_hover_text(self.text("Zeitcode bearbeiten", "Edit timecode")).changed() {
-                    if ui.input(|input| input.pointer.primary_down() && input.pointer.is_decidedly_dragging()) {
-                        self.preview_marker_drag(index, seconds);
-                    } else {
-                        self.splitter.move_marker(index, seconds, total, rate);
-                    }
-                }
-                let frame = (time * f64::from(rate)).round() as i64;
-                let mut requested = frame;
-                let position = ui.add(
-                    egui::DragValue::new(&mut requested).range(1..=self.player.total_samples().saturating_sub(1) as i64)
-                        .speed(1.0).prefix("Frame ").update_while_editing(false),
-                );
-                if position.changed() {
-                    let time = requested as f64 / f64::from(rate);
-                    if position.dragged() {
-                        self.preview_marker_drag(index, time);
-                    } else {
-                        self.splitter.move_marker(index, time, total, rate);
-                    }
-                }
-                for (label, delta) in [
-                    ("−10 ms", -0.01), ("−1", -1.0 / f64::from(rate)),
-                    ("+1", 1.0 / f64::from(rate)), ("+10 ms", 0.01),
-                ] {
-                    if ui.small_button(label).on_hover_text(self.text("Schnittgrenze verschieben", "Move cut boundary")).clicked() {
-                        self.nudge_marker(index, delta, total);
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.button(self.text("Davor hören", "Hear before")).clicked() {
-                    self.player.play_range((time - 2.0).max(0.0), time);
-                }
-                if ui.button(self.text("Danach hören", "Hear after")).clicked() {
-                    self.player.play_range(time, (time + 2.0).min(total));
-                }
-                if ui.button(self.text("Detailzoom", "Detail zoom")).clicked() {
-                    self.set_scope_region(((time - 1.5).max(0.0), (time + 1.5).min(total)));
-                    self.magnifier_scope_active = true;
-                }
-                if ui.button(format!("{} · ⌫", self.language.btn_delete())).clicked() {
-                    self.request_marker_delete(index);
-                }
-            });
-        });
-        ui.add_space(8.0);
     }
 
     fn request_marker_delete(&mut self, index: usize) {
@@ -1302,15 +1363,50 @@ impl TapeDigizerApp {
             let setup = &mut columns[0];
             let editable = !self.recorder.is_busy();
             setup.add_enabled_ui(editable, |ui| {
-                studio_panel(ui, self.text("Band & Ablage", "Tape & storage"), |ui| {
-                    ui.label(RichText::new(self.text("Bandname", "Tape name")).color(TEXT_SECONDARY));
-                    let width = ui.available_width();
-                    let name = ui.add(egui::TextEdit::singleline(&mut self.tape_name)
-                        .desired_width(width).min_size(Vec2::new(width, 30.0))
-                        .hint_text(self.language.hint_tape_name()));
-                    if name.lost_focus() {
-                        self.save_config();
-                    }
+                studio_panel(ui, self.text("Quelle & Projekt", "Source & project"), |ui| {
+                    // Media Source Presets (Kassette, Tonband, Vinyl LP, Single 45)
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(self.text("Quelle:", "Source:")).color(TEXT_SECONDARY));
+                        for src in [
+                            MediaSourceType::Cassette,
+                            MediaSourceType::ReelToReel,
+                            MediaSourceType::VinylLp,
+                            MediaSourceType::VinylSingle,
+                        ] {
+                            if ui.add(mode_button(src.label(self.language), self.media_source == src)).clicked() {
+                                self.apply_media_source_preset(src);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+
+                    // Album/Bandname + Interpret/Artist side-by-side
+                    ui.columns(2, |cols| {
+                        cols[0].label(RichText::new(self.text("Medium / Album", "Tape / album")).color(TEXT_SECONDARY).small());
+                        let w0 = cols[0].available_width();
+                        let name_resp = cols[0].add(
+                            egui::TextEdit::singleline(&mut self.tape_name)
+                                .desired_width(w0)
+                                .hint_text(self.language.hint_tape_name()),
+                        );
+                        if name_resp.lost_focus() {
+                            self.save_config();
+                        }
+
+                        cols[1].label(RichText::new(self.text("Interpret (optional)", "Artist (optional)")).color(TEXT_SECONDARY).small());
+                        let w1 = cols[1].available_width();
+                        let artist_hint = self.text("z. B. Pink Floyd", "e.g. Pink Floyd");
+                        let artist_resp = cols[1].add(
+                            egui::TextEdit::singleline(&mut self.artist_name)
+                                .desired_width(w1)
+                                .hint_text(artist_hint),
+                        );
+                        if artist_resp.lost_focus() {
+                            self.save_config();
+                        }
+                    });
+
+                    ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
                         for side in [TapeSide::SideA, TapeSide::SideB] {
                             if ui.add(mode_button(side.label(self.language), self.tape_side == side)).clicked() {
@@ -1323,30 +1419,41 @@ impl TapeDigizerApp {
                                 self.save_config();
                             }
                         }
+                        if ui.button(self.text("Im Finder", "Reveal")).clicked() {
+                            self.reveal_session_in_finder();
+                        }
                     });
                     let folder = self.session_project_dir().display().to_string();
-                    ui.add(egui::Label::new(RichText::new(&folder).color(TEXT_SECONDARY)).truncate())
+                    ui.add(egui::Label::new(RichText::new(&folder).color(TEXT_SECONDARY).small()).truncate())
                         .on_hover_text(folder);
                 });
-                ui.add_space(8.0);
+
+                ui.add_space(7.0);
                 studio_panel(ui, self.text("Audioeingang", "Audio input"), |ui| {
-                    let device = self.current_device().map(|device| format!("{}  ·  {} ch", device.name, device.channels))
-                        .unwrap_or_else(|| self.language.label_no_device().into());
-                    let selected = self.selected_device_idx;
-                    egui::ComboBox::from_id_salt("device_combo")
-                        .width(ui.available_width()).truncate().selected_text(device)
-                        .show_ui(ui, |ui| {
-                            for (index, device) in self.available_devices.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_device_idx, index, &device.name);
+                    ui.horizontal(|ui| {
+                        let device = self.current_device().map(|device| format!("{}  ·  {} ch", device.name, device.channels))
+                            .unwrap_or_else(|| self.language.label_no_device().into());
+                        let selected = self.selected_device_idx;
+                        let combo_w = (ui.available_width() - 126.0).max(120.0);
+                        egui::ComboBox::from_id_salt("device_combo")
+                            .width(combo_w).truncate().selected_text(device)
+                            .show_ui(ui, |ui| {
+                                for (index, device) in self.available_devices.iter().enumerate() {
+                                    ui.selectable_value(&mut self.selected_device_idx, index, &device.name);
+                                }
+                            });
+                        if self.selected_device_idx != selected {
+                            if let Some(device) = self.current_device() {
+                                self.channel_pairs = get_channel_pairs_for_device(device);
+                                self.selected_pair_idx = 0;
+                                self.save_config();
                             }
-                        });
-                    if self.selected_device_idx != selected {
-                        if let Some(device) = self.current_device() {
-                            self.channel_pairs = get_channel_pairs_for_device(device);
-                            self.selected_pair_idx = 0;
-                            self.save_config();
                         }
-                    }
+                        if ui.button(format!("↻ {}", self.language.btn_rescan())).clicked() {
+                            self.refresh_device_list();
+                        }
+                    });
+
                     let channels = self.current_channel_pair().map(|pair| pair.label)
                         .unwrap_or_else(|| self.language.label_select_channel().into());
                     let selected = self.selected_pair_idx;
@@ -1360,16 +1467,15 @@ impl TapeDigizerApp {
                     if self.selected_pair_idx != selected {
                         self.save_config();
                     }
-                    if ui.small_button(self.language.btn_rescan()).clicked() {
-                        self.refresh_device_list();
-                    }
                 });
-                ui.add_space(8.0);
-                studio_panel(ui, self.text("Aufnahmedauer", "Recording duration"), |ui| {
-                    let before = self.selected_timer_minutes;
+
+                ui.add_space(7.0);
+                studio_panel(ui, self.text("Aufnahmedauer & Auto-Stopp", "Duration & auto-stop"), |ui| {
+                    let before_timer = self.selected_timer_minutes;
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         for (minutes, label) in [
-                            (15, "15 min"), (30, "30 min"), (45, "45 min"), (60, "60 min"),
+                            (10, "10m"), (25, "25m"), (30, "30m"), (45, "45m"), (60, "60m"), (90, "90m"),
                             (0, self.language.preset_unlimited()),
                         ] {
                             if ui.add(mode_button(label, self.selected_timer_minutes == minutes)).clicked() {
@@ -1377,10 +1483,54 @@ impl TapeDigizerApp {
                             }
                         }
                     });
-                    let auto_stop = self.text("Bei Bandende automatisch stoppen", "Stop automatically at tape end");
-                    let changed = ui.checkbox(&mut self.enable_silence_autostop, auto_stop)
-                        .on_hover_text(self.language.checkbox_silence_autostop()).changed();
-                    if changed || self.selected_timer_minutes != before {
+
+                    let mut cfg_changed = self.selected_timer_minutes != before_timer;
+
+                    ui.horizontal_wrapped(|ui| {
+                        let auto_stop = self.text("Auto-Stopp bei Stille", "Auto-stop on silence");
+                        if ui.checkbox(&mut self.enable_silence_autostop, auto_stop)
+                            .on_hover_text(self.language.checkbox_silence_autostop()).changed()
+                        {
+                            cfg_changed = true;
+                        }
+                        ui.separator();
+                        ui.label(RichText::new(self.text("Nachlauf:", "Tail:")).color(TEXT_SECONDARY).small());
+                        for secs in [0_u32, 10, 15, 30, 60] {
+                            let lbl = format!("{secs}s");
+                            if ui.selectable_label(self.run_on_seconds == secs, lbl)
+                                .on_hover_text(self.text("Nachlaufzeit beim manuellen Stopp", "Tail duration when stopping manually"))
+                                .clicked()
+                            {
+                                self.run_on_seconds = secs;
+                                cfg_changed = true;
+                            }
+                        }
+                    });
+
+                    if self.enable_silence_autostop {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().slider_width = 76.0;
+                            let thresh_lbl = self.text("Schwelle", "Threshold");
+                            if ui.add(egui::Slider::new(&mut self.autostop_threshold_db, -65.0..=-30.0)
+                                .step_by(1.0).text(thresh_lbl).suffix(" dB")).changed()
+                            {
+                                cfg_changed = true;
+                            }
+                            let dur_lbl = self.text("Dauer", "Hold");
+                            if ui.add(egui::Slider::new(&mut self.autostop_silence_secs, 3.0..=30.0)
+                                .step_by(1.0).text(dur_lbl).suffix(" s")).changed()
+                            {
+                                cfg_changed = true;
+                            }
+                        });
+                    }
+
+                    if cfg_changed {
+                        self.recorder.configure_autostop(
+                            self.autostop_threshold_db,
+                            self.autostop_silence_secs,
+                            self.run_on_seconds,
+                        );
                         self.save_config();
                     }
                 });
@@ -1389,31 +1539,47 @@ impl TapeDigizerApp {
             let signal = &mut columns[1];
             studio_panel(signal, self.text("Eingangspegel", "Input levels"), |ui| {
                 let monitoring = self.recorder.state() == RecorderState::Monitoring;
-                let label = if monitoring {
-                    self.text("Pegelcheck beenden", "End level check")
-                } else {
-                    self.text("Pegel prüfen", "Check levels")
-                };
-                if ui.add_enabled(editable && (monitoring || self.current_channel_pair().is_some()),
-                    mode_button(label, monitoring)).clicked()
-                {
-                    if monitoring {
-                        self.recorder.stop_monitoring();
-                    } else if let (Some(device), Some(pair)) = (self.current_device(), self.current_channel_pair()) {
-                        let name = device.name.clone();
-                        self.ui_error_message = self.recorder.start_monitoring(&name, pair).err();
+                let meter_snap = self.recorder.get_meter();
+                ui.horizontal_wrapped(|ui| {
+                    let label = if monitoring {
+                        self.text("⏹ Pegelcheck beenden", "⏹ End level check")
+                    } else {
+                        self.text("▶ Pegel prüfen (Monitoring)", "▶ Check levels")
+                    };
+                    if ui.add_enabled(editable && (monitoring || self.current_channel_pair().is_some()),
+                        mode_button(label, monitoring)).clicked()
+                    {
+                        if monitoring {
+                            self.recorder.stop_monitoring();
+                        } else if let (Some(device), Some(pair)) = (self.current_device(), self.current_channel_pair()) {
+                            let name = device.name.clone();
+                            self.ui_error_message = self.recorder.start_monitoring(&name, pair).err();
+                        }
                     }
+                    if ui.small_button(self.text("Peak/Clip Reset", "Reset peaks"))
+                        .on_hover_text(self.text("Gehaltene Spitzenwerte & Clip-Anzeige zurücksetzen", "Reset peak hold & clip indicator"))
+                        .clicked()
+                    {
+                        self.recorder.reset_meter_peaks();
+                    }
+                    if meter_snap.peak_hold_l_db > -60.0 || meter_snap.peak_hold_r_db > -60.0 {
+                        let diff = meter_snap.peak_hold_l_db - meter_snap.peak_hold_r_db;
+                        let bal_col = if diff.abs() > 3.0 { LED_AMBER } else { TEXT_SECONDARY };
+                        ui.label(RichText::new(format!("Δ L/R: {:+.1} dB", diff)).monospace().small().color(bal_col));
+                    }
+                });
+                if render_stereo_meter(ui, &meter_snap) {
+                    self.recorder.reset_meter_peaks();
                 }
-                render_stereo_meter(ui, &self.recorder.get_meter());
                 ui.label(RichText::new(self.language.meter_instructions()).color(TEXT_SECONDARY).small());
             });
-            signal.add_space(8.0);
+            signal.add_space(7.0);
             studio_panel(signal, self.text("Live-Wellenform", "Live waveform"), |ui| {
                 let state = self.recorder.state();
                 let recording = matches!(state, RecorderState::Recording | RecorderState::RunOn);
                 let elapsed = self.recorder.elapsed_duration().as_secs_f64();
                 let limit = (self.selected_timer_minutes > 0)
-                    .then(|| f64::from(self.selected_timer_minutes) * 60.0 + 60.0);
+                    .then(|| f64::from(self.selected_timer_minutes) * 60.0 + self.run_on_seconds as f64);
                 let idle = match state {
                     RecorderState::WaitingForSignal => self.text("Warte auf Eingangssignal …", "Waiting for input signal …"),
                     RecorderState::Monitoring => self.language.live_waveform_monitoring(),
@@ -1428,7 +1594,7 @@ impl TapeDigizerApp {
                         let label = self.text("Verbleibend", "Remaining");
                         ui.label(format!("{label}  {}", timecode(remaining.as_secs_f64())));
                     } else {
-                        ui.label(RichText::new("PCM 24-bit  ·  Stereo").color(TEXT_SECONDARY));
+                        ui.label(RichText::new(format!("PCM 24-bit · Stereo · {}", self.media_source.label(self.language))).color(TEXT_SECONDARY));
                     }
                 });
             });
@@ -1447,7 +1613,7 @@ impl TapeDigizerApp {
                 ui.add_space(8.0);
                 ui.colored_label(LED_RED, format!("⚠️ {}", err));
             } else {
-                ui.label(if self.language == Language::De { "Starte zuerst eine Aufnahme in Tab 1." } else { "Start a recording in Tab 1 first." });
+                ui.label(if self.language == Language::De { "Starte zuerst eine Aufnahme in Tab 1 oder öffne eine WAV-Datei (⌘O)." } else { "Start a recording in Tab 1 first or open a WAV file (⌘O)." });
             }
             ui.add_space(12.0);
             if ui.button(if self.language == Language::De { "Zurück zu Tab 1 (Aufnahme)" } else { "Back to Tab 1 (Recording)" }).clicked() {
@@ -1456,22 +1622,66 @@ impl TapeDigizerApp {
             return;
         };
 
-        // Simulated Analog Zoom L-12 Gain Knob Card
+        // Top 2-column layout: Left = Analog Gain Knob Card, Right = Stereo Balance & Signal Health
         let (adjustment_db, is_clip) = match report.diagnosis {
             LevelDiagnosis::Clipped { recommended_cut_db, .. } => (-recommended_cut_db, true),
             LevelDiagnosis::TooQuiet { recommended_boost_db, .. } => (recommended_boost_db, false),
             LevelDiagnosis::Optimal { .. } => (0.0, false),
         };
 
-        render_gain_knob_card(
-            ui,
-            self.language.card_knob_title(),
-            report.max_peak_db,
-            adjustment_db,
-            is_clip,
-        );
+        ui.columns(2, |cols| {
+            render_gain_knob_card(
+                &mut cols[0],
+                self.language.card_knob_title(),
+                report.max_peak_db,
+                adjustment_db,
+                is_clip,
+            );
 
-        ui.add_space(14.0);
+            studio_panel(&mut cols[1], self.text("Stereo-Balance & Analog-Diagnose", "Stereo balance & analog diagnostics"), |ui| {
+                let bal = report.stereo_balance_db;
+                let abs_bal = bal.abs();
+                let (bal_text, bal_col) = if abs_bal < 0.8 {
+                    (self.text("Ausgewogen (L ≈ R)", "Balanced (L ≈ R)").to_string(), LED_GREEN)
+                } else if bal > 0.0 {
+                    (format!("Links +{:.1} dB lauter", bal), if abs_bal > 2.5 { LED_AMBER } else { TEXT_PRIMARY })
+                } else {
+                    (format!("Rechts +{:.1} dB lauter", -bal), if abs_bal > 2.5 { LED_AMBER } else { TEXT_PRIMARY })
+                };
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(self.text("L/R Balance:", "L/R Balance:")).color(TEXT_SECONDARY));
+                    ui.label(RichText::new(bal_text).strong().monospace().color(bal_col));
+                    if abs_bal >= 0.5 {
+                        let active = (self.export_balance_db + bal).abs() < 0.2 && self.export_balance_db.abs() >= 0.2;
+                        let btn_lbl = if active {
+                            self.text("✓ L/R-Ausgleich aktiv", "✓ L/R trim active")
+                        } else {
+                            self.text("Beim Export ausgleichen", "Compensate on export")
+                        };
+                        if ui.add(mode_button(btn_lbl, active)).clicked() {
+                            self.export_balance_db = if active { 0.0 } else { (-bal).clamp(-12.0, 12.0) };
+                        }
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!(
+                        "RMS L: {:.1} dB  ·  RMS R: {:.1} dB  ·  Dynamik (Crest): {:.1} dB  ·  DC-Offset: {:.2}%",
+                        report.rms_left_db, report.rms_right_db, report.crest_factor_db, report.dc_offset_percent
+                    )).monospace().small().color(TEXT_SECONDARY));
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    let hp_lbl = self.text("20 Hz Subsonic-/Rumpelfilter (ideal für Schallplatte & Tonband)", "20 Hz subsonic rumble & DC filter");
+                    if ui.checkbox(&mut self.export_highpass_20hz, hp_lbl).changed() {
+                        self.save_config();
+                    }
+                });
+            });
+        });
+
+        ui.add_space(12.0);
 
         // 4 Hardware Stat Cards
         ui.horizontal(|ui| {
@@ -1496,7 +1706,7 @@ impl TapeDigizerApp {
             render_hardware_metric(ui, card_w, clip_label, &clip_str, clip_col);
         });
 
-        ui.add_space(18.0);
+        ui.add_space(14.0);
 
         ui.horizontal_wrapped(|ui| {
             if ui.button(self.language.btn_retry()).clicked() {
@@ -1512,94 +1722,105 @@ impl TapeDigizerApp {
     // TAB 3: Schnitt & Export
     // -------------------------------------------------------------
     fn render_tab_split_export(&mut self, ui: &mut Ui) {
-        ui.add_space(2.0);
-
         let total_sec = self.player.total_seconds();
         let cur_sec = self.player.current_seconds();
         let has_audio = total_sec > 0.1 && !self.waveform_cache.levels.is_empty();
 
         if !has_audio {
-            ui.add_space(4.0);
             egui::Frame::none()
                 .fill(Color32::from_rgb(34, 36, 44))
                 .stroke(Stroke::new(1.0, BORDER_MID))
                 .rounding(5.0)
-                .inner_margin(Vec2::new(14.0, 8.0))
+                .inner_margin(Vec2::new(12.0, 6.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("ℹ").monospace().strong().color(LED_AMBER));
                         let note = if self.language == Language::De {
-                            "Noch keine Audiodatei geladen. Starte eine Aufnahme in Tab 1 oder öffne ein gespeichertes Projekt (⌘O)."
+                            "Noch keine Audiodatei geladen. Starte eine Aufnahme in Tab 1 oder öffne ein gespeichertes Projekt / WAV (⌘O)."
                         } else {
-                            "No audio recorded or loaded yet. Start recording in Tab 1 or open an existing project (⌘O)."
+                            "No audio recorded or loaded yet. Start recording in Tab 1 or open an existing project / WAV (⌘O)."
                         };
-                        ui.label(RichText::new(note).color(TEXT_SECONDARY));
+                        ui.label(RichText::new(note).color(TEXT_SECONDARY).small());
                     });
                 });
+            ui.add_space(4.0);
         }
 
-        ui.add_space(8.0);
-
         let show_scope = self.magnifier_scope_active && has_audio;
-        if show_scope {
-            ui.columns(2, |columns| {
-                let timeline = &mut columns[0];
-                self.render_timeline(timeline, total_sec, cur_sec, has_audio, 148.0);
-                self.render_pause_proposal(timeline);
-                let tracks = self.splitter.get_tracks(total_sec);
-                self.render_track_list(timeline, &tracks);
-
-                let details = &mut columns[1];
-                self.render_detail_panel(details, total_sec, cur_sec);
-                if self.show_inspector {
-                    self.render_marker_inspector(details, total_sec);
-                }
-            });
+        let wf_height = if show_scope {
+            112.0
         } else {
-            let height = (ui.available_height() * 0.37).clamp(148.0, 300.0);
-            self.render_timeline(ui, total_sec, cur_sec, has_audio, height);
-            if self.show_inspector {
-                self.render_marker_inspector(ui, total_sec);
-            }
-            self.render_pause_proposal(ui);
-            let tracks = self.splitter.get_tracks(total_sec);
+            (ui.available_height() * 0.34).clamp(124.0, 240.0)
+        };
+
+        // Full-width main Stereo Waveform always at the top
+        self.render_timeline(ui, total_sec, cur_sec, has_audio, wf_height);
+        ui.add_space(4.0);
+
+        let tracks = self.splitter.get_tracks(total_sec);
+        if show_scope && self.show_tracks {
+            ui.columns(2, |columns| {
+                self.render_track_list(&mut columns[0], &tracks);
+                self.render_detail_panel(&mut columns[1], total_sec, cur_sec);
+            });
+        } else if show_scope {
+            self.render_detail_panel(ui, total_sec, cur_sec);
+        } else {
             self.render_track_list(ui, &tracks);
         }
     }
 
     fn render_timeline(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64, has_audio: bool, waveform_height: f32) {
-        // Stereo waveform
-        studio_panel(ui, self.text("Stereo-Wellenform", "Stereo waveform"), |ui| {
-            ui.horizontal_wrapped(|ui| {
+        studio_panel(ui, self.text("Stereo-Wellenform (Gesamtübersicht)", "Stereo waveform (Overview)"), |ui| {
+            // Top compact bar: Edit tools + Hover Audition + Schnitt-Lupe + Zero-Crossing + Undo/Redo + Zoom
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 for (tool, name, key) in [
                     (EditTool::Pointer, self.text("↖ Zeiger", "↖ Pointer"), "V"),
-                    (EditTool::Scissor, self.text("│ Schneiden", "│ Split"), "S"),
+                    (EditTool::Scissor, self.text("│ Schnitt", "│ Split"), "S"),
                     (EditTool::Select, self.text("Bereich", "Range"), "R"),
                 ] {
-                    if ui.add(mode_button(format!("{name} · {key}"), self.active_edit_tool == tool)).clicked() {
+                    if ui.add(mode_button(format!("{name}·{key}"), self.active_edit_tool == tool)).clicked() {
                         self.active_edit_tool = tool;
                     }
                 }
-            });
-            ui.horizontal(|ui| {
-                let preview = self.text("Hover-Vorhören", "Hover audition");
-                let detail = self.text("Detailansicht", "Detail view");
-                ui.toggle_value(&mut self.hover_preview_enabled, format!("{preview} · H"));
-                ui.toggle_value(&mut self.magnifier_scope_active, format!("{detail} · L"));
                 ui.separator();
-                if ui.add_enabled(self.splitter.can_undo(), egui::Button::new("↶ ⌘Z"))
+                let preview = self.text("Vorhören", "Audition");
+                let detail = self.text("🔍 Lupe", "🔍 Scope");
+                let zc_lbl = self.text("0-Snap", "0-Snap");
+                let zc_tip = self.text("Schnittmarken automatisch auf Nulldurchgang einrasten (verhindert Knackser)", "Snap markers to zero crossings to prevent clicks");
+                ui.toggle_value(&mut self.hover_preview_enabled, format!("{preview}·H"));
+                ui.toggle_value(&mut self.magnifier_scope_active, format!("{detail}·L"));
+                if ui.checkbox(&mut self.zero_crossing_snap, zc_lbl)
+                    .on_hover_text(zc_tip)
+                    .changed()
+                {
+                    self.save_config();
+                }
+                ui.separator();
+                if ui.add_enabled(self.splitter.can_undo(), egui::Button::new("↶").small())
                     .on_hover_text(self.language.btn_undo()).clicked()
                 {
                     self.undo_marker_edit(false);
                 }
-                if ui.add_enabled(self.splitter.can_redo(), egui::Button::new("↷ ⇧⌘Z"))
+                if ui.add_enabled(self.splitter.can_redo(), egui::Button::new("↷").small())
                     .on_hover_text(self.language.btn_redo()).clicked()
                 {
                     self.undo_marker_edit(true);
                 }
+                ui.separator();
+                ui.spacing_mut().slider_width = 48.0;
+                ui.add(egui::Slider::new(&mut self.waveform_zoom, 1.0..=25.0)
+                    .text("Zoom").suffix("×"));
+                let gain = self.text("Pegel", "Gain");
+                ui.add(egui::Slider::new(&mut self.waveform_vertical_zoom, 1.0..=16.0)
+                    .text(gain).suffix("×"));
+                if ui.small_button("1:1").on_hover_text(self.text("Ganzes Band anzeigen", "Fit entire tape")).clicked() {
+                    self.waveform_zoom = 1.0;
+                    self.waveform_vertical_zoom = 1.0;
+                    self.waveform_scroll = 0.0;
+                }
             });
-
-
 
             let mut selected_marker = self.selected_marker_idx;
             let interaction = render_stereo_waveform(
@@ -1648,169 +1869,260 @@ impl TapeDigizerApp {
             if let Some(segment) = interaction.clicked_segment_idx {
                 self.selected_segment_idx = Some(segment);
                 self.selected_marker_idx = segment.checked_sub(1);
+                self.selected_region = None;
             }
 
             self.update_hover_audition(ui, &interaction, has_audio);
 
-            ui.add_space(8.0);
+            // Bottom bar: Directly adjustable Pause Detection parameters + Proposal actions
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                ui.spacing_mut().slider_width = 50.0;
+                ui.label(RichText::new(self.text("Pausen:", "Pauses:")).color(TEXT_SECONDARY).small());
+                let thresh_lbl = self.text("dB", "dB");
+                let thresh_tip = self.text("Pegelschwelle für Stille zwischen Songs (Vinyl: ca. -38 dB, Kassette: ca. -45 dB)", "Silence threshold between songs");
+                let min_lbl = self.text("Min", "Min");
+                let min_tip = self.text("Mindestdauer einer Pause in Sekunden", "Minimum pause duration in seconds");
+                let skip_lbl = self.text("Als Pause", "As gap");
+                let skip_tip = self.text("Erkannte Pausen als ausgelassene Segmente markieren", "Mark detected pauses as skipped gap segments");
+                let mut p_changed = false;
+                if ui.add(egui::Slider::new(&mut self.pause_threshold_db, -65.0..=-25.0)
+                    .step_by(1.0)
+                    .text(thresh_lbl))
+                    .on_hover_text(thresh_tip)
+                    .changed()
+                {
+                    p_changed = true;
+                }
+                if ui.add(egui::Slider::new(&mut self.pause_min_seconds, 0.5..=5.0)
+                    .step_by(0.1)
+                    .text(min_lbl)
+                    .suffix("s"))
+                    .on_hover_text(min_tip)
+                    .changed()
+                {
+                    p_changed = true;
+                }
+                if ui.checkbox(&mut self.pause_as_gaps, skip_lbl)
+                    .on_hover_text(skip_tip)
+                    .changed()
+                {
+                    p_changed = true;
+                }
+                if p_changed {
+                    self.save_config();
+                }
 
-            ui.horizontal_wrapped(|ui| {
-                ui.menu_button(self.text("Pausen erkennen", "Detect pauses"), |ui| {
-                    if ui.add_enabled(has_audio, egui::Button::new(self.language.btn_auto_detect_pauses())).clicked() {
-                        self.preview_pauses(ui.ctx(), false);
-                        ui.close_menu();
+                if ui.add_enabled(has_audio, egui::Button::new(self.text("🔍 Suchen", "🔍 Detect")).small()).clicked() {
+                    self.preview_pauses(ui.ctx(), self.pause_as_gaps);
+                }
+
+                if let Some((cuts, gaps)) = self.pause_preview.as_ref().map(|p| (p.markers.len(), p.pause_indices.len())) {
+                    ui.separator();
+                    ui.colored_label(
+                        LED_AMBER,
+                        RichText::new(format!("{cuts} Schnitte ({gaps}⏸)")).small(),
+                    );
+                    if ui.add(egui::Button::new(RichText::new(self.text("✓ Übernehmen", "✓ Apply")).color(Color32::BLACK).strong()).fill(ACCENT).small())
+                        .on_hover_text(self.text("Ersetzt die Trackliste. Mit ⌘Z rückgängig machen.", "Replaces the track list. Undo with ⌘Z."))
+                        .clicked()
+                    {
+                        let before = self.splitter.snapshot();
+                        self.splitter.restore(self.pause_preview.take().unwrap());
+                        self.splitter.commit_edit(before);
+                        self.reset_editor_selection();
                     }
-                    if ui.add_enabled(has_audio, egui::Button::new(self.language.btn_auto_detect_pauses_gaps())).clicked() {
-                        self.preview_pauses(ui.ctx(), true);
-                        ui.close_menu();
+                    if ui.small_button("×").on_hover_text(self.text("Vorschlag verwerfen", "Discard proposal")).clicked() {
+                        self.pause_preview = None;
                     }
-                });
+                }
+
                 if ui.add_enabled(has_audio && !self.splitter.markers.is_empty(),
-                    egui::Button::new(self.language.btn_clear_markers())).clicked()
+                    egui::Button::new(self.text("Alle löschen", "Clear all")).small()).clicked()
                 {
                     self.splitter.clear_markers();
                     self.selected_marker_idx = None;
                     self.selected_segment_idx = None;
                 }
             });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = 64.0;
-                ui.add(egui::Slider::new(&mut self.waveform_zoom, 1.0..=25.0)
-                    .text("Zoom").suffix("×"));
-                let gain = self.text("Pegel", "Gain");
-                ui.add(egui::Slider::new(&mut self.waveform_vertical_zoom, 1.0..=16.0)
-                    .text(gain).suffix("×"));
-                if ui.button(self.text("Ganzes Band", "Fit tape")).clicked() {
-                    self.waveform_zoom = 1.0;
-                    self.waveform_vertical_zoom = 1.0;
-                    self.waveform_scroll = 0.0;
-                }
-            });
         });
     }
 
-    fn render_pause_proposal(&mut self, ui: &mut Ui) {
-        if let Some((cuts, gaps)) = self.pause_preview.as_ref().map(|p| (p.markers.len(), p.pause_indices.len())) {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!("{}: {} · {}: {}", self.text("Vorgeschlagene Schnitte", "Suggested cuts"),
-                    cuts, self.text("Pausen", "Gaps"), gaps));
-                    if ui.add(primary_button(self.text("Übernehmen", "Apply")))
-                        .on_hover_text(self.text("Ersetzt die Trackliste. Mit ⌘Z rückgängig machen.", "Replaces the track list. Undo with ⌘Z.")).clicked() {
-                        let before = self.splitter.snapshot();
-                        self.splitter.restore(self.pause_preview.take().unwrap());
-                        self.splitter.commit_edit(before);
-                        self.reset_editor_selection();
-                    }
-                    if ui.button(self.text("Verwerfen", "Discard")).clicked() {
-                        self.pause_preview = None;
-                    }
-            });
+    fn render_detail_panel(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64) {
+        // Auto-select closest marker if none is selected and markers exist
+        if self.selected_marker_idx.is_none() && !self.splitter.markers.is_empty() {
+            if let Some((closest_idx, _)) = self.splitter.markers.iter().enumerate().min_by(|(_, a), (_, b)| {
+                (*a - cur_sec).abs().total_cmp(&(*b - cur_sec).abs())
+            }) {
+                self.selected_marker_idx = Some(closest_idx);
+                self.selected_segment_idx = Some(closest_idx + 1);
+            }
         }
 
-    }
+        let marker_count = self.splitter.markers.len();
+        let active_marker = self.selected_marker_idx
+            .and_then(|idx| self.splitter.markers.get(idx).copied().map(|t| (idx, t)));
 
-    fn render_detail_panel(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64) {
-        studio_panel(ui, self.text("Detailansicht", "Detail view"), |ui| {
-            let active_region = self.selected_region.unwrap_or_else(|| {
-                if let Some(m_idx) = self.selected_marker_idx {
-                    let m_time = self.splitter.markers.get(m_idx).copied().unwrap_or(cur_sec).floor();
-                    ((m_time - 1.5).max(0.0), (m_time + 1.5).min(total_sec))
-                } else if let Some(s_idx) = self.selected_segment_idx {
-                    let tracks = self.splitter.get_tracks(total_sec);
-                    if let Some(t) = tracks.get(s_idx) {
-                        (t.start_seconds, t.end_seconds)
-                    } else {
-                        ((cur_sec.floor() - 1.5).max(0.0), (cur_sec.floor() + 1.5).min(total_sec))
+        let radius = self.scope_radius_sec.clamp(0.1, 15.0);
+        let center_sec = self.scope_locked_center
+            .or_else(|| active_marker.map(|(_, t)| t))
+            .unwrap_or(cur_sec)
+            .clamp(0.0, total_sec);
+
+        let active_region = self.selected_region.unwrap_or_else(|| {
+            let start = (center_sec - radius).max(0.0);
+            let end = (center_sec + radius).min(total_sec).max(start + 0.05);
+            (start, end)
+        });
+
+        let samples_l = self.player.get_samples_l();
+        let samples_r = self.player.get_samples_r();
+        let rate = self.player.sample_rate();
+
+        // Strictly max 3 transients around the active marker (or playhead)
+        let transient_anchor = active_marker.map_or(center_sec, |(_, t)| t);
+        let search_radius = ((active_region.1 - active_region.0) * 0.5).clamp(0.25, 4.0);
+        let quantized_anchor = (transient_anchor * 20.0).round() / 20.0;
+
+        let transients = if self.show_transients && self.marker_drag.is_none() {
+            let sensitivity = self.transient_sensitivity;
+            if !self.transient_cache.as_ref().is_some_and(|cache| {
+                (cache.marker_time - quantized_anchor).abs() < 1e-3
+                    && (cache.radius - search_radius).abs() < 1e-3
+                    && (cache.sensitivity - sensitivity).abs() < 1e-3
+            }) {
+                let detected = crate::splitter::detect_marker_transients(
+                    &samples_l,
+                    &samples_r,
+                    rate,
+                    transient_anchor,
+                    search_radius,
+                    sensitivity,
+                );
+                self.transient_cache = Some(TransientCache {
+                    marker_time: quantized_anchor,
+                    radius: search_radius,
+                    sensitivity,
+                    points: detected.into(),
+                });
+            }
+            self.transient_cache.as_ref().unwrap().points.clone()
+        } else if self.show_transients {
+            self.transient_cache.as_ref().map_or_else(|| std::sync::Arc::from([]), |c| c.points.clone())
+        } else {
+            std::sync::Arc::from([])
+        };
+
+        studio_panel(ui, self.text("Präzisions-Schnitt-Lupe", "Precision Cut Magnifier"), |ui| {
+            // Row 1: Marker selector + Timecode editor + Fine Nudge buttons + Delete (fits on 1 line in 480px)
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+                if let Some((m_idx, m_time)) = active_marker {
+                    if ui.add_enabled(m_idx > 0, egui::Button::new("◀").small())
+                        .on_hover_text(self.text("Vorherige Schnittmarke", "Previous marker"))
+                        .clicked()
+                    {
+                        self.select_marker(m_idx - 1);
+                    }
+                    ui.label(
+                        RichText::new(format!("T{:02}({}/{})", m_idx + 2, m_idx + 1, marker_count))
+                            .strong()
+                            .monospace()
+                            .small()
+                            .color(LED_AMBER),
+                    );
+                    if ui.add_enabled(m_idx + 1 < marker_count, egui::Button::new("▶").small())
+                        .on_hover_text(self.text("Nächste Schnittmarke", "Next marker"))
+                        .clicked()
+                    {
+                        self.select_marker(m_idx + 1);
+                    }
+
+                    let mut seconds = m_time;
+                    let edit = egui::DragValue::new(&mut seconds)
+                        .range(0.0..=total_sec)
+                        .speed(0.002)
+                        .custom_formatter(|s, _| timecode(s))
+                        .custom_parser(parse_timecode)
+                        .update_while_editing(false);
+                    if ui.add(edit).on_hover_text(self.text("Exakte Schnittzeit bearbeiten", "Edit exact cut time")).changed() {
+                        let target = self.snap_time_if_enabled(seconds);
+                        if ui.input(|input| input.pointer.primary_down() && input.pointer.is_decidedly_dragging()) {
+                            self.preview_marker_drag(m_idx, target);
+                        } else {
+                            self.splitter.move_marker(m_idx, target, total_sec, rate);
+                        }
+                    }
+
+                    for (label, delta) in [
+                        ("−25ms", -0.025),
+                        ("−2ms", -0.002),
+                        ("+2ms", 0.002),
+                        ("+25ms", 0.025),
+                    ] {
+                        if ui.small_button(label)
+                            .on_hover_text(self.text("Schnittmarke fein verschieben (Pfeiltasten ←/→)", "Fine-nudge cut marker (Arrow keys ←/→)"))
+                            .clicked()
+                        {
+                            self.nudge_marker(m_idx, delta, total_sec);
+                        }
+                    }
+
+                    if ui.small_button("🗑")
+                        .on_hover_text(self.text("Schnittmarke entfernen (⌫)", "Delete cut marker (⌫)"))
+                        .clicked()
+                    {
+                        self.request_marker_delete(m_idx);
                     }
                 } else {
-                    ((cur_sec.floor() - 1.5).max(0.0), (cur_sec.floor() + 1.5).min(total_sec))
-                }
-            });
-
-            if self.selected_region.is_none() {
-                self.set_scope_region(active_region);
-            }
-
-            let samples_l = self.player.get_samples_l();
-            let samples_r = self.player.get_samples_r();
-            let rate = self.player.sample_rate();
-
-            let transient_region = if active_region.1 - active_region.0 > 8.0 {
-                let center = self.selected_marker_idx.and_then(|i| self.splitter.markers.get(i).copied())
-                    .unwrap_or(active_region.0 + 4.0);
-                let start = (center - 4.0).clamp(active_region.0, active_region.1 - 8.0);
-                // Keep the search window stable during small edits.
-                let start = start.floor().max(active_region.0);
-                (start, (start + 8.0).min(active_region.1))
-            } else {
-                active_region
-            };
-            let transients = if self.show_transients && self.marker_drag.is_none()
-                && !ui.input(|input| input.pointer.primary_down()) {
-                let sensitivity = self.transient_sensitivity;
-                if !self.transient_cache.as_ref().is_some_and(|cache| {
-                    cache.region == transient_region && cache.sensitivity == sensitivity
-                }) {
-                    self.transient_cache = Some(TransientCache {
-                        region: transient_region,
-                        sensitivity,
-                        points: crate::splitter::detect_transients_in_range(
-                            &samples_l, &samples_r, rate, transient_region.0, transient_region.1, sensitivity,
-                        ).into(),
-                    });
-                }
-                self.transient_cache.as_ref().unwrap().points.clone()
-            } else {
-                std::sync::Arc::from([])
-            };
-
-            ui.horizontal_wrapped(|ui| {
-                time_display(ui, format!("{}  →  {}", timecode(active_region.0), timecode(active_region.1)));
-                let label = self.text("Transienten", "Transients");
-                ui.toggle_value(&mut self.show_transients, label);
-            });
-
-            let time_zoom = self.text("Zeitzoom", "Time zoom");
-            let auto_gain = self.text("Auto-Pegel", "Auto gain");
-            let vertical_gain = self.text("Pegel", "Gain");
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().slider_width = 68.0;
-                if ui.button(self.text("Einpassen", "Fit")).clicked() {
-                    self.scope_zoom = 1.0;
-                    self.scope_scroll = 0.0;
-                }
-                if ui.add(egui::Slider::new(&mut self.scope_zoom, 1.0..=50.0)
-                    .logarithmic(true).text(time_zoom).suffix("×")).changed()
-                {
-                    self.scope_scroll = self.scope_scroll.min(1.0 - 1.0 / self.scope_zoom);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = 68.0;
-                ui.checkbox(&mut self.scope_auto_gain, auto_gain);
-                ui.add(egui::Slider::new(&mut self.scope_gain_db, -24.0..=36.0)
-                    .step_by(1.0).text(vertical_gain).suffix(" dB"));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().slider_width = 68.0;
-                if self.show_transients {
-                    ui.add(egui::Slider::new(&mut self.transient_sensitivity, 0.4..=3.0)
-                        .text(self.language.label_sensitivity()).suffix("×"));
-                }
-                if ui.button(self.text("Ganzer Track", "Full track")).clicked() {
-                    let tracks = self.splitter.get_tracks(total_sec);
-                    if let Some(track) = tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds) {
-                        self.set_scope_region((track.start_seconds, track.end_seconds));
+                    ui.label(RichText::new(self.text("Klicke in die Lupe oder drücke M", "Click inside scope or press M")).color(TEXT_SECONDARY).small());
+                    if ui.small_button(self.text("│ Marke setzen", "│ Place marker")).clicked() {
+                        self.add_marker(cur_sec);
                     }
                 }
-                if ui.button(self.text("3 s Fokus", "3 s focus")).clicked() {
-                    self.set_scope_region(((cur_sec - 1.5).max(0.0), (cur_sec + 1.5).min(total_sec)));
+            });
+
+            // Row 2: Window radius pills + Auto-Gain + Transients (max 3) & sensitivity (fits on 1 line in 480px)
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+                for (rad, lbl) in [
+                    (0.25_f64, "±0.25s"),
+                    (0.75, "±0.75s"),
+                    (1.5, "±1.5s"),
+                    (3.0, "±3s"),
+                    (5.0, "±5s"),
+                ] {
+                    let is_sel = self.selected_region.is_none() && (self.scope_radius_sec - rad).abs() < 0.05;
+                    if ui.selectable_label(is_sel, RichText::new(lbl).small()).clicked() {
+                        self.scope_radius_sec = rad;
+                        self.selected_region = None;
+                    }
+                }
+                ui.separator();
+                let ag_lbl = self.text("Auto-dB", "Auto-dB");
+                ui.checkbox(&mut self.scope_auto_gain, RichText::new(ag_lbl).small());
+                if !self.scope_auto_gain {
+                    ui.add(egui::DragValue::new(&mut self.scope_gain_db).range(-24.0..=36.0).speed(0.5).suffix("dB"));
+                }
+                ui.separator();
+                let trans_lbl = self.text("⚡Max 3", "⚡Max 3");
+                let trans_tip = self.text("Zeigt maximal die 3 stärksten Song-Einsätze rund um den Schnittmarker", "Shows at most the 3 strongest song attacks around the cut marker");
+                ui.toggle_value(&mut self.show_transients, RichText::new(trans_lbl).small())
+                    .on_hover_text(trans_tip);
+                if self.show_transients {
+                    ui.spacing_mut().slider_width = 36.0;
+                    ui.add(egui::Slider::new(&mut self.transient_sensitivity, 0.4..=2.5)
+                        .show_value(false))
+                        .on_hover_text(self.language.label_sensitivity());
                 }
             });
 
+            let span = (active_region.1 - active_region.0).max(0.05);
             let scope_action = crate::ui::waveform_widget::render_detail_magnifier_scope(
                 ui,
-                self.waveform_cache.for_view(total_sec / (active_region.1 - active_region.0) * f64::from(self.scope_zoom)),
+                self.waveform_cache.for_view(total_sec / span),
                 &samples_l,
                 &samples_r,
                 rate,
@@ -1822,54 +2134,98 @@ impl TapeDigizerApp {
                 self.scope_gain_db,
                 &transients,
                 self.show_transients,
-                self.scope_zoom,
+                1.0,
                 &mut self.scope_scroll,
                 cur_sec,
                 self.player.is_playing(),
             );
 
+            if let Some(factor) = scope_action.zoom_delta_factor {
+                self.selected_region = None;
+                self.scope_radius_sec = (self.scope_radius_sec * f64::from(factor)).clamp(0.15, 8.0);
+            }
             if let Some(t_seek) = scope_action.seek_to_time {
                 self.player.seek_seconds(t_seek);
             }
             if let Some(t_trans) = scope_action.clicked_transient_time {
-                self.add_marker(t_trans);
-                self.player.seek_seconds(t_trans);
+                let target = self.snap_time_if_enabled(t_trans);
+                if let Some(m_idx) = self.selected_marker_idx {
+                    let before = self.splitter.snapshot();
+                    if self.splitter.move_marker(m_idx, target, total_sec, rate) {
+                        self.splitter.commit_edit(before);
+                        self.scope_locked_center = None;
+                    }
+                } else {
+                    self.add_marker(target);
+                }
+                self.player.seek_seconds(target);
             }
             if let Some(s_idx) = scope_action.selected_marker_idx {
                 self.select_marker(s_idx);
             }
             if let Some((idx, time)) = scope_action.dragged_marker {
+                if self.scope_locked_center.is_none() {
+                    self.scope_locked_center = Some(center_sec);
+                }
                 self.preview_marker_drag(idx, time);
             }
-
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                let play_label = if self.player.is_playing() {
-                    self.text("Pause", "Pause")
-                } else {
-                    self.text("▶ Auswahl", "▶ Selection")
-                };
-                if ui.button(play_label).clicked() {
-                    self.player.toggle_range(active_region.0, active_region.1);
+            if let Some((idx, time)) = scope_action.move_marker_to {
+                let target = self.snap_time_if_enabled(time);
+                let before = self.splitter.snapshot();
+                if self.splitter.move_marker(idx, target, total_sec, rate) {
+                    self.splitter.commit_edit(before);
                 }
+                self.player.seek_seconds(target);
+            }
+            if let Some(new_t) = scope_action.create_marker_at {
+                self.add_marker(new_t);
+            }
 
-                if ui.button(self.text("│ Anfang", "│ Start")).clicked() {
-                    self.add_marker(active_region.0);
-                }
-
-                if ui.button(self.text("│ Ende", "│ End")).clicked() {
-                    self.add_marker(active_region.1);
-                }
-
-                if let Some((index, time)) = self.selected_marker_idx
-                    .and_then(|i| self.splitter.markers.get(i).map(|&time| (i, time)))
+            // Row 3: Pre-Roll / Post-Roll / Transition Audition + 1-click Transient Snap buttons
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
+                let ref_t = active_marker.map_or(cur_sec, |(_, t)| t);
+                if ui.small_button(self.text("▶ Davor 2s", "▶ Before 2s"))
+                    .on_hover_text(self.text("Spielt die letzten 2 Sekunden vor dem Schnitt (Ende des vorherigen Tracks)", "Plays 2 seconds before the cut"))
+                    .clicked()
                 {
-                    let closest = transients.iter().min_by(|a, b| {
-                        (a.time_sec - time).abs().total_cmp(&(b.time_sec - time).abs())
-                    }).filter(|point| (point.time_sec - time).abs() < 2.0);
-                    let snap = self.text("Einrasten", "Snap");
-                    if ui.add_enabled(closest.is_some(), egui::Button::new(snap)).clicked() {
-                        self.splitter.move_marker(index, closest.unwrap().time_sec, total_sec, rate);
+                    self.player.play_range((ref_t - 2.0).max(0.0), ref_t);
+                }
+                if ui.small_button(self.text("▶ Danach 2s", "▶ After 2s"))
+                    .on_hover_text(self.text("Spielt die ersten 2 Sekunden ab dem Schnitt (Start des neuen Tracks)", "Plays 2 seconds starting at the cut"))
+                    .clicked()
+                {
+                    self.player.play_range(ref_t, (ref_t + 2.0).min(total_sec));
+                }
+                if ui.small_button(self.text("▶ Übergang", "▶ Transition"))
+                    .on_hover_text(self.text("Spielt über die Schnittgrenze hinweg (±1.5s)", "Plays across the cut boundary (±1.5s)"))
+                    .clicked()
+                {
+                    self.player.play_range((ref_t - 1.5).max(0.0), (ref_t + 1.5).min(total_sec));
+                }
+
+                if self.show_transients && !transients.is_empty() {
+                    ui.separator();
+                    for (t_i, tp) in transients.iter().take(crate::splitter::MAX_MARKER_TRANSIENTS).enumerate() {
+                        let delta = tp.time_sec - ref_t;
+                        let btn_text = format!("⚡{}{:+.2}s", t_i + 1, delta);
+                        if ui.small_button(RichText::new(btn_text).monospace().small().color(Color32::from_rgb(255, 195, 40)))
+                            .on_hover_text(self.text("Schnittmarke exakt auf diesen Transient-Einsatz setzen", "Snap cut marker to this transient attack"))
+                            .clicked()
+                        {
+                            let target = self.snap_time_if_enabled(tp.time_sec);
+                            if let Some((m_idx, _)) = active_marker {
+                                let before = self.splitter.snapshot();
+                                if self.splitter.move_marker(m_idx, target, total_sec, rate) {
+                                    self.splitter.commit_edit(before);
+                                    self.scope_locked_center = None;
+                                }
+                            } else {
+                                self.add_marker(target);
+                            }
+                            self.player.play_range(target, (target + 1.5).min(total_sec));
+                        }
                     }
                 }
             });
@@ -1884,92 +2240,177 @@ impl TapeDigizerApp {
             self.splitter.custom_titles.resize(tracks.len(), String::new());
         }
 
-        let per_page = ((ui.available_height() - 66.0) / 108.0).floor().max(1.0) as usize;
+        let header_overhead = if self.batch_titles_open { 132.0 } else { 54.0 };
+        let row_pitch = 33.0;
+        let per_page = ((ui.available_height() - header_overhead) / row_pitch).floor().max(1.0) as usize;
         let pages = tracks.len().div_ceil(per_page).max(1);
         self.track_page = self.track_page.min(pages - 1);
+
         panel_frame().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                panel_title(ui, self.text("Trackliste", "Track list"));
+                let active_tracks = tracks.iter().filter(|t| !t.is_pause).count();
+                ui.label(RichText::new(format!("{active_tracks} Tracks")).color(TEXT_SECONDARY).small());
+                if ui.small_button(self.text("📋 Liste einfügen", "📋 Paste list"))
+                    .on_hover_text(self.text("Mehrere Tracknamen auf einmal einfügen (1 Zeile pro Track)", "Paste multiple track titles at once (1 line per track)"))
+                    .clicked()
+                {
+                    self.batch_titles_open = !self.batch_titles_open;
+                    if self.batch_titles_open && self.batch_titles_text.is_empty() {
+                        self.batch_titles_text = tracks.iter()
+                            .filter(|t| !t.is_pause)
+                            .map(|t| self.splitter.custom_titles.get(t.segment_index).cloned().unwrap_or_default())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                    }
+                }
+                page_controls(ui, &mut self.track_page, pages, self.language);
+            });
+
+            if self.batch_titles_open {
+                ui.add_space(4.0);
+                let hint_txt = self.text("Zeile 1: Song A\nZeile 2: Song B …", "Line 1: Song A\nLine 2: Song B …");
+                let apply_txt = self.text("Übernehmen", "Apply");
+                let cancel_txt = self.language.btn_cancel();
                 ui.horizontal(|ui| {
-                    panel_title(ui, self.text("Trackliste", "Track list"));
-                    ui.label(RichText::new(tracks.len().to_string()).color(TEXT_SECONDARY));
-                    page_controls(ui, &mut self.track_page, pages, self.language);
+                    let w = (ui.available_width() - 110.0).max(160.0);
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.batch_titles_text)
+                            .desired_rows(3)
+                            .desired_width(w)
+                            .hint_text(hint_txt),
+                    );
+                    ui.vertical(|ui| {
+                        if ui.button(apply_txt).clicked() {
+                            let lines: Vec<String> = self.batch_titles_text
+                                .lines()
+                                .map(|l: &str| l.trim().to_string())
+                                .filter(|l: &String| !l.is_empty())
+                                .collect();
+                            let mut line_iter = lines.into_iter();
+                            for t in tracks.iter().filter(|t| !t.is_pause) {
+                                if let Some(line) = line_iter.next() {
+                                    // Strip optional leading track numbers like "01 - " or "1. "
+                                    let cleaned = line.trim_start_matches(|c: char| c.is_ascii_digit())
+                                        .trim_start_matches(['.', '-', ')', ' ', '\t']);
+                                    let final_name = if cleaned.is_empty() { line.as_str() } else { cleaned };
+                                    if let Some(slot) = self.splitter.custom_titles.get_mut(t.segment_index) {
+                                        *slot = final_name.to_string();
+                                    }
+                                }
+                            }
+                            self.batch_titles_open = false;
+                        }
+                        if ui.small_button(cancel_txt).clicked() {
+                            self.batch_titles_open = false;
+                        }
+                    });
                 });
-                ui.add_space(6.0);
-                let start = self.track_page * per_page;
-                for (index, track) in tracks.iter().enumerate().skip(start).take(per_page) {
-                    let selected = self.selected_segment_idx == Some(index);
-                    let border = if selected { ACCENT } else { BORDER_MID };
-                    egui::Frame::none()
-                        .fill(BG_WINDOW)
-                        .stroke(Stroke::new(1.0, border))
-                        .rounding(8.0)
-                        .inner_margin(10.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let badge = if track.is_pause { "Ⅱ".into() } else { format!("{:02}", track.index) };
-                                let badge = egui::Button::new(RichText::new(badge).monospace()).selected(selected);
-                                if ui.add_sized([38.0, 32.0], badge).clicked() {
+            }
+
+            ui.add_space(4.0);
+            let start = self.track_page * per_page;
+            for (index, track) in tracks.iter().enumerate().skip(start).take(per_page) {
+                let selected = self.selected_segment_idx == Some(index);
+                let border = if selected { ACCENT } else { BORDER_MID };
+                let row_bg = if selected {
+                    Color32::from_rgb(28, 32, 42)
+                } else {
+                    BG_WINDOW
+                };
+
+                egui::Frame::none()
+                    .fill(row_bg)
+                    .stroke(Stroke::new(1.0, border))
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(5.0, 2.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+                            let badge_txt = if track.is_pause { "⏸".into() } else { format!("{:02}", track.index) };
+                            let badge = egui::Button::new(RichText::new(badge_txt).monospace().small()).selected(selected);
+                            if ui.add_sized([26.0, 20.0], badge).clicked() {
+                                self.selected_segment_idx = Some(index);
+                                self.selected_marker_idx = index.checked_sub(1);
+                                self.player.seek_seconds(track.start_seconds);
+                            }
+
+                            // Reserve exact space for the compact right-hand controls so the Track Title field
+                            // is always >= 20 characters wide (>= 180 pt in split view, >= 520 pt in full view)
+                            // while never overflowing the row width.
+                            let right_controls_w = if index > 0 { 184.0 } else { 162.0 };
+                            let title_width = (ui.available_width() - right_controls_w).max(180.0);
+
+                            if track.is_pause {
+                                ui.add_sized(
+                                    [title_width, 20.0],
+                                    egui::Label::new(RichText::new(self.language.badge_pause()).color(LED_AMBER).small()),
+                                );
+                            } else {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.splitter.custom_titles[index])
+                                        .id(egui::Id::new("track_title_field").with(index))
+                                        .desired_width(title_width)
+                                        .margin(egui::Margin::symmetric(6.0, 2.0))
+                                        .hint_text(format!("Track {:02}", track.index)),
+                                );
+                                if response.gained_focus() {
                                     self.selected_segment_idx = Some(index);
                                     self.selected_marker_idx = index.checked_sub(1);
-                                    self.player.seek_seconds(track.start_seconds);
                                 }
+                                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                                    if let Some(next) = tracks.iter().skip(index + 1).find(|track| !track.is_pause) {
+                                        self.track_page = next.segment_index / per_page;
+                                        ui.memory_mut(|mem| mem.request_focus(egui::Id::new("track_title_field").with(next.segment_index)));
+                                    }
+                                }
+                            }
 
-                                if track.is_pause {
-                                    ui.label(RichText::new(self.language.badge_pause()).color(LED_AMBER));
-                                } else {
-                                    let width = ui.available_width();
-                                    let response = ui.add(
-                                        egui::TextEdit::singleline(&mut self.splitter.custom_titles[index])
-                                            .id(egui::Id::new("track_title_field").with(index))
-                                            .desired_width(width)
-                                            .min_size(Vec2::new(width, 32.0))
-                                            .margin(egui::Margin::symmetric(10.0, 6.0))
-                                            .hint_text(format!("Track {:02}", track.index)),
-                                    );
-                                    if response.gained_focus() {
-                                        self.selected_segment_idx = Some(index);
-                                        self.selected_marker_idx = index.checked_sub(1);
-                                    }
-                                    if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                                        if let Some(next) = tracks.iter().skip(index + 1).find(|track| !track.is_pause) {
-                                            self.track_page = next.segment_index / per_page;
-                                            ui.memory_mut(|mem| mem.request_focus(egui::Id::new("track_title_field").with(next.segment_index)));
-                                        }
-                                    }
-                                }
-                            });
-
-                            ui.add_space(5.0);
-                            ui.horizontal_wrapped(|ui| {
-                                let start = RichText::new(timecode(track.start_seconds)).monospace();
-                                if index > 0 {
-                                    if ui.selectable_label(selected, start).clicked() {
-                                        self.select_marker(index - 1);
-                                        self.show_inspector = true;
-                                    }
-                                } else {
-                                    ui.label(start);
-                                }
-                                ui.label(RichText::new(track.duration_formatted()).monospace().color(TEXT_SECONDARY));
-                                ui.separator();
-                                if ui.small_button(self.text("Anhören", "Audition")).clicked() {
-                                    self.player.play_range(track.start_seconds, track.end_seconds);
-                                }
-                                let action = if track.is_pause { self.language.btn_make_track() } else { self.language.btn_make_pause() };
-                                if ui.small_button(action).clicked() {
-                                    self.splitter.toggle_pause(index);
-                                }
-                                if index > 0 && ui.small_button(self.text("× Marke", "× Marker"))
-                                    .on_hover_text(self.text("Schnittmarke am Trackanfang entfernen", "Remove marker at track start"))
+                            let start_tc = RichText::new(timecode(track.start_seconds)).monospace().small();
+                            if index > 0 {
+                                if ui.selectable_label(selected, start_tc)
+                                    .on_hover_text(self.text("Schnittmarke in der Schnitt-Lupe fokussieren", "Focus cut marker in Cut Magnifier"))
                                     .clicked()
                                 {
-                                    self.request_marker_delete(index - 1);
+                                    self.select_marker(index - 1);
+                                    self.magnifier_scope_active = true;
                                 }
-                            });
+                            } else {
+                                ui.label(start_tc.color(TEXT_SECONDARY));
+                            }
+
+                            ui.label(RichText::new(track.duration_formatted()).monospace().small().color(TEXT_SECONDARY));
+
+                            if ui.small_button("▶")
+                                .on_hover_text(self.text("Track anhören", "Audition track"))
+                                .clicked()
+                            {
+                                self.player.play_range(track.start_seconds, track.end_seconds);
+                            }
+
+                            let pause_icon = if track.is_pause { "↩" } else { "⏸" };
+                            let pause_tip = if track.is_pause {
+                                self.language.btn_make_track()
+                            } else {
+                                self.language.btn_make_pause()
+                            };
+                            if ui.small_button(pause_icon).on_hover_text(pause_tip).clicked() {
+                                self.splitter.toggle_pause(index);
+                            }
+
+                            if index > 0 && ui.small_button("×")
+                                .on_hover_text(self.text("Schnittmarke am Trackanfang entfernen", "Remove marker at track start"))
+                                .clicked()
+                            {
+                                self.request_marker_delete(index - 1);
+                            }
                         });
-                    ui.add_space(5.0);
-                }
-            });
+                    });
+                ui.add_space(2.0);
+            }
+        });
     }
 
     fn update_hover_audition(
@@ -2035,14 +2476,18 @@ impl TapeDigizerApp {
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .title_bar(false).resizable(false)
             .default_width(width).default_height(0.0)
-            .frame(egui::Frame::window(&ctx.style()).inner_margin(22.0).rounding(14.0))
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(18.0).rounding(14.0))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 ui.heading(self.text("Tracks exportieren", "Export tracks"));
-                ui.add_space(4.0);
-                ui.label(RichText::new(format!("{}  ·  {}", self.tape_name, self.tape_side.label(self.language)))
-                    .color(TEXT_SECONDARY));
-                ui.add_space(14.0);
+                ui.add_space(2.0);
+                let sub = if self.artist_name.trim().is_empty() {
+                    format!("{}  ·  {}", self.tape_name, self.tape_side.label(self.language))
+                } else {
+                    format!("{} – {}  ·  {}", self.artist_name.trim(), self.tape_name, self.tape_side.label(self.language))
+                };
+                ui.label(RichText::new(sub).color(TEXT_SECONDARY));
+                ui.add_space(8.0);
 
                 if let Some(progress) = progress {
                     let done = progress.finished.load(Ordering::Relaxed);
@@ -2087,9 +2532,15 @@ impl TapeDigizerApp {
 
                 let tracks = self.splitter.get_tracks(self.player.total_seconds());
                 let target = self.effective_export_directory();
+                let artist_prefix = sanitize_filename(self.artist_name.trim());
+                let has_artist = !self.artist_name.trim().is_empty();
                 let mut files = Vec::new();
                 for track in tracks.iter().filter(|track| !track.is_pause) {
-                    let name = track.export_filename();
+                    let name = if has_artist {
+                        format!("{:02}_{}_{}.wav", track.index, artist_prefix, sanitize_filename(&track.title))
+                    } else {
+                        track.export_filename()
+                    };
                     let exists = target.join(&name).exists();
                     files.push((track, name, exists));
                 }
@@ -2113,10 +2564,10 @@ impl TapeDigizerApp {
                 ui.add(egui::Label::new(RichText::new(&target_label).color(TEXT_SECONDARY)).truncate())
                     .on_hover_text(target_label);
 
-                ui.add_space(12.0);
-                panel_title(ui, self.text("Audio", "Audio"));
+                ui.add_space(8.0);
+                panel_title(ui, self.text("Audio & Analog-Mastering", "Audio & Analog Mastering"));
                 ui.label(RichText::new(format!("WAV  ·  PCM 24-bit  ·  Stereo  ·  {} Hz", self.player.sample_rate()))
-                    .color(TEXT_SECONDARY));
+                    .color(TEXT_SECONDARY).small());
                 let mode_label = |mode: &NormalizationMode| match mode {
                     NormalizationMode::None => self.text("Originalpegel", "Original level"),
                     NormalizationMode::PeakPerTrack => self.text("Peak pro Track · −0,3 dBFS", "Peak per track · −0.3 dBFS"),
@@ -2136,8 +2587,26 @@ impl TapeDigizerApp {
                     self.save_config();
                 }
 
-                ui.add_space(12.0);
-                let per_page = ((screen.height() - 414.0) / 30.0).floor().clamp(3.0, 10.0) as usize;
+                ui.horizontal_wrapped(|ui| {
+                    let hp_lbl = self.text("20 Hz Rumpel-/DC-Filter", "20 Hz subsonic filter");
+                    if ui.checkbox(&mut self.export_highpass_20hz, hp_lbl).changed() {
+                        self.save_config();
+                    }
+                    ui.separator();
+                    ui.label(RichText::new(self.text("Schnitt-Fade:", "Cut fade:")).color(TEXT_SECONDARY).small());
+                    for (ms, lbl) in [(0_u32, "Aus"), (15, "15 ms"), (100, "100 ms"), (300, "300 ms")] {
+                        if ui.selectable_label(self.export_fade_ms == ms, lbl).clicked() {
+                            self.export_fade_ms = ms;
+                            self.save_config();
+                        }
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("L/R Trim:").color(TEXT_SECONDARY).small());
+                    ui.add(egui::DragValue::new(&mut self.export_balance_db).range(-12.0..=12.0).speed(0.1).suffix(" dB"));
+                });
+
+                ui.add_space(8.0);
+                let per_page = ((screen.height() - 450.0) / 28.0).floor().clamp(2.0, 8.0) as usize;
                 let pages = count.div_ceil(per_page).max(1);
                 self.export_page = self.export_page.min(pages - 1);
                 ui.horizontal(|ui| {
@@ -2147,7 +2616,7 @@ impl TapeDigizerApp {
                 let gaps = tracks.len() - count;
                 if gaps > 0 {
                     ui.label(RichText::new(format!("{} {gaps}", self.text("Ausgelassene Pausen", "Excluded gaps")))
-                        .color(TEXT_SECONDARY));
+                        .color(TEXT_SECONDARY).small());
                 }
                 if count == 0 {
                     ui.label(self.text("Keine Tracks zum Exportieren.", "No tracks to export."));
@@ -2175,7 +2644,7 @@ impl TapeDigizerApp {
                     }
                     _ => {}
                 }
-                ui.add_space(12.0);
+                ui.add_space(8.0);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = self.text("Exportieren", "Export");
@@ -2183,11 +2652,17 @@ impl TapeDigizerApp {
                     if ui.add_enabled(export_enabled, export).clicked() && self.effective_export_directory() == target {
                         if let Some(source) = self.current_audio_path.clone() {
                             self.export_outcome = None;
-                            let mode = self.normalization_mode.clone();
+                            let opts = ExportOptions {
+                                norm_mode: self.normalization_mode.clone(),
+                                highpass_20hz: self.export_highpass_20hz,
+                                fade_ms: self.export_fade_ms,
+                                stereo_balance_db: self.export_balance_db,
+                                artist: (!self.artist_name.trim().is_empty()).then(|| self.artist_name.trim().to_string()),
+                            };
                             let progress = Arc::new(ExportProgress::default());
                             let worker_progress = progress.clone();
                             self.start_job(ctx, self.text("Tracks werden exportiert …", "Exporting tracks …"), move || {
-                                let files = export_tracks(&source, &target, &tracks, mode, |done, total| {
+                                let files = export_tracks_with_options(&source, &target, &tracks, &opts, |done, total| {
                                     worker_progress.report(done, total)
                                 })?;
                                 Ok(JobResult::Export(files.len(), target))
@@ -2307,6 +2782,7 @@ impl WaveformCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::splitter::export_tracks;
 
     #[test]
     #[ignore = "writes up to 1 GiB of temporary export data per case"]
@@ -2392,6 +2868,8 @@ mod tests {
         let mut app = TapeDigizerApp {
             language: Language::De,
             tape_name: "Test Tape".into(),
+            artist_name: String::new(),
+            media_source: MediaSourceType::Cassette,
             tape_side: TapeSide::SideA,
             current_project_path: None,
             current_audio_path: None,
@@ -2406,6 +2884,13 @@ mod tests {
             splitter: TrackSplitter::new(),
             selected_timer_minutes: 45,
             enable_silence_autostop: true,
+            autostop_threshold_db: -48.0,
+            autostop_silence_secs: 10.0,
+            run_on_seconds: 15,
+            pause_threshold_db: -45.0,
+            pause_min_seconds: 1.8,
+            pause_as_gaps: false,
+            zero_crossing_snap: true,
             analysis_report: None,
             waveform_cache: WaveformCache::default(),
             selected_marker_idx: None,
@@ -2419,6 +2904,8 @@ mod tests {
             export_page: 0,
             magnifier_scope_active: false,
             selected_region: None,
+            scope_radius_sec: 1.5,
+            scope_locked_center: None,
             transient_sensitivity: 1.0,
             show_transients: true,
             scope_zoom: 1.0,
@@ -2433,13 +2920,17 @@ mod tests {
             hover_audition_time: None,
             export_directory: PathBuf::from("/tmp"),
             normalization_mode: NormalizationMode::None,
+            export_highpass_20hz: false,
+            export_fade_ms: 15,
+            export_balance_db: 0.0,
             export_outcome: None,
             ui_error_message: None,
             job: None,
             saved_edits: None,
             pause_preview: None,
             show_tracks: true,
-            show_inspector: true,
+            batch_titles_open: false,
+            batch_titles_text: String::new(),
             show_export: false,
             #[cfg(target_os = "macos")]
             mac_menu: None,
@@ -2468,10 +2959,10 @@ mod tests {
             });
         });
 
-        // A one-track project with a short name must still get a wide input.
+        // A one-track project with a short name in a compact single-line row must still get a wide input (>= 20 chars).
         app.splitter.custom_titles = vec!["cghcg".into()];
         let tracks = app.splitter.get_tracks(1800.0);
-        for (window_width, minimum_field_width) in [(800.0, 650.0), (1140.0, 990.0)] {
+        for (window_width, minimum_field_width) in [(800.0, 520.0), (1140.0, 860.0)] {
             // The scroll area uses the previous frame to calculate its clip rectangle.
             for _ in 0..2 {
                 let _ = ctx.run(egui::RawInput {

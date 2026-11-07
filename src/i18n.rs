@@ -14,6 +14,7 @@ impl Default for Language {
     }
 }
 
+#[allow(dead_code)]
 impl Language {
     pub fn code(&self) -> &'static str {
         match self {

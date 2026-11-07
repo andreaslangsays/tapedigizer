@@ -24,6 +24,16 @@ impl TrackInfo {
         format!("{:02} - {title}.wav", self.index)
     }
 
+    pub fn export_filename_with_artist(&self, artist: Option<&str>) -> String {
+        let title = crate::project::sanitize_track_title(&self.title, self.index);
+        if let Some(artist) = artist.map(str::trim).filter(|a| !a.is_empty()) {
+            let clean_artist = crate::project::sanitize_filename(artist);
+            format!("{:02} - {clean_artist} - {title}.wav", self.index)
+        } else {
+            format!("{:02} - {title}.wav", self.index)
+        }
+    }
+
     pub fn duration_seconds(&self) -> f64 {
         (self.end_seconds - self.start_seconds).max(0.0)
     }
@@ -437,12 +447,54 @@ impl TrackSplitter {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportOptions {
+    pub norm_mode: NormalizationMode,
+    pub highpass_20hz: bool,
+    pub fade_ms: u32,
+    pub stereo_balance_db: f32,
+    pub artist: Option<String>,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            norm_mode: NormalizationMode::None,
+            highpass_20hz: false,
+            fade_ms: 0,
+            stereo_balance_db: 0.0,
+            artist: None,
+        }
+    }
+}
+
 /// Slices the input WAV file into individual tracks and exports them (excluding paused segments)
+#[allow(dead_code)]
 pub fn export_tracks(
     source_wav_path: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
     tracks: &[TrackInfo],
     norm_mode: NormalizationMode,
+    progress: impl Fn(usize, usize) -> bool,
+) -> Result<Vec<PathBuf>, String> {
+    export_tracks_with_options(
+        source_wav_path,
+        output_dir,
+        tracks,
+        &ExportOptions {
+            norm_mode,
+            ..ExportOptions::default()
+        },
+        progress,
+    )
+}
+
+/// Slices the input WAV file into individual tracks with analog mastering options
+pub fn export_tracks_with_options(
+    source_wav_path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+    tracks: &[TrackInfo],
+    options: &ExportOptions,
     progress: impl Fn(usize, usize) -> bool,
 ) -> Result<Vec<PathBuf>, String> {
     let out_dir = output_dir.as_ref();
@@ -461,6 +513,7 @@ pub fn export_tracks(
     let rate = f64::from(spec.sample_rate);
     let mut exports = Vec::new();
     let mut names = std::collections::HashSet::new();
+    let artist_ref = options.artist.as_deref();
     for track in tracks.iter().filter(|track| !track.is_pause) {
         let start = (track.start_seconds * rate).round() as u32;
         let end = (track.end_seconds * rate).round() as u32;
@@ -469,7 +522,7 @@ pub fn export_tracks(
         {
             return Err(format!("Invalid export range for track {}", track.index));
         }
-        let path = out_dir.join(track.export_filename());
+        let path = out_dir.join(track.export_filename_with_artist(artist_ref));
         if path.exists() || !names.insert(path.clone()) {
             return Err(format!("Export destination already exists: {}", path.display()));
         }
@@ -489,7 +542,7 @@ pub fn export_tracks(
         if progress(finished, track_count) { Ok(()) } else { Err("Export cancelled".to_string()) }
     };
     report(0)?;
-    let album_gain = if norm_mode == NormalizationMode::PeakAlbum {
+    let album_gain = if options.norm_mode == NormalizationMode::PeakAlbum {
         peak_scale(read_peak(&mut reader, 0, duration * channels, || report(0))?)
     } else {
         1.0
@@ -501,12 +554,28 @@ pub fn export_tracks(
         sample_format: hound::SampleFormat::Int,
     };
     let pcm_factor = 2.0_f64.powi(24 - i32::from(spec.bits_per_sample));
+
+    // Stereo balance gains (negative = boost L / cut R, positive = boost R / cut L)
+    let bal_db = options.stereo_balance_db.clamp(-12.0, 12.0);
+    let (bal_gain_l, bal_gain_r) = if bal_db.abs() < 0.05 {
+        (1.0_f64, 1.0_f64)
+    } else if bal_db > 0.0 {
+        // Right is louder by bal_db -> attenuate R or boost L slightly
+        (10.0_f64.powf(f64::from(bal_db * 0.5) / 20.0), 10.0_f64.powf(f64::from(-bal_db * 0.5) / 20.0))
+    } else {
+        // Left is louder by -bal_db -> attenuate L or boost R
+        (10.0_f64.powf(f64::from(bal_db * 0.5) / 20.0), 10.0_f64.powf(f64::from(-bal_db * 0.5) / 20.0))
+    };
+
+    let fade_frames = ((f64::from(options.fade_ms) / 1000.0) * rate).round() as u32;
+    let hp_alpha = 1.0 / (1.0 + 2.0 * std::f64::consts::PI * 20.0 / rate);
+
     let mut staged = Vec::new();
     let mut published = Vec::new();
     let result = (|| {
         for (index, (start, end, destination)) in exports.into_iter().enumerate() {
             let count = end - start;
-            let gain = if norm_mode == NormalizationMode::PeakPerTrack {
+            let gain = if options.norm_mode == NormalizationMode::PeakPerTrack {
                 peak_scale(read_peak(&mut reader, start, count * channels, || report(index))?)
             } else {
                 album_gain
@@ -517,15 +586,50 @@ pub fn export_tracks(
                 .map_err(|e| e.to_string())?;
             reader.seek(start).map_err(|e| e.to_string())?;
             let mut samples = reader.samples::<i32>();
-            let encode = |sample: i32| {
-                (f64::from(sample) * pcm_factor * gain).round().clamp(-8_388_608.0, 8_388_607.0) as i32
-            };
+
+            let mut hp_prev_in_l = 0.0_f64;
+            let mut hp_prev_out_l = 0.0_f64;
+            let mut hp_prev_in_r = 0.0_f64;
+            let mut hp_prev_out_r = 0.0_f64;
+
             for frame in 0..count {
                 if frame % 16_384 == 0 { report(index)?; }
-                let left = next_pcm(&mut samples)?;
-                let right = if channels == 2 { next_pcm(&mut samples)? } else { left };
-                writer.write_sample(encode(left)).map_err(|e| e.to_string())?;
-                writer.write_sample(encode(right)).map_err(|e| e.to_string())?;
+                let raw_l = f64::from(next_pcm(&mut samples)?);
+                let raw_r = if channels == 2 { f64::from(next_pcm(&mut samples)?) } else { raw_l };
+
+                let (filt_l, filt_r) = if options.highpass_20hz {
+                    let out_l = hp_alpha * (hp_prev_out_l + raw_l - hp_prev_in_l);
+                    hp_prev_in_l = raw_l;
+                    hp_prev_out_l = out_l;
+                    let out_r = hp_alpha * (hp_prev_out_r + raw_r - hp_prev_in_r);
+                    hp_prev_in_r = raw_r;
+                    hp_prev_out_r = out_r;
+                    (out_l, out_r)
+                } else {
+                    (raw_l, raw_r)
+                };
+
+                let fade_env = if fade_frames > 0 && count > fade_frames * 2 {
+                    if frame < fade_frames {
+                        f64::from(frame) / f64::from(fade_frames)
+                    } else if frame >= count - fade_frames {
+                        f64::from(count - 1 - frame) / f64::from(fade_frames)
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+
+                let enc_l = (filt_l * pcm_factor * gain * bal_gain_l * fade_env)
+                    .round()
+                    .clamp(-8_388_608.0, 8_388_607.0) as i32;
+                let enc_r = (filt_r * pcm_factor * gain * bal_gain_r * fade_env)
+                    .round()
+                    .clamp(-8_388_608.0, 8_388_607.0) as i32;
+
+                writer.write_sample(enc_l).map_err(|e| e.to_string())?;
+                writer.write_sample(enc_r).map_err(|e| e.to_string())?;
             }
             writer.finalize().map_err(|e| e.to_string())?;
             report(index + 1)?;
@@ -570,10 +674,125 @@ fn read_peak(
 }
 
 
+pub const MAX_MARKER_TRANSIENTS: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransientPoint {
     pub time_sec: f64,
     pub strength: f32, // 0.0 .. 1.0
+}
+
+/// Detects at most `MAX_MARKER_TRANSIENTS` (3) transients around a track marker (`marker_sec`).
+/// Prioritizes distinct musical attacks near the marker so the user can cleanly position cut points.
+pub fn detect_marker_transients(
+    samples_l: &[f32],
+    samples_r: &[f32],
+    sample_rate: u32,
+    marker_sec: f64,
+    radius_sec: f64,
+    sensitivity: f32,
+) -> Vec<TransientPoint> {
+    if sample_rate == 0 || samples_l.is_empty() || !marker_sec.is_finite() {
+        return Vec::new();
+    }
+    let total_sec = samples_l.len() as f64 / f64::from(sample_rate);
+    let r = radius_sec.clamp(0.15, 4.0);
+    let start_sec = (marker_sec - r).max(0.0);
+    let end_sec = (marker_sec + r).min(total_sec);
+    let mut candidates = detect_transients_in_range(
+        samples_l,
+        samples_r,
+        sample_rate,
+        start_sec,
+        end_sec,
+        sensitivity,
+    );
+    if candidates.len() <= MAX_MARKER_TRANSIENTS {
+        return candidates;
+    }
+
+    // Score candidates by onset strength weighted by proximity to the marker
+    // (slightly favoring onsets at or shortly after the marker, typical for song starts after a pause)
+    candidates.sort_by(|a, b| {
+        let dist_a = (a.time_sec - marker_sec).abs();
+        let dist_b = (b.time_sec - marker_sec).abs();
+        let bias_a = if a.time_sec >= marker_sec - 0.05 { 1.15_f32 } else { 1.0_f32 };
+        let bias_b = if b.time_sec >= marker_sec - 0.05 { 1.15_f32 } else { 1.0_f32 };
+        let score_a = (a.strength * bias_a) / (1.0 + 0.75 * (dist_a / r) as f32);
+        let score_b = (b.strength * bias_b) / (1.0 + 0.75 * (dist_b / r) as f32);
+        score_b.total_cmp(&score_a)
+    });
+
+    let min_separation_sec = (r * 0.12).clamp(0.08, 0.35);
+    let mut selected: Vec<TransientPoint> = Vec::with_capacity(MAX_MARKER_TRANSIENTS);
+    for cand in &candidates {
+        if selected.len() >= MAX_MARKER_TRANSIENTS {
+            break;
+        }
+        if selected.iter().all(|s| (s.time_sec - cand.time_sec).abs() >= min_separation_sec) {
+            selected.push(*cand);
+        }
+    }
+    // If strict separation left fewer than 3 while candidates exist, fill up to 3
+    if selected.len() < MAX_MARKER_TRANSIENTS {
+        for cand in &candidates {
+            if selected.len() >= MAX_MARKER_TRANSIENTS {
+                break;
+            }
+            if !selected.iter().any(|s| (s.time_sec - cand.time_sec).abs() < 0.02) {
+                selected.push(*cand);
+            }
+        }
+    }
+
+    selected.sort_by(|a, b| a.time_sec.total_cmp(&b.time_sec));
+    selected.truncate(MAX_MARKER_TRANSIENTS);
+    selected
+}
+
+/// Snaps a target time in seconds to the nearest stereo zero-crossing (or minimum energy point)
+/// within `±window_ms` milliseconds to prevent clicks at cut boundaries.
+pub fn snap_to_zero_crossing(
+    samples_l: &[f32],
+    samples_r: &[f32],
+    sample_rate: u32,
+    target_sec: f64,
+    window_ms: f64,
+) -> f64 {
+    if sample_rate == 0 || samples_l.is_empty() || !target_sec.is_finite() {
+        return target_sec;
+    }
+    let sr = f64::from(sample_rate);
+    let n = samples_l.len().min(samples_r.len());
+    if n < 2 {
+        return target_sec;
+    }
+    let center = ((target_sec * sr).round() as usize).min(n - 1);
+    let radius = ((window_ms.clamp(0.5, 25.0) * 0.001 * sr).round() as usize).max(1);
+    let start = center.saturating_sub(radius);
+    let end = (center + radius).min(n - 1);
+
+    let mut best_idx = center;
+    let mut best_cost = f32::MAX;
+
+    for idx in start..=end {
+        let l = samples_l[idx];
+        let r = samples_r[idx];
+        let amp = l.abs() + r.abs();
+        let crosses_zero = idx > 0 && (
+            (samples_l[idx - 1] <= 0.0 && l >= 0.0) || (samples_l[idx - 1] >= 0.0 && l <= 0.0) ||
+            (samples_r[idx - 1] <= 0.0 && r >= 0.0) || (samples_r[idx - 1] >= 0.0 && r <= 0.0)
+        );
+        let dist_penalty = ((idx as isize - center as isize).abs() as f32 / radius as f32) * 0.015;
+        let zero_bonus = if crosses_zero { 0.35 } else { 1.0 };
+        let cost = amp * zero_bonus + dist_penalty;
+        if cost < best_cost {
+            best_cost = cost;
+            best_idx = idx;
+        }
+    }
+
+    best_idx as f64 / sr
 }
 
 /// Detects transient onsets (sharp attacks, drum hits, vocal starts) in a specific time range of audio.
@@ -880,5 +1099,44 @@ mod tests {
         assert!(transients.len() >= 2);
         assert!((transients[0].time_sec - 0.5).abs() < 0.05);
         assert!((transients[1].time_sec - 1.2).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_detect_marker_transients_caps_at_three() {
+        let sample_rate = 48000;
+        let num_samples = 48000 * 4; // 4 seconds
+        let mut samples_l = vec![0.0_f32; num_samples];
+        let mut samples_r = vec![0.0_f32; num_samples];
+
+        // Synthesize 8 distinct transients around a marker at 2.0s
+        for k in 0..8 {
+            let t_sec = 0.8 + k as f64 * 0.3;
+            let idx = (t_sec * sample_rate as f64) as usize;
+            for i in 0..350 {
+                if idx + i < num_samples {
+                    let v = 0.85 * (-(i as f32) / 90.0).exp();
+                    samples_l[idx + i] = v;
+                    samples_r[idx + i] = v;
+                }
+            }
+        }
+
+        let marker_transients = detect_marker_transients(&samples_l, &samples_r, sample_rate, 2.0, 1.8, 1.2);
+        assert!(!marker_transients.is_empty());
+        assert!(marker_transients.len() <= MAX_MARKER_TRANSIENTS, "Must never return more than 3 transients around a marker");
+        assert_eq!(marker_transients.len(), 3);
+    }
+
+    #[test]
+    fn test_snap_to_zero_crossing() {
+        let sample_rate = 10_000;
+        // 100 Hz sine wave: period = 100 samples (10ms), zero crossings every 50 samples (5ms)
+        let samples: Vec<f32> = (0..1000)
+            .map(|i| (2.0 * std::f32::consts::PI * 100.0 * (i as f32) / (sample_rate as f32)).sin())
+            .collect();
+        // Target at sample 123 (peak is at 125, zero crossing at 100 = 0.010s)
+        let snapped = snap_to_zero_crossing(&samples, &samples, sample_rate, 0.0120, 4.0);
+        let idx = (snapped * sample_rate as f64).round() as usize;
+        assert!(samples[idx].abs() < 0.1, "Snapped sample amplitude {} should be near zero", samples[idx]);
     }
 }

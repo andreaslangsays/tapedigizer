@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.4.0-blue.svg" alt="Version 1.4.0" />
+  <img src="https://img.shields.io/badge/version-1.5.0-blue.svg" alt="Version 1.5.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -21,77 +21,45 @@
 
 ## 🇩🇪 Deutsch | Übersicht
 
-**TapeDigizer** ist eine hochpräzise, native macOS-Desktop-App (entwickelt in **Rust** mit hardwarebeschleunigter Benutzeroberfläche), die das Digitalisieren alter Kassetten und Tonbänder so einfach und professionell wie möglich macht.
+**TapeDigizer** ist eine hochpräzise, native macOS-Desktop-App (entwickelt in **Rust** mit hardwarebeschleunigter Benutzeroberfläche), die das Digitalisieren von **Schallplatten (Vinyl LP & Single 45)**, **Kassetten** und **Tonbändern** so einfach, präzise und professionell wie möglich macht.
 
-### ✨ Hauptfunktionen
+### ✨ Hauptfunktionen (Neu in v1.5.0)
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
-   * **Kassetten-Metadaten & Projektordner vorab:** Name des Albums/Kassette und Seite (A/B) werden direkt vor der Aufnahme festgelegt. Großzügige Eingabefelder und direkte Ordnerstruktur.
-   * **Automatische Zwischensicherung vor Analyse:** Sobald die Aufnahme stoppt, wird die WAV-Datei sowie ein zugehöriges `.tapedigizer`-Projekt auf die Festplatte gesichert, bevor die Signalanalyse startet. Schreibfehler und unterbrochene Aufnahmen werden mit dem Pfad zur Rohdatei angezeigt.
-   * **Menüleiste mit Dateidialogen & Tastenkürzel:** macOS Menüleiste mit *Ablage* (Neues Projekt `⌘N`, Öffnen `⌘O`, Speichern `⌘S`, Speichern unter `⇧⌘S`, Im Finder zeigen), *Bearbeiten* (`⌘Z` / `⇧⌘Z`), *Tab-Wechsel* (`⌘1`, `⌘2`, `⌘3`) und *Hilfe*.
-   * **Live-Wellenform während der Aufnahme:** Visuelle Echtzeit-Darstellung des Audio-Signals (L & R getrennt), während das Band digitalisiert wird, inklusive dynamischem Playhead und Zeitleiste.
-   * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Erkennt automatisch 14 Kanäle und schlägt standardmäßig **Kanäle 11/12 (Stereo Line)** für dein Kassettendeck vor (auch Kanäle 9/10, Master Mix 13/14 oder diskrete Kanalpaare wählbar).
-   * **Echtzeit Studio LED-Kette:** 36-Segment-Stereometer (-60 bis 0 dBFS) mit Spitzenwertanzeige und Übersteuerungs-Warnung (CLIP).
-   * **Vorab-Pegelcheck:** Überprüfe und justiere den Eingangspegel ohne Datei-Aufzeichnung.
-   * **Unbeaufsichtigte Aufnahme:** Timer für 15, 30, 45 (C-90) oder 60 (C-120) Minuten plus **automatischer Stopp bei Bandende** durch Stilleerkennung.
-   * **24-Bit Studio-Qualität:** Verlustfreie, unkomprimierte WAV-Aufnahme mit 144 dB Dynamikbereich.
+   * **Analoge Audioquellen-Profile:** Vorkonfigurierte Voreinstellungen für **Kassette (Compact Cassette)**, **Tonband (Reel-to-Reel)**, **Vinyl LP (33⅓ RPM)** und **Single (45 RPM)** mit optimierten Standard-Aufnahmezeiten und passenden Stille-Erkennungsparametern.
+   * **Band & Ablage:** Name des Albums/Bandes und Seite (A/B) direkt vorab festlegen. Automatisch strukturierte Ordner.
+   * **Erweiterte Auto-Stopp-Steuerung:** Einstellbare Stille-Schwelle (-60 dBFS bis -30 dBFS), Haltezeit (5 s bis 45 s) und schützende Nachlaufzeit (Run-On 0 s bis 120 s). Ein *Sofort-Stopp*-Button beendet die Aufnahme bei Bedarf unmittelbar ohne Nachlauf.
+   * **Automatische Zwischensicherung vor Analyse:** Nach Aufnahmeende wird die 24-Bit-WAV-Datei und das `.tapedigizer`-Projekt sofort auf Disk gesichert.
+   * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Automatische Erkennung und Voreinstellung von **Kanäle 11/12 (Stereo Line)** für Kassetten-/Tape-Decks und Phono-Preamps (auch 9/10, Master 13/14 oder diskrete Kanalpaare wählbar).
+   * **Responsive Studio LED-Stereokette:** 36 Segmente (-60 bis 0 dBFS) mit Spitzenwert-Ticks, separater numerischer dBFS-Anzeige und klickbarem CLIP-Reset.
+   * **Vorab-Pegelcheck & Live-Wellenform:** Pegelkontrolle ohne Aufzeichnung sowie Echtzeit-Zweikanal-Wellenform während der Aufnahme.
 
 2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
-   * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
-   * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
-   * **Automatischer Aufnahmestart & Nachlaufzeit (Neu in v1.4.0):** Aufnahmestart wartet optional auf das Signal (> -50 dBFS) und schützt Band-Ausläufe mit 60 Sekunden Nachlaufzeit (Run-On) vor abruptem Abschneiden.
-   * **Robuste Core Audio Drainage:** Garantiert vollständigen Schreibpuffer-Abschluss bei Stream-Beendigung.
+   * **Analoge Signal-Diagnose:** Spitzenpegel L/R in dBFS, echter Headroom, DC-Offset (Gleichspannungsanteil) sowie Kanalbalance / Balance-Abweichung (L/R Δ dB).
+   * **Zoom L-12 Gain-Ratgeber:** Exakte Angabe, wie weit das analoge Gain-Poti am Interface aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss für optimalen Headroom (-1.5 dBFS).
+   * **Stereo-Balance-Hinweis:** Warnt vor ungleicher Tonabnehmer- oder Tonkopf-Justierung.
 
-3. **✂️ Tab 3: Track-Schnitt, Lupenansicht & Transienten (Neu in v1.2.0)**
-   * **🌊 Überarbeitete Standard-Wellenansicht mit Pixel-Binning & Nulllinien (Neu in v1.2.0):**
-     * Bildschirmsäulen-Binning (Aggregierte Min/Max-Peaks) verhindert Überlappungs-Artefakte und stellt Dynamik, Transienten und Stillephasen absolut scharf und originalgetreu dar.
-     * Dezente Null-Achsenlinien für linken und rechten Kanal trennen positive und negative Halbwellen.
-   * **🔍 Flüssiges Bereichs-Markieren & Zoombare Lupenansicht (Neu in v1.2.0):**
-     * **Nahtlose Bereichsauswahl:** Einfaches Klicken und horizontales Ziehen mit der Maus in der oberen Standardwellenansicht markiert sofort den gewünschten Abschnitt und öffnet die Lupe.
-     * **Tiefen-Zoom in der Lupe:** Stufenloser Zoom von 1x bis 50x (bis in den Millisekunden- und Sample-Bereich) per Schieberegler oder Mausrad.
-     * **Ein- und ausblendbare Transienten (`⚡ Transienten [EIN / AUS]`):** Transienten mit Spitzenwerten und Onsets können auf Knopfdruck ein- oder ausgeblendet werden.
-     * **Samplegenaues Verschieben von Schnittmarkern:**
-       * Marker können direkt im Lupenfenster mit der Maus verschoben werden.
-       * Mikro-Nudge-Tasten für samplegenaue Justierung (`◀ -1 Smp`, `+1 Smp ▶`), sowie Millisekunden-Schritte (`±1ms`, `±10ms`, `±100ms`).
-       * **`⚡ An Transiente einrasten`**: Lässt den Schnittmarker mit einem Klick magnetisch auf den exakten Beat- oder Toneinsatz springen.
-   * **🎛️ Professionelle Trackliste mit flexibler Songtitel-Breite:**
-     * Synchronisiertes horizontales und vertikales Scrollen verhindert jedes Zusammendrücken der Eingabefelder.
-     * Großzügiges Songtitel-Eingabefeld (mindestens 280–500px) für vollständige Liedtitel.
-     * Tastaturnavigation mit Enter / Tab zum nächsten Track.
-   * **Pausen ausschneiden & weglassen:**
-     * Abschnitte als `⏸ Pause (Weglassen)` markieren oder automatisch erkennen. Schraffierte Darstellung, beim 24-Bit WAV-Export komplett übersprungen.
-     * Button *✂ Pausen ausschneiden & weglassen*: Zeigt erkannte Schnittgrenzen als gestrichelte Vorschläge. Erst Übernehmen ersetzt die bisherige Trackliste. Ausgelassene Abschnitte erscheinen in der Exportvorschau.
-   * **Marker-Feinverschiebung (Nudge ◀ / ▶) (Neu in v1.0.0):**
-     * Schnelle Verschiebung per Tastatur (`◀` / `▶` Pfeiltasten für 0.1s, mit Shift für 1s).
-     * Feinstufen-Buttons (`◀` / `▶`) direkt neben den Start- und End-Zeiten in der Songliste.
-
-2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
-   * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
-   * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
-   * **Automatischer Aufnahmestart & Nachlaufzeit (Neu in v1.4.0):** Aufnahmestart wartet optional auf das Signal (> -50 dBFS) und schützt Band-Ausläufe mit 60 Sekunden Nachlaufzeit (Run-On) vor abruptem Abschneiden.
-   * **Robuste Core Audio Drainage:** Garantiert vollständigen Schreibpuffer-Abschluss bei Stream-Beendigung.
-
-3. **✂️ Tab 3: Track-Schnitt & Mastering-Export**
-   * **Tonband- & Album-Organisation (A- & B-Seite):** Gib den Albumnamen ein und wähle **Seite A** oder **Seite B**. Beim Export werden automatisch strukturierte Unterordner angelegt: `<Zielordner>/<Album-Name>/Seite A/` bzw. `Seite B/`.
-   * **Vollwertige Projekt-Verwaltung (`.tapedigizer`):** Speichere (`⌘S`) und lade (`⌘O`) deine Digitalisierungs-Sessions inkl. Audio, Markern, Tracktiteln und Mastering-Einstellungen für unterbrechungsfreies Weiterarbeiten.
-   * **Undo & Redo (⌘Z / ⇧⌘Z):** Versehentlich gelöschte oder gesetzte Schnittmarker lassen sich jederzeit mit ⌘Z zurückholen.
-   * **Marker-Inspector:** Marker über das Fähnchen oder die Startzeit in der Trackliste auswählen. Zeitcode oder Quellframe eingeben, schrittweise verschieben oder links und rechts der Schnittgrenze vorhören. Ein Zug in der Wellenform ist ein Undo-Schritt. Beim Löschen fragt die App nach.
-   * **Optimierte Trackliste & Navigation:**
-     * Extra breite Eingabefelder für lange Titel.
-     * Schnelle Tastatur-Navigation mit **Enter** oder **Tab** direkt zum nächsten Songtitel.
-     * Sichtbare Scrollbar mit Titelanzahlanzeige bei umfangreichen Tracklisten.
-     * Einzel-Track-Wiedergabe mit automatischem Stopp am Songende.
-   * **Zweikanal-Stereo-Wellenform:** Echte getrennte Spurdarstellung (Kanal 1 links oben, Kanal 2 rechts unten) im Logic Pro Look.
-   * **Intuitives Zoomen & Scrollen:**
-     * **Option (⌥) + Mausrad:** Butterweiches Hinein- und Herauszoomen (1x bis 25x), zentriert exakt an der Mauszeiger-Position!
-     * **Mausrad (ohne Taste):** Horizontales Verschieben nach links und rechts.
-     * **Übersicht-Leiste:** Interaktive Miniaturansicht des gesamten Bandes mit verschiebbarem Sichtfenster.
-   * **Klare Trennung zwischen Playhead und Schnittmarkern:**
-     * **Zeitleiste / Ruler:** Ein Klick oder Ziehen in der Zeitleiste steuert ausschließlich den Playhead (Abspielposition).
-     * **Schnitt-Werkzeug (✂️) & Marker-Fähnchen:** Umschaltbar via `[S]` oder Button. Zeigt eine Schnitt-Hilfslinie und setzt gezielt Song-Trenner. Marker-Fähnchen oben lassen sich verschieben oder per Rechtsklick / `Delete` entfernen.
-   * **🎧 Innovatives Hover-Vorhören (Audio-Scrubbing):**
-     * Wenn aktiv, genügt es, die Maus für ca. 300 ms an einer Stelle der Wellenform ruhig zu halten, um sofort hineinzuhören! Sobald die Maus weiterbewegt wird, pausiert die Wiedergabe. Ideal zum schnellen Auffinden von Songanfängen.
-   * **Pausenerkennung & Normalisierung:** Automatische Erkennung von Songpausen und 3 Export-Modi (Original für Logic Pro, Peak-Normalisierung pro Track, Album-Normalisierung).
+3. **✂️ Tab 3: Track-Schnitt, Präzisions-Schnitt-Lupe & Mastering-Export**
+   * **Überarbeitetes 2-Zonen-Layout:**
+     * **Oben (Volle Breite):** Zweikanal-Stereo-Wellenform über die gesamte Fensterbreite für perfekte Übersicht über das gesamte Band / die Platte, mit Marker-Flaggen, Taktlineal und Bereichsauswahl.
+     * **Unten Links:** Kompakte, übersichtliche Songliste.
+     * **Unten Rechts:** Interaktive Präzisions-Schnitt-Lupe zur exakten Platzierung des Schnittmarkers.
+   * **🔍 Neu gestaltete Präzisions-Schnitt-Lupe:**
+     * **Zonen-Hervorhebung:** Farbliche Markierung des auslaufenden Tracks (◀ ENDE Txx) und des beginnenden Tracks (START Tyy ▶).
+     * **Transienten-Fokussierung (Max. 3):** Die Transienten-Erkennung ist intelligent begrenzt – es werden maximal die **3 signifikantesten Transienten** (stärkste Song-Einsätze) im Umkreis des Markers angezeigt, um Überfrachtung zu vermeiden.
+     * **Nulldurchgang-Snap (Zero-Crossing):** Automatisches oder manuelles Einrasten auf den nächsten Nulldurchgang (`∿ Nulldurchgang`), um Knackser und Klicks am Schnittpunkt physikalisch auszuschließen.
+     * **Stufenloser Zoom & Feinschnitt:** Schnelles Rein-/Rauszoomen per Mausrad direkt in der Lupe, Nudge-Tasten für Millisekunden- und Sample-Schritte (`±1 Smp`, `±10 ms`).
+   * **📝 Kompakte & mächtige Trackliste:**
+     * Kompakte Einzeilen-Einträge für maximale Übersicht auch bei über 20 Titeln pro Seite.
+     * Großzügiges Titelfeld für mindestens 20–30 Zeichen ohne horizontales Drängeln.
+     * **Mehrfach-Titel-Import (Batch-Paste):** Ganze Titellisten (z. B. aus Discogs, Wikipedia oder Bandcamp) mit einem Klick einfügen – Zeile für Zeile automatisch auf die Tracks verteilt!
+     * Sofortiges Vorhören jedes Songs (`▶`) und `Weglassen`-Toggle für Rillenpausen oder Bandrauschen.
+   * **🎛️ Analog-Mastering beim Export:**
+     * **20 Hz Subsonic- / Rumpelfilter:** Entfernt tieffrequentes Platten-Rumpeln (Phono-Rumble) und Gleichstrom-Gleichlaufschwankungen.
+     * **Schnittkanten Micro-Fades (5 ms):** Automatische klickfreie Ein- und Ausblendungen an allen Schnittgrenzen.
+     * **L/R-Balance-Korrektur:** Gleicht Pegeldifferenzen zwischen linkem und rechtem Kanal automatisch an.
+     * **Normalisierung:** 3 Modi (Original für DAW-Nachbearbeitung, Pro-Track Peak-Normalisierung, Album-/Seiten-Normalisierung).
+   * **Vollwertiges Projekt-Management & Undo/Redo:** Speichern (`⌘S`), Öffnen (`⌘O`) im `.tapedigizer`-Format, mehrstufiges Undo (`⌘Z`) und Redo (`⇧⌘Z`).
 
 4. **🌍 Mehrsprachigkeit & Persistenz**
    * Schneller Sprachwechsel zwischen **Deutsch** und **Englisch** direkt in der oberen Statusleiste.
@@ -101,32 +69,37 @@
 
 ## 🇬🇧 English | Overview
 
-**TapeDigizer** is a high-precision native macOS desktop application (built with **Rust** and hardware-accelerated GUI) designed to digitize reel-to-reel and cassette tapes effortlessly with studio-grade fidelity.
+**TapeDigizer** is a high-precision native macOS desktop application (built with **Rust** and hardware-accelerated GUI) designed to digitize **vinyl records (LP 33⅓ & Single 45)**, **cassettes**, and **reel-to-reel tapes** effortlessly with studio-grade fidelity.
 
-### ✨ Key Features
+### ✨ Key Features (New in v1.5.0)
 
 1. **🎙️ Tab 1: Recording & Calibration**
-   * **Zoom LiveTrak L-12 Multi-channel Routing:** Automatically maps input channels with **Channels 11/12 (Stereo Line)** preselected as standard for tape decks.
-   * **Real-time Studio LED Ladder Meters:** 36-segment responsive meters (-60 to 0 dBFS) with peak-hold ticks and digital clip indicators.
-   * **Unattended Recording:** Timer presets (15, 30, 45, 60 min) and **automatic silence-detection auto-stop** at the end of the tape.
+   * **Analog Media Profiles:** Presets for **Compact Cassette**, **Reel-to-Reel Tape**, **Vinyl LP (33⅓ RPM)**, and **Single (45 RPM)** with customized duration presets and silence detection thresholds.
+   * **Configurable Auto-Stop:** Fine-tune silence threshold (-60 dBFS to -30 dBFS), duration (5s to 45s), and run-on tail (0s to 120s), plus an instant-stop button.
+   * **Zoom LiveTrak L-12 Multi-channel Routing:** Preconfigures **Channels 11/12 (Stereo Line)** as standard for tape decks and phono preamps.
+   * **Real-time Studio LED Ladder Meters:** 36-segment responsive meters with peak-hold ticks, numeric dBFS readouts, and clickable clip indicators.
+   * **Immediate Persistence:** Audio and project files are safely flushed to disk before analysis begins.
    * **24-bit Studio Quality:** Pure uncompressed 24-bit PCM WAV.
 
 2. **📊 Tab 2: Level Diagnosis & Hardware Gain Advice**
-   * Full scan for Peak L/R, true headroom, and clipped samples.
+   * **Signal Analysis:** Peak L/R (dBFS), headroom, DC-offset detection, and channel balance deviation (L/R Δ dB).
    * **Zoom L-12 Hardware Advice:** Recommends exact potentiometer adjustments (e.g. *"+4 dB"* or *"-2 dB"*).
 
-3. **✂️ Tab 3: Track Splicing & Mastering Export**
-   * **Dual-Channel Stereo Waveform:** Logic Pro studio aesthetic with distinct Left and Right channel lanes.
-   * **Smooth Navigation:**
-     * **Option (⌥) + Mouse Wheel:** Fluid zooming (1x to 25x) centered around the mouse cursor!
-     * **Mouse Wheel:** Smooth horizontal panning across the tape.
-     * **Overview Minimap:** Full-tape overview bar with a draggable viewport window.
-   * **Distinct Playhead & Splicer Controls:**
-     * **Timeline Ruler:** Scrubbing in the ruler sets the Playhead without affecting markers.
-     * **Scissor Tool (✂️):** Activate via `[S]` to drop splice markers with live cursor guide lines.
-   * **🎧 Stationary Hover Audition:**
-     * Hover stationary over any section of the tape for ~300ms to immediately preview the audio!
-   * **Export:** Preview filenames and skipped gaps, select a normalization mode, then export in the background. Existing output files are protected and the running export can be cancelled.
+3. **✂️ Tab 3: Track Splicing, Precision Scope & Mastering Export**
+   * **Full-Width Stereo Waveform:** High-resolution waveform occupying full window width for clear navigation and overview.
+   * **Precision Splice Scope (Schnitt-Lupe):**
+     * Distinct track zone shading (◀ END Txx vs START Tyy ▶).
+     * **3-Transient Limit:** Restricts transient markers to the top 3 most prominent musical onsets around the splice point to prevent visual clutter.
+     * **Zero-Crossing Snap:** Magnetically aligns cuts to sample zero-crossings (`∿ Zero-Crossing`) to eliminate clicks and pops.
+     * Zoomable down to individual samples with micro-nudge controls (`±1 Smp`, `±10 ms`).
+   * **Compact Tracklist & Batch Title Import:**
+     * Single-line compact track rows showing >= 20 characters comfortably.
+     * **Batch-Paste:** Paste complete tracklists from Discogs, Wikipedia, or Bandcamp to populate titles automatically.
+   * **Analog Mastering Export Options:**
+     * **20 Hz Subsonic / Rumble Filter:** Removes turntable rumble and subsonic DC flutter.
+     * **Boundary Micro-Fades (5 ms):** Transparent click-free fades at track heads and tails.
+     * **L/R Balance Compensation:** Rebalances channel level imbalances.
+     * **Normalization:** Raw DAW mode, per-track peak normalization, and album side loudness matching.
 
 ---
 

@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use crate::i18n::Language;
+use crate::project::MediaSourceType;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct AppConfig {
     pub last_device_name: Option<String>,
     pub last_channel_left: Option<usize>,
@@ -10,9 +12,20 @@ pub struct AppConfig {
     pub export_directory: Option<PathBuf>,
     pub timer_minutes: Option<u32>,
     pub silence_autostop: Option<bool>,
+    pub autostop_threshold_db: Option<f32>,
+    pub autostop_silence_secs: Option<f32>,
+    pub run_on_seconds: Option<u32>,
+    pub pause_threshold_db: Option<f32>,
+    pub pause_min_seconds: Option<f32>,
+    pub pause_as_gaps: Option<bool>,
+    pub zero_crossing_snap: Option<bool>,
+    pub export_highpass_20hz: Option<bool>,
+    pub export_fade_ms: Option<u32>,
     pub normalization_mode: Option<String>,
     pub language: Option<Language>,
     pub last_tape_name: Option<String>,
+    pub last_artist_name: Option<String>,
+    pub media_source: Option<MediaSourceType>,
 }
 
 impl Default for AppConfig {
@@ -24,9 +37,20 @@ impl Default for AppConfig {
             export_directory: None,
             timer_minutes: Some(45),
             silence_autostop: Some(true),
+            autostop_threshold_db: Some(-52.0),
+            autostop_silence_secs: Some(15.0),
+            run_on_seconds: Some(15),
+            pause_threshold_db: Some(-45.0),
+            pause_min_seconds: Some(1.8),
+            pause_as_gaps: Some(false),
+            zero_crossing_snap: Some(true),
+            export_highpass_20hz: Some(true),
+            export_fade_ms: Some(15),
             normalization_mode: Some("none".into()),
             language: Some(Language::De),
             last_tape_name: Some("Tonband 01".into()),
+            last_artist_name: None,
+            media_source: Some(MediaSourceType::Cassette),
         }
     }
 }

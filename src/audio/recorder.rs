@@ -57,8 +57,11 @@ pub struct AudioRecorder {
     
     start_time: Arc<RwLock<Option<Instant>>>,
     run_on_deadline: Option<Instant>,
+    run_on_duration: Duration,
     timer_limit: Option<Duration>,
     silence_autostop_enabled: bool,
+    autostop_threshold_db: f32,
+    autostop_silence_secs: f32,
     silence_seconds_detected: Arc<RwLock<f32>>,
     
     current_filepath: Option<PathBuf>,
@@ -83,11 +86,34 @@ impl AudioRecorder {
             max_peak_right: Arc::new(RwLock::new(0.0)),
             start_time: Arc::new(RwLock::new(None)),
             run_on_deadline: None,
+            run_on_duration: RUN_ON_DURATION,
             timer_limit: None,
             silence_autostop_enabled: false,
+            autostop_threshold_db: -55.0,
+            autostop_silence_secs: 15.0,
             silence_seconds_detected: Arc::new(RwLock::new(0.0)),
             current_filepath: None,
             sample_rate: 48000,
+        }
+    }
+
+    pub fn configure_autostop(&mut self, threshold_db: f32, silence_secs: f32, run_on_secs: u32) {
+        self.autostop_threshold_db = threshold_db.clamp(-80.0, -20.0);
+        self.autostop_silence_secs = silence_secs.clamp(3.0, 120.0);
+        self.run_on_duration = Duration::from_secs(u64::from(run_on_secs));
+    }
+
+    pub fn reset_meter_peaks(&self) {
+        let mut m = self.meter.write();
+        m.peak_hold_l_db = m.peak_l_db;
+        m.peak_hold_r_db = m.peak_r_db;
+        m.is_clipping = false;
+        m.clip_count = 0;
+    }
+
+    pub fn stop_immediately(&mut self) {
+        if self.is_busy() {
+            self.begin_stop();
         }
     }
 
@@ -99,6 +125,7 @@ impl AudioRecorder {
         *self.meter.read()
     }
 
+    #[allow(dead_code)]
     pub fn get_waveform_data(&self) -> Vec<StereoWaveformPoint> {
         self.waveform_data.read().clone()
     }
@@ -108,6 +135,7 @@ impl AudioRecorder {
         f(&guard)
     }
 
+    #[allow(dead_code)]
     pub fn waveform_len(&self) -> usize {
         self.waveform_data.read().len()
     }
@@ -116,18 +144,22 @@ impl AudioRecorder {
         self.recorded_samples.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub fn total_clipped_samples(&self) -> usize {
         self.total_clipped_samples.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub fn max_peak_l_db(&self) -> f32 {
         linear_to_db(*self.max_peak_left.read())
     }
 
+    #[allow(dead_code)]
     pub fn max_peak_r_db(&self) -> f32 {
         linear_to_db(*self.max_peak_right.read())
     }
 
+    #[allow(dead_code)]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -157,8 +189,19 @@ impl AudioRecorder {
                 self.begin_stop();
             }
             RecorderState::Recording => {
-                self.run_on_deadline = Some(Instant::now() + RUN_ON_DURATION);
-                *state = RecorderState::RunOn;
+                if self.run_on_duration.is_zero() {
+                    *state = RecorderState::Finalizing;
+                    drop(state);
+                    self.begin_stop();
+                } else {
+                    self.run_on_deadline = Some(Instant::now() + self.run_on_duration);
+                    *state = RecorderState::RunOn;
+                }
+            }
+            RecorderState::RunOn => {
+                *state = RecorderState::Finalizing;
+                drop(state);
+                self.begin_stop();
             }
             _ => {}
         }
@@ -177,8 +220,8 @@ impl AudioRecorder {
         } else if state == RecorderState::Recording {
             let elapsed = self.elapsed_duration();
             let timer_elapsed = self.timer_limit.is_some_and(|limit| elapsed >= limit);
-            let end_of_tape = self.silence_autostop_enabled && elapsed > Duration::from_secs(30)
-                && *self.silence_seconds_detected.read() >= 15.0;
+            let end_of_tape = self.silence_autostop_enabled && elapsed > Duration::from_secs(20)
+                && *self.silence_seconds_detected.read() >= self.autostop_silence_secs;
             if timer_elapsed || end_of_tape {
                 self.request_stop();
             }
@@ -364,6 +407,7 @@ impl AudioRecorder {
 
         let ch_l = channel_pair.left_channel;
         let ch_r = channel_pair.right_channel;
+        let silence_threshold_db = self.autostop_threshold_db;
 
         let capture_state = self.state.clone();
         let capture_start = self.start_time.clone();
@@ -384,6 +428,7 @@ impl AudioRecorder {
                         ch_l,
                         ch_r,
                         sample_rate,
+                        silence_threshold_db,
                         &input,
                         &callback_interrupted,
                         &capture_state,
@@ -409,6 +454,7 @@ impl AudioRecorder {
                         ch_l,
                         ch_r,
                         sample_rate,
+                        silence_threshold_db,
                         &input,
                         &callback_interrupted,
                         &capture_state,
@@ -592,6 +638,7 @@ fn process_record_f32(
     ch_l: usize,
     ch_r: usize,
     sample_rate: u32,
+    silence_threshold_db: f32,
     input: &SampleInput,
     interrupted: &AtomicBool,
     capture_state: &RwLock<RecorderState>,
@@ -688,10 +735,10 @@ fn process_record_f32(
             if peak_r > *mr { *mr = peak_r; }
         }
 
-        // Silence tracking: if max RMS < -55 dBFS
+        // Silence tracking: if max RMS < configured threshold
         let chunk_duration = count as f32 / sample_rate as f32;
         let mut sil = silence_arc.write();
-        if max_rms_db < -55.0 {
+        if max_rms_db < silence_threshold_db {
             *sil += chunk_duration;
         } else {
             *sil = 0.0;

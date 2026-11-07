@@ -207,6 +207,7 @@ impl AudioPlayer {
         self.is_playing.store(true, Ordering::SeqCst);
     }
 
+    #[allow(dead_code)]
     pub fn toggle_range(&self, start: f64, end: f64) {
         if self.is_playing() {
             self.pause();

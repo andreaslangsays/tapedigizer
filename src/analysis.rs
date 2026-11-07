@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::audio::meter::linear_to_db;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum LevelDiagnosis {
     Optimal {
         peak_db: f32,
@@ -22,12 +23,16 @@ pub enum LevelDiagnosis {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct AudioAnalysisReport {
     pub peak_left_db: f32,
     pub peak_right_db: f32,
     pub max_peak_db: f32,
     pub rms_left_db: f32,
     pub rms_right_db: f32,
+    pub stereo_balance_db: f32, // Positive = Right is louder, Negative = Left is louder
+    pub crest_factor_db: f32,
+    pub dc_offset_percent: f32,
     pub clipped_samples: usize,
     pub total_samples: usize,
     pub duration_seconds: f64,
@@ -48,6 +53,8 @@ pub fn analyze_samples(left: &[f32], right: &[f32], sample_rate: u32) -> Result<
     let mut peak_r = 0.0_f32;
     let mut sum_sq_l = 0.0_f64;
     let mut sum_sq_r = 0.0_f64;
+    let mut sum_dc_l = 0.0_f64;
+    let mut sum_dc_r = 0.0_f64;
     let mut clipped_samples = 0;
     let frame_count = left.len();
     for (&l, &r) in left.iter().zip(right) {
@@ -58,6 +65,8 @@ pub fn analyze_samples(left: &[f32], right: &[f32], sample_rate: u32) -> Result<
         clipped_samples += usize::from(l.abs() >= 0.999 || r.abs() >= 0.999);
         sum_sq_l += f64::from(l).powi(2);
         sum_sq_r += f64::from(r).powi(2);
+        sum_dc_l += f64::from(l);
+        sum_dc_r += f64::from(r);
     }
 
     let peak_l_db = linear_to_db(peak_l);
@@ -68,6 +77,21 @@ pub fn analyze_samples(left: &[f32], right: &[f32], sample_rate: u32) -> Result<
     let rms_r = (sum_sq_r / frame_count as f64).sqrt() as f32;
     let rms_l_db = linear_to_db(rms_l);
     let rms_r_db = linear_to_db(rms_r);
+    let avg_rms_db = linear_to_db(((rms_l * rms_l + rms_r * rms_r) * 0.5).sqrt());
+    let crest_factor_db = (max_peak_db - avg_rms_db).max(0.0);
+
+    // Stereo balance: R - L in dB (clamped to [-24, +24])
+    let stereo_balance_db = if rms_l_db > -70.0 && rms_r_db > -70.0 {
+        (rms_r_db - rms_l_db).clamp(-24.0, 24.0)
+    } else if peak_l_db > -70.0 && peak_r_db > -70.0 {
+        (peak_r_db - peak_l_db).clamp(-24.0, 24.0)
+    } else {
+        0.0
+    };
+
+    let dc_l = (sum_dc_l / frame_count as f64).abs() as f32;
+    let dc_r = (sum_dc_r / frame_count as f64).abs() as f32;
+    let dc_offset_percent = (dc_l.max(dc_r) * 100.0).min(100.0);
 
     let duration_seconds = frame_count as f64 / f64::from(sample_rate);
 
@@ -123,6 +147,9 @@ pub fn analyze_samples(left: &[f32], right: &[f32], sample_rate: u32) -> Result<
         max_peak_db,
         rms_left_db: rms_l_db,
         rms_right_db: rms_r_db,
+        stereo_balance_db,
+        crest_factor_db,
+        dc_offset_percent,
         clipped_samples,
         total_samples: frame_count,
         duration_seconds,

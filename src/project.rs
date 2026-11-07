@@ -2,6 +2,46 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaSourceType {
+    Cassette,
+    ReelToReel,
+    VinylLp,
+    VinylSingle,
+}
+
+impl Default for MediaSourceType {
+    fn default() -> Self {
+        MediaSourceType::Cassette
+    }
+}
+
+impl MediaSourceType {
+    pub fn label(&self, lang: crate::i18n::Language) -> &'static str {
+        match (self, lang) {
+            (MediaSourceType::Cassette, crate::i18n::Language::De) => "Kassette",
+            (MediaSourceType::Cassette, crate::i18n::Language::En) => "Cassette",
+            (MediaSourceType::ReelToReel, crate::i18n::Language::De) => "Tonband",
+            (MediaSourceType::ReelToReel, crate::i18n::Language::En) => "Reel-to-Reel",
+            (MediaSourceType::VinylLp, crate::i18n::Language::De) => "Vinyl LP",
+            (MediaSourceType::VinylLp, crate::i18n::Language::En) => "Vinyl LP",
+            (MediaSourceType::VinylSingle, crate::i18n::Language::De) => "Single 45",
+            (MediaSourceType::VinylSingle, crate::i18n::Language::En) => "Single 45",
+        }
+    }
+
+    /// Recommended default recording timer (minutes), autostop threshold (dB), autostop duration (s),
+    /// pause detection threshold (dB), and minimum pause duration (s).
+    pub fn defaults(&self) -> (u32, f32, f32, f32, f32) {
+        match self {
+            MediaSourceType::Cassette => (45, -52.0, 15.0, -45.0, 1.8),
+            MediaSourceType::ReelToReel => (60, -54.0, 15.0, -48.0, 2.0),
+            MediaSourceType::VinylLp => (25, -42.0, 12.0, -38.0, 1.4),
+            MediaSourceType::VinylSingle => (10, -42.0, 10.0, -38.0, 1.2),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TapeSide {
     SideA,
     SideB,
