@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, Stream};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -13,7 +13,9 @@ use crate::audio::meter::{linear_to_db, MeterLevels};
 pub enum RecorderState {
     Idle,
     Monitoring,
+    WaitingForSignal,
     Recording,
+    RunOn,
     Finalizing,
     Finished,
 }
@@ -26,6 +28,14 @@ pub struct StereoWaveformPoint {
     pub max_r: f32,
 }
 
+const START_SIGNAL_DBFS: f32 = -50.0;
+const RUN_ON_DURATION: Duration = Duration::from_secs(60);
+
+type SampleChunk = Vec<(f32, f32)>;
+// Core Audio may retain the callback after the stream is dropped.
+// Share access to the sole sender so stopping can disconnect it explicitly.
+type SampleInput = Arc<Mutex<Option<Sender<SampleChunk>>>>;
+
 pub struct AudioRecorder {
     state: Arc<RwLock<RecorderState>>,
     meter: Arc<RwLock<MeterLevels>>,
@@ -34,7 +44,7 @@ pub struct AudioRecorder {
     // Recording controls
     recording_stream: Option<Stream>,
     monitor_stream: Option<Stream>,
-    sample_sender: Option<Sender<Vec<(f32, f32)>>>,
+    sample_sender: Option<SampleInput>,
     writer_handle: Option<std::thread::JoinHandle<Result<(), String>>>,
     interrupted: Arc<AtomicBool>,
     recording_error: Option<String>,
@@ -45,7 +55,8 @@ pub struct AudioRecorder {
     max_peak_left: Arc<RwLock<f32>>,
     max_peak_right: Arc<RwLock<f32>>,
     
-    start_time: Option<Instant>,
+    start_time: Arc<RwLock<Option<Instant>>>,
+    run_on_deadline: Option<Instant>,
     timer_limit: Option<Duration>,
     silence_autostop_enabled: bool,
     silence_seconds_detected: Arc<RwLock<f32>>,
@@ -70,7 +81,8 @@ impl AudioRecorder {
             total_clipped_samples: Arc::new(AtomicUsize::new(0)),
             max_peak_left: Arc::new(RwLock::new(0.0)),
             max_peak_right: Arc::new(RwLock::new(0.0)),
-            start_time: None,
+            start_time: Arc::new(RwLock::new(None)),
+            run_on_deadline: None,
             timer_limit: None,
             silence_autostop_enabled: false,
             silence_seconds_detected: Arc::new(RwLock::new(0.0)),
@@ -125,42 +137,57 @@ impl AudioRecorder {
     }
 
     pub fn elapsed_duration(&self) -> Duration {
-        if let Some(start) = self.start_time {
-            start.elapsed()
-        } else {
-            Duration::ZERO
-        }
+        self.start_time.read().map_or(Duration::ZERO, |start| start.elapsed())
     }
 
     pub fn remaining_duration(&self) -> Option<Duration> {
-        if let (Some(start), Some(limit)) = (self.start_time, self.timer_limit) {
-            let elapsed = start.elapsed();
-            if elapsed >= limit {
-                Some(Duration::ZERO)
-            } else {
-                Some(limit - elapsed)
+        if let Some(deadline) = self.run_on_deadline {
+            return Some(deadline.saturating_duration_since(Instant::now()));
+        }
+        let start = (*self.start_time.read())?;
+        self.timer_limit.map(|limit| limit.saturating_sub(start.elapsed()))
+    }
+
+    pub fn request_stop(&mut self) {
+        let mut state = self.state.write();
+        match *state {
+            RecorderState::WaitingForSignal => {
+                *state = RecorderState::Finalizing;
+                drop(state);
+                self.begin_stop();
             }
-        } else {
-            None
+            RecorderState::Recording => {
+                self.run_on_deadline = Some(Instant::now() + RUN_ON_DURATION);
+                *state = RecorderState::RunOn;
+            }
+            _ => {}
         }
     }
 
-    /// Check if auto-stop conditions (timer or silence) have been met
     pub fn poll_auto_stop(&mut self) {
-        if self.state() != RecorderState::Recording {
+        let state = self.state();
+        if !matches!(state, RecorderState::WaitingForSignal | RecorderState::Recording | RecorderState::RunOn) {
             return;
         }
-        let elapsed = self.elapsed_duration();
-        let timer_elapsed = self.timer_limit.is_some_and(|limit| elapsed >= limit);
-        let end_of_tape = self.silence_autostop_enabled && elapsed > Duration::from_secs(30)
-            && *self.silence_seconds_detected.read() >= 15.0;
-        if self.interrupted.load(Ordering::Acquire) || timer_elapsed || end_of_tape {
+        if self.interrupted.load(Ordering::Acquire)
+            || (state == RecorderState::RunOn
+                && self.run_on_deadline.is_some_and(|deadline| Instant::now() >= deadline))
+        {
             self.begin_stop();
+        } else if state == RecorderState::Recording {
+            let elapsed = self.elapsed_duration();
+            let timer_elapsed = self.timer_limit.is_some_and(|limit| elapsed >= limit);
+            let end_of_tape = self.silence_autostop_enabled && elapsed > Duration::from_secs(30)
+                && *self.silence_seconds_detected.read() >= 15.0;
+            if timer_elapsed || end_of_tape {
+                self.request_stop();
+            }
         }
     }
 
     pub fn is_busy(&self) -> bool {
-        matches!(self.state(), RecorderState::Recording | RecorderState::Finalizing)
+        matches!(self.state(), RecorderState::WaitingForSignal | RecorderState::Recording
+            | RecorderState::RunOn | RecorderState::Finalizing)
     }
 
     /// Starts live monitoring without recording to disk (for level calibration / Einpegeln)
@@ -269,7 +296,8 @@ impl AudioRecorder {
         *self.silence_seconds_detected.write() = 0.0;
         self.timer_limit = timer_duration;
         self.silence_autostop_enabled = enable_silence_autostop;
-        self.start_time = Some(Instant::now());
+        *self.start_time.write() = None;
+        self.run_on_deadline = None;
         self.current_filepath = Some(target_path.clone());
 
         if channel_pair.left_channel >= total_channels || channel_pair.right_channel >= total_channels {
@@ -289,8 +317,9 @@ impl AudioRecorder {
         };
         let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)
             .map_err(|e| e.to_string())?;
-        let (tx, rx): (Sender<Vec<(f32, f32)>>, Receiver<Vec<(f32, f32)>>) = bounded(256);
-        self.sample_sender = Some(tx.clone());
+        let (sender, rx): (Sender<SampleChunk>, Receiver<SampleChunk>) = bounded(256);
+        let input = Arc::new(Mutex::new(Some(sender)));
+        self.sample_sender = Some(input.clone());
         self.interrupted.store(false, Ordering::Release);
         self.recording_error = None;
 
@@ -336,6 +365,8 @@ impl AudioRecorder {
         let ch_l = channel_pair.left_channel;
         let ch_r = channel_pair.right_channel;
 
+        let capture_state = self.state.clone();
+        let capture_start = self.start_time.clone();
         let callback_interrupted = self.interrupted.clone();
         let stream_interrupted = self.interrupted.clone();
         let err_fn = move |err| {
@@ -353,8 +384,10 @@ impl AudioRecorder {
                         ch_l,
                         ch_r,
                         sample_rate,
-                        &tx,
+                        &input,
                         &callback_interrupted,
+                        &capture_state,
+                        &capture_start,
                         &meter_arc,
                         &waveform_arc,
                         &clipped_arc,
@@ -376,8 +409,10 @@ impl AudioRecorder {
                         ch_l,
                         ch_r,
                         sample_rate,
-                        &tx,
+                        &input,
                         &callback_interrupted,
+                        &capture_state,
+                        &capture_start,
                         &meter_arc,
                         &waveform_arc,
                         &clipped_arc,
@@ -393,6 +428,7 @@ impl AudioRecorder {
         }
         .map_err(|e| e.to_string())
         .and_then(|stream| {
+            *self.state.write() = RecorderState::WaitingForSignal;
             stream.play().map_err(|e| e.to_string())?;
             Ok(stream)
         });
@@ -407,19 +443,21 @@ impl AudioRecorder {
             }
         };
         self.recording_stream = Some(stream);
-        *self.state.write() = RecorderState::Recording;
 
         Ok(())
     }
 
-    pub fn begin_stop(&mut self) {
+    fn begin_stop(&mut self) {
+        if self.is_busy() {
+            *self.state.write() = RecorderState::Finalizing;
+        }
+        self.run_on_deadline = None;
         if let Some(stream) = self.recording_stream.take() {
             let _ = stream.pause();
             drop(stream);
         }
-        self.sample_sender.take();
-        if self.state() == RecorderState::Recording {
-            *self.state.write() = RecorderState::Finalizing;
+        if let Some(input) = self.sample_sender.take() {
+            input.lock().take();
         }
     }
 
@@ -430,7 +468,7 @@ impl AudioRecorder {
             return false;
         }
         self.finish_writer();
-        true
+        self.state() == RecorderState::Finished
     }
 
     fn stop_recording(&mut self) {
@@ -449,7 +487,20 @@ impl AudioRecorder {
             };
         }
         if self.state() == RecorderState::Finalizing {
-            *self.state.write() = RecorderState::Finished;
+            let cancelled = self.start_time.read().is_none() && self.recording_error.is_none();
+            if cancelled {
+                if let Some(path) = self.current_filepath.take() {
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        self.recording_error = Some(error.to_string());
+                        self.current_filepath = Some(path);
+                    }
+                }
+            }
+            *self.state.write() = if cancelled && self.recording_error.is_none() {
+                RecorderState::Idle
+            } else {
+                RecorderState::Finished
+            };
         }
     }
 
@@ -522,14 +573,29 @@ fn to_pcm24(sample: f32) -> i32 {
     (sample * 8_388_608.0).round().clamp(-8_388_608.0, 8_388_607.0) as i32
 }
 
+fn accept_recording_signal(
+    state: &RwLock<RecorderState>,
+    start_time: &RwLock<Option<Instant>>,
+    rms_db: f32,
+) -> bool {
+    let mut state = state.write();
+    if *state == RecorderState::WaitingForSignal && rms_db >= START_SIGNAL_DBFS {
+        *start_time.write() = Some(Instant::now());
+        *state = RecorderState::Recording;
+    }
+    matches!(*state, RecorderState::Recording | RecorderState::RunOn)
+}
+
 fn process_record_f32(
     data: &[f32],
     total_channels: usize,
     ch_l: usize,
     ch_r: usize,
     sample_rate: u32,
-    tx: &Sender<Vec<(f32, f32)>>,
+    input: &SampleInput,
     interrupted: &AtomicBool,
+    capture_state: &RwLock<RecorderState>,
+    capture_start: &RwLock<Option<Instant>>,
     meter_arc: &Arc<RwLock<MeterLevels>>,
     waveform_arc: &Arc<RwLock<Vec<StereoWaveformPoint>>>,
     clipped_arc: &Arc<AtomicUsize>,
@@ -570,25 +636,6 @@ fn process_record_f32(
     }
 
     if count > 0 {
-        if tx.try_send(chunk).is_err() {
-            interrupted.store(true, Ordering::Release);
-            return;
-        }
-
-        if local_clips > 0 {
-            clipped_arc.fetch_add(local_clips, Ordering::Relaxed);
-        }
-
-        // Update overall max peaks
-        {
-            let mut ml = max_l_arc.write();
-            if peak_l > *ml { *ml = peak_l; }
-        }
-        {
-            let mut mr = max_r_arc.write();
-            if peak_r > *mr { *mr = peak_r; }
-        }
-
         // Live meter update
         let rms_l = (sum_sq_l / count as f32).sqrt();
         let rms_r = (sum_sq_r / count as f32).sqrt();
@@ -612,8 +659,36 @@ fn process_record_f32(
             m.clip_count += local_clips;
         }
 
-        // Silence tracking: if max RMS < -55 dBFS
+        drop(m);
         let max_rms_db = new_rms_l_db.max(new_rms_r_db);
+        if !accept_recording_signal(capture_state, capture_start, max_rms_db) {
+            return;
+        }
+
+        {
+            let input = input.lock();
+            let Some(sender) = input.as_ref() else { return; };
+            if sender.try_send(chunk).is_err() {
+                interrupted.store(true, Ordering::Release);
+                return;
+            }
+        }
+
+        if local_clips > 0 {
+            clipped_arc.fetch_add(local_clips, Ordering::Relaxed);
+        }
+
+        // Update overall max peaks
+        {
+            let mut ml = max_l_arc.write();
+            if peak_l > *ml { *ml = peak_l; }
+        }
+        {
+            let mut mr = max_r_arc.write();
+            if peak_r > *mr { *mr = peak_r; }
+        }
+
+        // Silence tracking: if max RMS < -55 dBFS
         let chunk_duration = count as f32 / sample_rate as f32;
         let mut sil = silence_arc.write();
         if max_rms_db < -55.0 {
@@ -640,6 +715,48 @@ mod tests {
     use super::*;
     use crate::audio::device::list_input_devices;
     use crate::analysis::analyze_wav_file;
+
+    #[test]
+    fn signal_starts_the_timer_and_stop_adds_one_minute() {
+        let mut recorder = AudioRecorder::new();
+        *recorder.state.write() = RecorderState::WaitingForSignal;
+        recorder.timer_limit = Some(Duration::ZERO);
+        recorder.poll_auto_stop();
+        assert_eq!(recorder.state(), RecorderState::WaitingForSignal);
+        assert!(!accept_recording_signal(&recorder.state, &recorder.start_time, -65.0));
+        assert!(accept_recording_signal(&recorder.state, &recorder.start_time, -35.0));
+
+        recorder.poll_auto_stop();
+        assert_eq!(recorder.state(), RecorderState::RunOn);
+        assert!(accept_recording_signal(&recorder.state, &recorder.start_time, -90.0));
+        let remaining = recorder.remaining_duration().unwrap();
+        assert!(remaining > Duration::from_secs(59) && remaining <= Duration::from_secs(60));
+
+        recorder.run_on_deadline = Some(Instant::now());
+        recorder.poll_auto_stop();
+        assert_eq!(recorder.state(), RecorderState::Finalizing);
+    }
+
+    #[test]
+    fn stopping_drains_samples_even_if_core_audio_keeps_its_callback() {
+        use crossbeam_channel::RecvTimeoutError;
+
+        let mut recorder = AudioRecorder::new();
+        let (sender, receiver) = bounded(2);
+        let callback_input = Arc::new(Mutex::new(Some(sender)));
+        recorder.sample_sender = Some(callback_input.clone());
+        *recorder.state.write() = RecorderState::Recording;
+        callback_input.lock().as_ref().unwrap().try_send(vec![(0.25, -0.25)]).unwrap();
+
+        recorder.begin_stop();
+
+        assert_eq!(receiver.try_recv().unwrap(), vec![(0.25, -0.25)]);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Disconnected),
+        );
+        assert!(callback_input.lock().is_none());
+    }
 
     #[test]
     #[ignore = "requires a connected input device and microphone permission"]

@@ -18,6 +18,7 @@ pub struct AudioPlayer {
     playhead: Arc<AtomicU64>,
     stop_at_sample: Arc<AtomicUsize>,
     is_playing: Arc<AtomicBool>,
+    audition: Arc<Mutex<Option<(f64, usize)>>>,
     stream: Option<Stream>,
     stream_error: Arc<Mutex<Option<String>>>,
 }
@@ -31,6 +32,7 @@ impl AudioPlayer {
             playhead: Arc::new(AtomicU64::new(0)),
             stop_at_sample: Arc::new(AtomicUsize::new(0)),
             is_playing: Arc::new(AtomicBool::new(false)),
+            audition: Arc::new(Mutex::new(None)),
             stream: None,
             stream_error: Arc::new(Mutex::new(None)),
         }
@@ -69,6 +71,13 @@ impl AudioPlayer {
         Ok(DecodedAudio { left, right, sample_rate: spec.sample_rate })
     }
 
+    #[cfg(test)]
+    pub(crate) fn load_test_samples(&mut self, audio: DecodedAudio) {
+        self.sample_rate = audio.sample_rate;
+        self.samples_l = Arc::new(audio.left);
+        self.samples_r = Arc::new(audio.right);
+    }
+
     pub fn load_decoded(&mut self, audio: DecodedAudio) -> Result<(), String> {
         let mut next = Self::new();
         next.sample_rate = audio.sample_rate;
@@ -93,6 +102,7 @@ impl AudioPlayer {
         let output_channels = config.channels() as usize;
         let source_step = f64::from(self.sample_rate) / f64::from(config.sample_rate().0);
 
+        let audition = self.audition.clone();
         let playhead_arc = self.playhead.clone();
         let stop_at_sample_arc = self.stop_at_sample.clone();
         let is_playing_arc = self.is_playing.clone();
@@ -102,7 +112,9 @@ impl AudioPlayer {
 
         let error_playing = self.is_playing.clone();
         let stream_error = self.stream_error.clone();
+        let error_audition = audition.clone();
         let err_fn = move |err: cpal::StreamError| {
+            error_audition.lock().take();
             error_playing.store(false, Ordering::Relaxed);
             *stream_error.lock() = Some(err.to_string());
         };
@@ -111,6 +123,16 @@ impl AudioPlayer {
             .build_output_stream(
                 &config.into(),
                 move |data: &mut [f32], _| {
+                    if let Some(mut preview) = audition.try_lock() {
+                        if let Some((start, end)) = *preview {
+                            let next = render_output(
+                                data, output_channels, &samples_l, &samples_r,
+                                start, end, source_step,
+                            );
+                            *preview = (next < end as f64).then_some((next, end));
+                            return;
+                        }
+                    }
                     if !is_playing_arc.load(Ordering::Relaxed) || total_samples == 0 {
                         for sample in data.iter_mut() {
                             *sample = 0.0;
@@ -144,7 +166,25 @@ impl AudioPlayer {
         Ok(())
     }
 
+    pub fn audition_at(&self, seconds: f64) {
+        if self.is_playing() || !seconds.is_finite() {
+            return;
+        }
+        let start = (seconds * f64::from(self.sample_rate)).round() as usize;
+        let end = start.saturating_add(self.sample_rate as usize * 15).min(self.total_samples());
+        *self.audition.lock() = (start < end).then_some((start as f64, end));
+    }
+
+    pub fn stop_audition(&self) {
+        self.audition.lock().take();
+    }
+
+    pub fn is_auditioning(&self) -> bool {
+        self.audition.lock().is_some()
+    }
+
     pub fn play(&self) {
+        self.stop_audition();
         if self.total_samples() == 0 {
             return;
         }
@@ -159,6 +199,7 @@ impl AudioPlayer {
         if !start_seconds.is_finite() || !end_seconds.is_finite() || start_seconds >= end_seconds {
             return;
         }
+        self.stop_audition();
         self.seek_seconds(start_seconds);
         let end_sample = (end_seconds * self.sample_rate as f64).round() as usize;
         let clamped = end_sample.min(self.total_samples());
@@ -199,6 +240,7 @@ impl AudioPlayer {
     }
 
     pub fn stop(&mut self) {
+        self.stop_audition();
         self.is_playing.store(false, Ordering::SeqCst);
         self.stop_at_sample.store(0, Ordering::SeqCst);
         self.playhead.store(0, Ordering::SeqCst);
@@ -286,6 +328,22 @@ fn render_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_preview_leaves_transport_alone_and_caps_the_range() {
+        let mut player = AudioPlayer::new();
+        player.sample_rate = 100;
+        player.samples_l = Arc::new(vec![0.0; 3000]);
+        player.seek_seconds(2.0);
+        player.audition_at(7.0);
+        assert_eq!(*player.audition.lock(), Some((700.0, 2200)));
+        assert_eq!(player.current_seconds(), 2.0);
+        assert!(!player.is_playing());
+        player.audition_at(28.0);
+        assert_eq!(*player.audition.lock(), Some((2800.0, 3000)));
+        player.play();
+        assert!(player.audition.lock().is_none());
+    }
 
     #[test]
     fn resampling_preserves_time_and_cut_boundary_in_both_directions() {

@@ -321,14 +321,14 @@ impl Language {
     }
     pub fn live_waveform_idle(&self) -> &'static str {
         match self {
-            Language::De => "Bereit zur Aufnahme — die Wellenform baut sich hier live während der Digitalisierung auf.",
-            Language::En => "Ready to record — the waveform will build here in real-time as audio is digitized.",
+            Language::De => "Bereit zur Aufnahme",
+            Language::En => "Ready to record",
         }
     }
     pub fn live_waveform_monitoring(&self) -> &'static str {
         match self {
-            Language::De => "Pegel-Check aktiv — starte die Aufnahme, um das Signal aufzuzeichnen.",
-            Language::En => "Level check active — start recording to capture audio.",
+            Language::De => "Pegelcheck aktiv",
+            Language::En => "Level check active",
         }
     }
     pub fn btn_start_recording(&self) -> &'static str {
@@ -445,8 +445,8 @@ impl Language {
     }
     pub fn tip_navigation(&self) -> &'static str {
         match self {
-            Language::De => "Tipp: Option + Mausrad = Zoom | Mausrad = Scrollen | Klick in Zeitleiste = Playhead | ✂ Schnitt-Werkzeug oder [M] = Trenner | Übersicht unten = Verschieben",
-            Language::En => "Tip: Option + Scroll = Zoom | Scroll = Pan | Click in Ruler = Playhead | ✂ Split Tool or [M] = Split | Overview bar = Move",
+            Language::De => "Klicken setzt den Abspielkopf. Ziehen auf der Wellenform öffnet die Lupe. ⌥ + Scrollen zoomt.",
+            Language::En => "Click to seek. Drag on the waveform to open the detail view. Option + scroll to zoom.",
         }
     }
     pub fn btn_play(&self) -> &'static str {
@@ -457,8 +457,8 @@ impl Language {
     }
     pub fn btn_pause(&self) -> &'static str {
         match self {
-            Language::De => "PAUSE",
-            Language::En => "PAUSE",
+            Language::De => "PAUSE (Leertaste)",
+            Language::En => "PAUSE (Space)",
         }
     }
     pub fn btn_stop(&self) -> &'static str {

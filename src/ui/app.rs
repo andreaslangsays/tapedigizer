@@ -11,9 +11,9 @@ use crate::splitter::{export_tracks, MarkerSnapshot, NormalizationMode, TrackSpl
 use crate::ui::knob_widget::render_gain_knob_card;
 use crate::ui::meter_widget::render_stereo_meter;
 use crate::ui::theme::{
-    draw_recessed_well, BG_CARD, BG_INSET, BG_LCD, BG_PANEL, BG_WINDOW,
-    BORDER_DARK, BORDER_LIGHT, BORDER_MID, LED_AMBER, LED_GREEN, LED_RED, TEXT_MUTED,
-    TEXT_PRIMARY, TEXT_SECONDARY,
+    draw_recessed_well, mode_button, panel_frame, panel_title, primary_button, record_button,
+    studio_panel, studio_wordmark, time_display, ACCENT, BG_INSET, BG_PANEL, BG_WINDOW,
+    BORDER_MID, LED_AMBER, LED_GREEN, LED_RED, TEXT_MUTED, TEXT_SECONDARY,
 };
 use crate::i18n::Language;
 use crate::project::{sanitize_filename, TapeDigizerProject, TapeSide};
@@ -32,6 +32,12 @@ enum JobResult {
     Export(usize, PathBuf),
     Pauses(MarkerSnapshot),
     Saved(PathBuf, Option<PathBuf>, SavedEdits),
+}
+
+enum ExportOutcome {
+    Done { count: usize, folder: PathBuf },
+    Cancelled,
+    Failed(String),
 }
 
 struct OpenedProject {
@@ -125,7 +131,8 @@ pub struct TapeDigizerApp {
     selected_segment_idx: Option<usize>,
     waveform_zoom: f32,
     waveform_vertical_zoom: f32,
-    waveform_height: f32,
+    track_page: usize,
+    export_page: usize,
     magnifier_scope_active: bool,
     selected_region: Option<(f64, f64)>,
     transient_sensitivity: f32,
@@ -141,13 +148,12 @@ pub struct TapeDigizerApp {
     hover_preview_enabled: bool,
     hover_mouse_pos: Option<Pos2>,
     hover_stationary_since: Option<std::time::Instant>,
-    hover_is_auditioning: bool,
     hover_audition_time: Option<f64>,
 
     // Export Options
     export_directory: PathBuf,
     normalization_mode: NormalizationMode,
-    export_status_message: Option<(bool, String)>,
+    export_outcome: Option<ExportOutcome>,
 
     // General status/error
     ui_error_message: Option<String>,
@@ -163,29 +169,11 @@ pub struct TapeDigizerApp {
 
 impl TapeDigizerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Authentic Logic Pro / macOS dark chrome styling
-        let mut visuals = egui::Visuals::dark();
-        visuals.override_text_color = Some(TEXT_PRIMARY);
-        visuals.panel_fill = BG_WINDOW;
-        visuals.window_fill = BG_WINDOW;
-
-        visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER_DARK);
-
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(48, 48, 54);
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER_MID);
-
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(60, 60, 68);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_LIGHT);
-
-        visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(96, 165, 250));
-
-        visuals.widgets.inactive.rounding = egui::Rounding::same(5.0);
-        visuals.widgets.hovered.rounding = egui::Rounding::same(5.0);
-        visuals.widgets.active.rounding = egui::Rounding::same(5.0);
-
-        cc.egui_ctx.set_visuals(visuals);
+        cc.egui_ctx.set_visuals(crate::ui::theme::studio_visuals());
+        cc.egui_ctx.style_mut(|style| {
+            style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+            style.spacing.button_padding = Vec2::new(9.0, 4.0);
+        });
 
         let cfg = crate::config::AppConfig::load();
         let devices = list_input_devices();
@@ -264,7 +252,8 @@ impl TapeDigizerApp {
             selected_segment_idx: None,
             waveform_zoom: 1.0,
             waveform_vertical_zoom: 1.0,
-            waveform_height: 280.0,
+            track_page: 0,
+            export_page: 0,
             magnifier_scope_active: false,
             selected_region: None,
             transient_sensitivity: 1.0,
@@ -278,11 +267,10 @@ impl TapeDigizerApp {
             hover_preview_enabled: false,
             hover_mouse_pos: None,
             hover_stationary_since: None,
-            hover_is_auditioning: false,
             hover_audition_time: None,
             export_directory: default_export_dir,
             normalization_mode: norm_mode,
-            export_status_message: None,
+            export_outcome: None,
             ui_error_message: None,
             job: None,
             saved_edits: None,
@@ -315,6 +303,7 @@ impl TapeDigizerApp {
     }
 
     fn reset_editor_selection(&mut self) {
+        self.clear_hover_audition();
         self.selected_marker_idx = None;
         self.selected_segment_idx = None;
         self.pending_delete_marker = None;
@@ -322,8 +311,10 @@ impl TapeDigizerApp {
         self.selected_region = None;
         self.pause_preview = None;
         self.show_export = false;
+        self.export_outcome = None;
         self.transient_cache = None;
         self.magnifier_scope_active = false;
+        self.track_page = 0;
         self.waveform_zoom = 1.0;
         self.waveform_scroll = 0.0;
         self.scope_zoom = 1.0;
@@ -404,6 +395,9 @@ impl TapeDigizerApp {
         }
         let Some(menu) = &self.mac_menu else { return; };
         for command in menu.take_commands() {
+            if self.show_export && !matches!(command, Command::Quit) {
+                continue;
+            }
             match command {
                 Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Command::New => self.new_project(),
@@ -427,6 +421,7 @@ impl TapeDigizerApp {
                 Command::Edit if !self.recorder.is_busy() => self.active_tab = ActiveTab::SplitAndExport,
                 Command::Export if !self.recorder.is_busy() && self.job.is_none() && self.player.total_samples() > 0 => {
                     self.active_tab = ActiveTab::SplitAndExport;
+                    self.export_page = 0;
                     self.show_export = true;
                 }
                 _ => {}
@@ -454,6 +449,7 @@ impl TapeDigizerApp {
                 "Hintergrundaufgabe wurde unterbrochen.", "Background job stopped unexpectedly.",
             ).into()),
         };
+        let export = job.export_progress.is_some();
         self.job = None;
         match result {
             Ok(JobResult::Open(opened)) => {
@@ -490,7 +486,7 @@ impl TapeDigizerApp {
                 self.current_project_path = opened.project_path;
                 self.reset_editor_selection();
                 self.saved_edits = self.current_project_path.as_ref().map(|_| self.edits());
-                self.export_status_message = None;
+
             }
             Ok(JobResult::Recording(audio, waveform, report)) => {
                 self.waveform_cache = waveform;
@@ -501,13 +497,18 @@ impl TapeDigizerApp {
                 }
             }
             Ok(JobResult::Export(count, folder)) => {
-                self.export_status_message = Some((true, format!(
-                    "{} {count} · {}", self.text("Exportierte Tracks", "Exported tracks"), folder.display(),
-                )));
+                self.export_outcome = Some(ExportOutcome::Done { count, folder });
             }
             Ok(JobResult::Pauses(snapshot)) => self.pause_preview = Some(snapshot),
             Ok(JobResult::Saved(path, audio_path, edits)) => {
                 self.apply_saved_project(path, audio_path, edits);
+            }
+            Err(error) if export => {
+                self.export_outcome = Some(if error == "Export cancelled" {
+                    ExportOutcome::Cancelled
+                } else {
+                    ExportOutcome::Failed(error)
+                });
             }
             Err(error) => self.ui_error_message = Some(error),
         }
@@ -572,7 +573,7 @@ impl TapeDigizerApp {
         if let Some(audio) = audio {
             self.current_audio_path = Some(audio);
         }
-        self.export_status_message = None;
+
         self.saved_edits = Some(edits);
         self.current_project_path = Some(path);
     }
@@ -610,10 +611,7 @@ impl TapeDigizerApp {
         self.splitter = TrackSplitter::new();
         self.active_tab = ActiveTab::Recording;
         self.ui_error_message = None;
-        self.export_status_message = Some((
-            true,
-            if self.language == Language::De { "Neues Projekt initialisiert.".into() } else { "New project initialized.".into() }
-        ));
+
     }
 
     pub fn reveal_session_in_finder(&self) {
@@ -802,8 +800,11 @@ impl eframe::App for TapeDigizerApp {
         if ctx.input(|i| i.viewport().close_requested()) && !self.can_leave_project() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        let is_recording = self.recorder.state() == RecorderState::Recording;
-        let finalizing = self.recorder.state() == RecorderState::Finalizing;
+        let recorder_state = self.recorder.state();
+        let waiting_for_signal = recorder_state == RecorderState::WaitingForSignal;
+        let run_on = recorder_state == RecorderState::RunOn;
+        let is_recording = matches!(recorder_state, RecorderState::Recording | RecorderState::RunOn);
+        let finalizing = recorder_state == RecorderState::Finalizing;
         let is_monitoring = self.recorder.state() == RecorderState::Monitoring;
         let is_playing = self.player.is_playing();
 
@@ -854,95 +855,90 @@ impl eframe::App for TapeDigizerApp {
             self.marker_drag_cancelled = false;
         }
 
-        if cmd && key_1 {
-            self.active_tab = ActiveTab::Recording;
-        }
-        if cmd && key_2 && !self.recorder.is_busy() {
-            self.active_tab = ActiveTab::Diagnosis;
-        }
-        if cmd && key_3 && !self.recorder.is_busy() {
-            self.active_tab = ActiveTab::SplitAndExport;
-        }
-
-        if cmd && key_n {
-            self.new_project();
-        }
-        if cmd && key_s {
-            if shift {
-                self.save_project_dialog(ctx);
-            } else {
-                self.save_project_quick(ctx);
+        if !self.show_export {
+            if cmd && key_1 {
+                self.active_tab = ActiveTab::Recording;
             }
-        }
-        if cmd && key_o {
-            self.open_project_dialog(ctx);
-        }
+            if cmd && key_2 && !self.recorder.is_busy() {
+                self.active_tab = ActiveTab::Diagnosis;
+            }
+            if cmd && key_3 && !self.recorder.is_busy() {
+                self.active_tab = ActiveTab::SplitAndExport;
+            }
 
-        if !ctx.wants_keyboard_input() {
-            if cmd && key_z {
+            if cmd && key_n {
+                self.new_project();
+            }
+            if cmd && key_s {
                 if shift {
+                    self.save_project_dialog(ctx);
+                } else {
+                    self.save_project_quick(ctx);
+                }
+            }
+            if cmd && key_o {
+                self.open_project_dialog(ctx);
+            }
+
+            if !ctx.wants_keyboard_input() {
+                if cmd && key_z {
+                    if shift {
+                        self.undo_marker_edit(true);
+                    } else {
+                        self.undo_marker_edit(false);
+                    }
+                } else if cmd && key_y {
                     self.undo_marker_edit(true);
-                } else {
-                    self.undo_marker_edit(false);
                 }
-            } else if cmd && key_y {
-                self.undo_marker_edit(true);
-            }
-        }
-
-        // Global Shortcuts in Tab 3 (Split & Export)
-        let has_audio = self.player.total_seconds() > 0.1;
-        if self.active_tab == ActiveTab::SplitAndExport && !ctx.wants_keyboard_input() && self.job.is_none() && !is_recording && !finalizing {
-            if self.pending_delete_marker.is_some() && key_esc {
-                self.pending_delete_marker = None;
             }
 
-            if has_audio && key_space {
-                self.player.toggle_play();
-            }
-            if has_audio && key_m {
-                let cur_sec = self.player.current_seconds();
-                self.add_marker(cur_sec);
-            }
-            if key_h {
-                self.hover_preview_enabled = !self.hover_preview_enabled;
-                if !self.hover_preview_enabled && self.hover_is_auditioning {
-                    self.player.pause();
-                    self.hover_is_auditioning = false;
-                    self.hover_audition_time = None;
+            // Global Shortcuts in Tab 3 (Split & Export)
+            let has_audio = self.player.total_seconds() > 0.1;
+            if self.active_tab == ActiveTab::SplitAndExport && !ctx.wants_keyboard_input() && self.job.is_none() && !self.recorder.is_busy() {
+                if self.pending_delete_marker.is_some() && key_esc {
+                    self.pending_delete_marker = None;
+                }
+
+                if has_audio && key_space {
+                    self.player.toggle_play();
+                }
+                if has_audio && key_m {
+                    let cur_sec = self.player.current_seconds();
+                    self.add_marker(cur_sec);
+                }
+                if key_h {
+                    self.hover_preview_enabled = !self.hover_preview_enabled;
+
+                }
+                if key_l {
+                    self.magnifier_scope_active = !self.magnifier_scope_active;
+                }
+                if let Some(m_idx) = self.selected_marker_idx {
+                    let total_sec = self.player.total_seconds();
+                    let delta = if shift { 1.0 } else { 0.1 };
+                    if key_left {
+                        self.nudge_marker(m_idx, -delta, total_sec);
+                    }
+                    if key_right {
+                        self.nudge_marker(m_idx, delta, total_sec);
+                    }
+                }
+                if !cmd && (key_s || key_c) {
+                    self.active_edit_tool = EditTool::Scissor;
+                }
+                if !cmd && key_r {
+                    self.active_edit_tool = EditTool::Select;
+                }
+                if key_v || key_esc {
+                    self.active_edit_tool = EditTool::Pointer;
+                }
+                if key_del {
+                    if let Some(index) = self.selected_marker_idx {
+                        self.request_marker_delete(index);
+                    }
                 }
             }
-            if key_l {
-                self.magnifier_scope_active = !self.magnifier_scope_active;
-            }
-            if let Some(m_idx) = self.selected_marker_idx {
-                let total_sec = self.player.total_seconds();
-                let delta = if shift { 1.0 } else { 0.1 };
-                if key_left {
-                    self.nudge_marker(m_idx, -delta, total_sec);
-                }
-                if key_right {
-                    self.nudge_marker(m_idx, delta, total_sec);
-                }
-            }
-            if !cmd && (key_s || key_c) {
-                self.active_edit_tool = if self.active_edit_tool == EditTool::Scissor {
-                    EditTool::Pointer
-                } else {
-                    EditTool::Scissor
-                };
-            }
-            if !cmd && key_r {
-                self.active_edit_tool = EditTool::Select;
-            }
-            if key_v || key_esc {
-                self.active_edit_tool = EditTool::Pointer;
-            }
-            if key_del {
-                if let Some(index) = self.selected_marker_idx {
-                    self.request_marker_delete(index);
-                }
-            }
+
         }
 
         #[cfg(target_os = "macos")]
@@ -953,6 +949,7 @@ impl eframe::App for TapeDigizerApp {
         egui::TopBottomPanel::top("app_menu_bar")
             .frame(egui::Frame::none().fill(Color32::from_rgb(20, 22, 26)).inner_margin(egui::Margin { left: 12.0, right: 12.0, top: 4.0, bottom: 4.0 }))
             .show(ctx, |ui| {
+                if self.show_export { ui.disable(); }
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button(self.language.menu_file(), |ui| {
                         if ui.button(format!("{} (⌘N)", self.language.menu_new_project())).clicked() {
@@ -992,7 +989,9 @@ impl eframe::App for TapeDigizerApp {
 
                     ui.menu_button(self.language.menu_help(), |ui| {
                         if ui.button(self.language.menu_about()).clicked() {
-                            self.export_status_message = Some((true, format!("TapeDigizer v{} — High-fidelity Audio Digitization Console", env!("CARGO_PKG_VERSION"))));
+                            rfd::MessageDialog::new().set_title("TapeDigizer")
+                                .set_description(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                                .show();
                             ui.close_menu();
                         }
                     });
@@ -1001,30 +1000,38 @@ impl eframe::App for TapeDigizerApp {
 
         }
 
-        let light_chrome = ctx.system_theme() == Some(egui::Theme::Light);
-        let toolbar_fill = if light_chrome { Color32::from_gray(235) } else { BG_PANEL };
         egui::TopBottomPanel::top("workspace_toolbar")
-            .frame(egui::Frame::none().fill(toolbar_fill).inner_margin(12.0))
+            .frame(egui::Frame::none().fill(BG_PANEL)
+                .stroke(Stroke::new(1.0, BORDER_MID)).inner_margin(10.0))
             .show(ctx, |ui| {
-                if light_chrome {
-                    ui.style_mut().visuals = egui::Visuals::light();
-                }
+                if self.show_export { ui.disable(); }
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("TapeDigizer").size(16.0).strong());
+                    studio_wordmark(ui);
                     ui.separator();
-                    for (tab, label) in [
-                        (ActiveTab::Recording, self.text("Aufnahme", "Record")),
-                        (ActiveTab::Diagnosis, self.text("Pegel", "Levels")),
-                        (ActiveTab::SplitAndExport, self.text("Schnitt", "Edit")),
-                    ] {
-                        if ui.add_enabled(!self.recorder.is_busy() || tab == ActiveTab::Recording, egui::SelectableLabel::new(self.active_tab == tab, label)).clicked() {
-                            self.active_tab = tab;
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for (tab, label) in [
+                            (ActiveTab::Recording, self.text("Aufnahme · ⌘1", "Record · ⌘1")),
+                            (ActiveTab::Diagnosis, self.text("Pegel · ⌘2", "Levels · ⌘2")),
+                            (ActiveTab::SplitAndExport, self.text("Schnitt · ⌘3", "Edit · ⌘3")),
+                        ] {
+                            if ui.add_enabled(!self.recorder.is_busy() || tab == ActiveTab::Recording, mode_button(label, self.active_tab == tab)).clicked() {
+                                self.active_tab = tab;
+                            }
                         }
-                    }
+                    });
                     ui.separator();
-                    if is_recording {
+                    if waiting_for_signal {
+                        ui.spinner();
+                        ui.label(self.text("Warte auf Eingangssignal …", "Waiting for input signal …"));
+                    } else if run_on {
+                        let seconds = self.recorder.remaining_duration()
+                            .map_or(0, |remaining| remaining.as_secs_f64().ceil() as u64);
+                        let label = self.text("Nachlauf", "Recording tail");
+                        ui.label(format!("● {label} {seconds} s"));
+                    } else if is_recording {
                         let time = self.recorder.elapsed_duration().as_secs_f64();
-                        ui.colored_label(if light_chrome { Color32::DARK_RED } else { LED_RED },
+                        ui.colored_label(LED_RED,
                             format!("● REC {}", timecode(time)));
                     } else if finalizing {
                         ui.spinner();
@@ -1048,14 +1055,15 @@ impl eframe::App for TapeDigizerApp {
                     ui.add_space(5.0);
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
-                        let (label, fill) = if is_recording {
-                            (self.text("Aufnahme stoppen", "Stop recording"), Color32::from_rgb(176, 51, 49))
-                        } else {
-                            (self.text("Aufnahme starten", "Start recording"), Color32::from_rgb(176, 51, 49))
+                        let label = match recorder_state {
+                            RecorderState::WaitingForSignal => self.text("Warten abbrechen", "Cancel waiting"),
+                            RecorderState::Recording => self.text("Stopp mit 1 Min. Nachlauf", "Stop with 1 min tail"),
+                            RecorderState::RunOn => self.text("Nachlauf läuft", "Recording tail"),
+                            _ => self.text("Aufnahme starten", "Start recording"),
                         };
-                        let record = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong())
-                            .fill(fill).rounding(6.0);
-                        let ready = is_recording || (!finalizing && self.job.is_none() && self.current_channel_pair().is_some());
+                        let record = record_button(label);
+                        let ready = waiting_for_signal || recorder_state == RecorderState::Recording
+                            || (!self.recorder.is_busy() && self.job.is_none() && self.current_channel_pair().is_some());
                         if ui.add_enabled(ready, record).clicked() {
                             self.record_or_stop();
                         }
@@ -1070,7 +1078,7 @@ impl eframe::App for TapeDigizerApp {
                 if self.active_tab == ActiveTab::SplitAndExport {
                     ui.add_space(5.0);
                     ui.separator();
-                    ui.add_enabled_ui(self.job.is_none() && !is_recording && !finalizing, |ui| self.render_transport(ui));
+                    ui.add_enabled_ui(self.job.is_none() && !self.recorder.is_busy(), |ui| self.render_transport(ui));
                 }
             });
 
@@ -1090,36 +1098,46 @@ impl eframe::App for TapeDigizerApp {
                     ui.add_space(8.0);
                 }
 
-                if let Some(job) = &self.job {
+                if let Some(job) = self.job.as_ref().filter(|job| job.export_progress.is_none()) {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(job.label);
-                        if let Some(progress) = &job.export_progress {
-                            let total = progress.total.load(Ordering::Relaxed);
-                            let finished = progress.finished.load(Ordering::Relaxed);
-                            if total != 0 {
-                                ui.add(egui::ProgressBar::new(finished as f32 / total as f32)
-                                    .desired_width(120.0).text(format!("{finished}/{total}")));
-                            }
-                            if ui.add_enabled(!progress.cancelled.load(Ordering::Relaxed),
-                                egui::Button::new(self.language.btn_cancel())).clicked() {
-                                progress.cancelled.store(true, Ordering::Relaxed);
-                            }
-                            ctx.request_repaint_after(Duration::from_millis(150));
-                        }
+
                     });
                 }
-                let enabled = self.job.is_none() && !finalizing && (!is_recording || self.active_tab == ActiveTab::Recording);
+                let enabled = !self.show_export && self.job.is_none() && !finalizing && (!self.recorder.is_busy() || self.active_tab == ActiveTab::Recording);
                 ui.add_enabled_ui(enabled, |ui| {
-                    egui::ScrollArea::vertical().id_salt("workspace").show(ui, |ui| {
-                        match self.active_tab {
-                            ActiveTab::Recording => self.render_tab_recording(ui),
-                            ActiveTab::Diagnosis => self.render_tab_diagnosis(ui),
-                            ActiveTab::SplitAndExport => self.render_tab_split_export(ui),
-                        }
-                    });
+                    match self.active_tab {
+                        ActiveTab::Recording => self.render_tab_recording(ui),
+                        ActiveTab::Diagnosis => self.render_tab_diagnosis(ui),
+                        ActiveTab::SplitAndExport => self.render_tab_split_export(ui),
+                    }
                 });
             });
+        if let Some((index, seconds, title)) = self.pending_delete_marker.take() {
+            self.clear_hover_audition();
+            let confirmed = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title(self.text("Schnittmarke entfernen?", "Remove cut marker?"))
+                .set_description(self.language.confirm_delete_question(
+                    (seconds / 60.0) as u64, (seconds % 60.0) as u64, &title,
+                ))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show() == rfd::MessageDialogResult::Yes;
+            ctx.request_repaint();
+            if confirmed && self.splitter.markers.get(index) == Some(&seconds) {
+                self.splitter.remove_marker_at_index(index);
+                self.selected_marker_idx = None;
+                self.selected_segment_idx = None;
+            }
+        }
+        if self.show_export {
+            self.clear_hover_audition();
+            self.render_export_dialog(ctx);
+        }
+        if self.active_tab != ActiveTab::SplitAndExport {
+            self.clear_hover_audition();
+        }
     }
 }
 
@@ -1140,8 +1158,8 @@ fn parse_timecode(value: &str) -> Option<f64> {
 
 impl TapeDigizerApp {
     fn record_or_stop(&mut self) {
-        if self.recorder.state() == RecorderState::Recording {
-            self.recorder.begin_stop();
+        if self.recorder.is_busy() {
+            self.recorder.request_stop();
             return;
         }
         let (Some(device), Some(pair)) = (self.current_device(), self.current_channel_pair()) else {
@@ -1170,17 +1188,17 @@ impl TapeDigizerApp {
             if ui.add_enabled(total > 0.0, egui::Button::new(self.language.btn_stop())).clicked() {
                 self.player.stop();
             }
-            ui.label(RichText::new(format!("{} / {}", timecode(position), timecode(total))).monospace());
+            time_display(ui, format!("{}  /  {}", timecode(position), timecode(total)));
             ui.separator();
-            if ui.add_enabled(total > 0.0, egui::Button::new(self.text("Marker setzen", "Add marker")))
-                .on_hover_text("M").clicked()
+            if ui.add_enabled(total > 0.0, egui::Button::new(self.text("Marker setzen · M", "Add marker · M"))).clicked()
             {
                 self.add_marker(position);
             }
             let tracks = self.text("Trackliste", "Track list");
             ui.toggle_value(&mut self.show_tracks, tracks);
             ui.toggle_value(&mut self.show_inspector, "Inspector");
-            if ui.add_enabled(total > 0.0, egui::Button::new(self.text("Exportieren …", "Export …"))).clicked() {
+            if ui.add_enabled(total > 0.0, primary_button(self.text("Exportieren … · ⇧⌘E", "Export … · ⇧⌘E"))).clicked() {
+                self.export_page = 0;
                 self.show_export = true;
             }
         });
@@ -1208,7 +1226,7 @@ impl TapeDigizerApp {
         let Some(index) = self.selected_marker_idx else { return; };
         let Some(&time) = self.splitter.markers.get(index) else { return; };
         let rate = self.player.sample_rate();
-        render_hardware_rack_card(ui, self.text("Schnittmarke", "Cut marker"), |ui| {
+        studio_panel(ui, self.text("Schnittmarke", "Cut marker"), |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("T{:02}", index + 2)).strong().monospace());
                 let mut seconds = time;
@@ -1247,6 +1265,8 @@ impl TapeDigizerApp {
                         self.nudge_marker(index, delta, total);
                     }
                 }
+            });
+            ui.horizontal(|ui| {
                 if ui.button(self.text("Davor hören", "Hear before")).clicked() {
                     self.player.play_range((time - 2.0).max(0.0), time);
                 }
@@ -1257,7 +1277,7 @@ impl TapeDigizerApp {
                     self.set_scope_region(((time - 1.5).max(0.0), (time + 1.5).min(total)));
                     self.magnifier_scope_active = true;
                 }
-                if ui.button(self.language.btn_delete()).clicked() {
+                if ui.button(format!("{} · ⌫", self.language.btn_delete())).clicked() {
                     self.request_marker_delete(index);
                 }
             });
@@ -1278,255 +1298,139 @@ impl TapeDigizerApp {
     // TAB 1: Aufnahme & Einpegeln
     // -------------------------------------------------------------
     fn render_tab_recording(&mut self, ui: &mut Ui) {
-        ui.add_space(2.0);
-        let is_recording = self.recorder.state() == RecorderState::Recording;
-        ui.add_enabled_ui(!is_recording, |ui| {
-
-        // Rack Panel 0: Cassette Metadata & Project Location
-        render_hardware_rack_card(ui, self.text("Band und Ablage", "Tape and storage"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(self.language.label_tape_name()).color(TEXT_SECONDARY).strong());
-                let name_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.tape_name)
-                        .desired_width(220.0)
-                        .hint_text(self.language.hint_tape_name())
-                );
-                if name_edit.lost_focus() {
-                    self.save_config();
-                }
-
-                ui.add_space(14.0);
-                ui.label(RichText::new(self.language.label_tape_side()).color(TEXT_SECONDARY).strong());
-
-                let is_side_a = self.tape_side == TapeSide::SideA;
-                let btn_a = egui::Button::new(
-                    RichText::new(format!("● {}", TapeSide::SideA.label(self.language)))
-                        .strong()
-                        .color(if is_side_a { Color32::WHITE } else { TEXT_MUTED })
-                )
-                .fill(if is_side_a { Color32::from_rgb(37, 99, 235) } else { Color32::from_rgb(38, 38, 44) })
-                .stroke(Stroke::new(1.0, if is_side_a { Color32::from_rgb(96, 165, 250) } else { BORDER_MID }))
-                .rounding(4.0);
-
-                if ui.add(btn_a).clicked() {
-                    self.tape_side = TapeSide::SideA;
-                }
-
-                let is_side_b = self.tape_side == TapeSide::SideB;
-                let btn_b = egui::Button::new(
-                    RichText::new(format!("● {}", TapeSide::SideB.label(self.language)))
-                        .strong()
-                        .color(if is_side_b { Color32::BLACK } else { TEXT_MUTED })
-                )
-                .fill(if is_side_b { LED_AMBER } else { Color32::from_rgb(38, 38, 44) })
-                .stroke(Stroke::new(1.0, if is_side_b { Color32::WHITE } else { BORDER_MID }))
-                .rounding(4.0);
-
-                if ui.add(btn_b).clicked() {
-                    self.tape_side = TapeSide::SideB;
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(self.language.label_project_folder()).color(TEXT_MUTED));
-                let folder_display = self.session_project_dir();
-                ui.label(RichText::new(format!("📁 {}", folder_display.to_string_lossy())).color(Color32::from_rgb(56, 189, 248)).monospace().small());
-
-                if ui.button(self.language.btn_change_folder()).clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.export_directory = folder;
+        ui.columns(2, |columns| {
+            let setup = &mut columns[0];
+            let editable = !self.recorder.is_busy();
+            setup.add_enabled_ui(editable, |ui| {
+                studio_panel(ui, self.text("Band & Ablage", "Tape & storage"), |ui| {
+                    ui.label(RichText::new(self.text("Bandname", "Tape name")).color(TEXT_SECONDARY));
+                    let width = ui.available_width();
+                    let name = ui.add(egui::TextEdit::singleline(&mut self.tape_name)
+                        .desired_width(width).min_size(Vec2::new(width, 30.0))
+                        .hint_text(self.language.hint_tape_name()));
+                    if name.lost_focus() {
                         self.save_config();
                     }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("🛡️ {}", self.language.hint_auto_saved())).color(LED_GREEN).small().italics());
+                    ui.horizontal_wrapped(|ui| {
+                        for side in [TapeSide::SideA, TapeSide::SideB] {
+                            if ui.add(mode_button(side.label(self.language), self.tape_side == side)).clicked() {
+                                self.tape_side = side;
+                            }
+                        }
+                        if ui.button(self.language.btn_change_folder()).clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().set_directory(&self.export_directory).pick_folder() {
+                                self.export_directory = folder;
+                                self.save_config();
+                            }
+                        }
+                    });
+                    let folder = self.session_project_dir().display().to_string();
+                    ui.add(egui::Label::new(RichText::new(&folder).color(TEXT_SECONDARY)).truncate())
+                        .on_hover_text(folder);
                 });
-            });
-        });
-
-        ui.add_space(12.0);
-
-        // Rack Panel 1: Hardware Input Routing
-        render_hardware_rack_card(ui, self.text("Audioeingang", "Audio input"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(self.language.label_interface()).color(TEXT_SECONDARY));
-                egui::ComboBox::from_id_salt("device_combo")
-                    .width(300.0)
-                    .selected_text(
-                        self.current_device()
-                            .map(|d| format!("{} ({} Ch)", d.name, d.channels))
-                            .unwrap_or_else(|| self.language.label_no_device().into()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (idx, dev) in self.available_devices.iter().enumerate() {
-                            let resp = ui.selectable_value(&mut self.selected_device_idx, idx, &dev.name);
-                            if resp.changed() || resp.clicked() {
-                                self.channel_pairs = get_channel_pairs_for_device(dev);
-                                self.selected_pair_idx = 0;
-                                self.save_config();
+                ui.add_space(8.0);
+                studio_panel(ui, self.text("Audioeingang", "Audio input"), |ui| {
+                    let device = self.current_device().map(|device| format!("{}  ·  {} ch", device.name, device.channels))
+                        .unwrap_or_else(|| self.language.label_no_device().into());
+                    let selected = self.selected_device_idx;
+                    egui::ComboBox::from_id_salt("device_combo")
+                        .width(ui.available_width()).truncate().selected_text(device)
+                        .show_ui(ui, |ui| {
+                            for (index, device) in self.available_devices.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_device_idx, index, &device.name);
                             }
+                        });
+                    if self.selected_device_idx != selected {
+                        if let Some(device) = self.current_device() {
+                            self.channel_pairs = get_channel_pairs_for_device(device);
+                            self.selected_pair_idx = 0;
+                            self.save_config();
                         }
-                    });
-
-                ui.add_space(16.0);
-
-                ui.label(RichText::new(self.language.label_stereo_input()).color(TEXT_SECONDARY));
-                egui::ComboBox::from_id_salt("channel_combo")
-                    .width(320.0)
-                    .selected_text(
-                        self.current_channel_pair()
-                            .map(|p| p.label)
-                            .unwrap_or_else(|| self.language.label_select_channel().into()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (idx, pair) in self.channel_pairs.iter().enumerate() {
-                            let resp = ui.selectable_value(&mut self.selected_pair_idx, idx, &pair.label);
-                            if resp.changed() || resp.clicked() {
-                                self.save_config();
+                    }
+                    let channels = self.current_channel_pair().map(|pair| pair.label)
+                        .unwrap_or_else(|| self.language.label_select_channel().into());
+                    let selected = self.selected_pair_idx;
+                    egui::ComboBox::from_id_salt("channel_combo")
+                        .width(ui.available_width()).truncate().selected_text(channels)
+                        .show_ui(ui, |ui| {
+                            for (index, pair) in self.channel_pairs.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_pair_idx, index, &pair.label);
                             }
-                        }
-                    });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(self.language.btn_rescan()).clicked() {
+                        });
+                    if self.selected_pair_idx != selected {
+                        self.save_config();
+                    }
+                    if ui.small_button(self.language.btn_rescan()).clicked() {
                         self.refresh_device_list();
                     }
                 });
-            });
-        });
-
-        ui.add_space(12.0);
-
-        });
-
-        // Rack Panel 2: Studio LED Ladder Peak/VU Meters
-        render_hardware_rack_card(ui, self.text("Eingangspegel", "Input levels"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(self.language.meter_instructions()).color(TEXT_SECONDARY).italics());
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let is_monitoring = self.recorder.state() == RecorderState::Monitoring;
-                    let (btn_text, btn_bg, btn_stroke) = if is_monitoring {
-                        (self.language.btn_stop_level_check(), Color32::from_rgb(180, 40, 40), Color32::from_rgb(231, 76, 60))
-                    } else {
-                        (self.language.btn_start_level_check(), Color32::from_rgb(37, 99, 235), Color32::from_rgb(96, 165, 250))
-                    };
-
-                    let mon_btn = egui::Button::new(RichText::new(btn_text).color(Color32::WHITE).strong())
-                        .fill(btn_bg)
-                        .stroke(Stroke::new(1.0, btn_stroke))
-                        .rounding(5.0)
-                        .min_size(Vec2::new(180.0, 30.0));
-
-                    if ui.add_enabled(!is_recording && (is_monitoring || self.current_channel_pair().is_some()), mon_btn).clicked() {
-                        if is_monitoring {
-                            self.recorder.stop_monitoring();
-                        } else {
-                            let dev_name = self.current_device().map(|d| d.name.clone());
-                            let pair = self.current_channel_pair();
-                            if let (Some(name), Some(pair)) = (dev_name, pair) {
-                                if let Err(e) = self.recorder.start_monitoring(&name, pair) {
-                                    self.ui_error_message = Some(e);
-                                }
+                ui.add_space(8.0);
+                studio_panel(ui, self.text("Aufnahmedauer", "Recording duration"), |ui| {
+                    let before = self.selected_timer_minutes;
+                    ui.horizontal_wrapped(|ui| {
+                        for (minutes, label) in [
+                            (15, "15 min"), (30, "30 min"), (45, "45 min"), (60, "60 min"),
+                            (0, self.language.preset_unlimited()),
+                        ] {
+                            if ui.add(mode_button(label, self.selected_timer_minutes == minutes)).clicked() {
+                                self.selected_timer_minutes = minutes;
                             }
                         }
+                    });
+                    let auto_stop = self.text("Bei Bandende automatisch stoppen", "Stop automatically at tape end");
+                    let changed = ui.checkbox(&mut self.enable_silence_autostop, auto_stop)
+                        .on_hover_text(self.language.checkbox_silence_autostop()).changed();
+                    if changed || self.selected_timer_minutes != before {
+                        self.save_config();
                     }
                 });
             });
 
-            ui.add_space(8.0);
-            let meter = self.recorder.get_meter();
-            render_stereo_meter(ui, &meter);
-        });
-
-        ui.add_space(12.0);
-
-        // Rack Panel 3: Recording Timer & Tactile Record Button
-        render_hardware_rack_card(ui, self.text("Aufnahmedauer und Auto-Stopp", "Duration and auto-stop"), |ui| {
-            ui.add_enabled_ui(!is_recording, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(self.language.label_duration_preset()).color(TEXT_SECONDARY));
-                if ui.selectable_value(&mut self.selected_timer_minutes, 15, "15 Min").clicked()
-                    || ui.selectable_value(&mut self.selected_timer_minutes, 30, "30 Min").clicked()
-                    || ui.selectable_value(&mut self.selected_timer_minutes, 45, "45 Min (C-90)").clicked()
-                    || ui.selectable_value(&mut self.selected_timer_minutes, 60, "60 Min (C-120)").clicked()
-                    || ui.selectable_value(&mut self.selected_timer_minutes, 0, self.language.preset_unlimited()).clicked()
+            let signal = &mut columns[1];
+            studio_panel(signal, self.text("Eingangspegel", "Input levels"), |ui| {
+                let monitoring = self.recorder.state() == RecorderState::Monitoring;
+                let label = if monitoring {
+                    self.text("Pegelcheck beenden", "End level check")
+                } else {
+                    self.text("Pegel prüfen", "Check levels")
+                };
+                if ui.add_enabled(editable && (monitoring || self.current_channel_pair().is_some()),
+                    mode_button(label, monitoring)).clicked()
                 {
-                    self.save_config();
+                    if monitoring {
+                        self.recorder.stop_monitoring();
+                    } else if let (Some(device), Some(pair)) = (self.current_device(), self.current_channel_pair()) {
+                        let name = device.name.clone();
+                        self.ui_error_message = self.recorder.start_monitoring(&name, pair).err();
+                    }
                 }
+                render_stereo_meter(ui, &self.recorder.get_meter());
+                ui.label(RichText::new(self.language.meter_instructions()).color(TEXT_SECONDARY).small());
             });
-
-            ui.add_space(6.0);
-            if ui.checkbox(
-                &mut self.enable_silence_autostop,
-                self.language.checkbox_silence_autostop(),
-            ).changed() {
-                self.save_config();
-            }
-
-            ui.add_space(16.0);
-
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                // Digital Studio LCD Display
-                if is_recording {
-                    let elapsed = self.recorder.elapsed_duration();
-                    let elap_sec = elapsed.as_secs();
-                    let elap_str = format!("{:02}:{:02}:{:02}", elap_sec / 3600, (elap_sec % 3600) / 60, elap_sec % 60);
-
-                    ui.add_space(20.0);
-                    let lcd = egui::Frame::none()
-                        .fill(BG_LCD)
-                        .stroke(Stroke::new(1.0, BORDER_DARK))
-                        .rounding(6.0)
-                        .inner_margin(Vec2::new(16.0, 8.0));
-
-                    lcd.show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("REC").color(LED_RED).monospace().size(16.0).strong());
-                            ui.label(RichText::new(elap_str).color(Color32::WHITE).monospace().size(22.0).strong());
-
-                            if let Some(rem) = self.recorder.remaining_duration() {
-                                let rem_sec = rem.as_secs();
-                                let rem_str = format!("{:02}:{:02}", (rem_sec % 3600) / 60, rem_sec % 60);
-                                ui.add_space(8.0);
-                                ui.label(RichText::new(format!("(Rest: {} Min)", rem_str)).color(TEXT_SECONDARY).monospace());
-                            }
-                        });
-                    });
-                }
-            });
-        });
-
-        ui.add_space(12.0);
-
-        // Rack Panel 4: Live Recording Waveform
-        render_hardware_rack_card(ui, self.text("Live-Wellenform", "Live waveform"), |ui| {
-            let is_recording = self.recorder.state() == RecorderState::Recording;
-            let elapsed_sec = self.recorder.elapsed_duration().as_secs_f64();
-            let timer_limit_sec = if self.selected_timer_minutes > 0 {
-                Some(self.selected_timer_minutes as f64 * 60.0)
-            } else {
-                None
-            };
-            let idle_text = if self.recorder.state() == RecorderState::Monitoring {
-                self.language.live_waveform_monitoring()
-            } else {
-                self.language.live_waveform_idle()
-            };
-
-            self.recorder.with_waveform_data(|wf| {
-                crate::ui::waveform_widget::render_live_recording_waveform(
-                    ui,
-                    wf,
-                    elapsed_sec,
-                    timer_limit_sec,
-                    is_recording,
-                    idle_text,
-                );
+            signal.add_space(8.0);
+            studio_panel(signal, self.text("Live-Wellenform", "Live waveform"), |ui| {
+                let state = self.recorder.state();
+                let recording = matches!(state, RecorderState::Recording | RecorderState::RunOn);
+                let elapsed = self.recorder.elapsed_duration().as_secs_f64();
+                let limit = (self.selected_timer_minutes > 0)
+                    .then(|| f64::from(self.selected_timer_minutes) * 60.0 + 60.0);
+                let idle = match state {
+                    RecorderState::WaitingForSignal => self.text("Warte auf Eingangssignal …", "Waiting for input signal …"),
+                    RecorderState::Monitoring => self.language.live_waveform_monitoring(),
+                    _ => self.language.live_waveform_idle(),
+                };
+                self.recorder.with_waveform_data(|points| {
+                    crate::ui::waveform_widget::render_live_recording_waveform(ui, points, elapsed, limit, recording, idle);
+                });
+                ui.horizontal_wrapped(|ui| {
+                    time_display(ui, timecode(elapsed));
+                    if let Some(remaining) = self.recorder.remaining_duration() {
+                        let label = self.text("Verbleibend", "Remaining");
+                        ui.label(format!("{label}  {}", timecode(remaining.as_secs_f64())));
+                    } else {
+                        ui.label(RichText::new("PCM 24-bit  ·  Stereo").color(TEXT_SECONDARY));
+                    }
+                });
             });
         });
     }
@@ -1571,20 +1475,17 @@ impl TapeDigizerApp {
 
         // 4 Hardware Stat Cards
         ui.horizontal(|ui| {
-            let card_w = (ui.available_width() - 36.0) / 4.0;
+            let card_w = (ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0;
 
             let l_label = if self.language == Language::De { "PEAK KANAL 1 (L)" } else { "PEAK CHANNEL 1 (L)" };
             render_hardware_metric(ui, card_w, l_label, &format!("{:.1} dBFS", report.peak_left_db), Color32::from_rgb(56, 189, 248));
-            ui.add_space(8.0);
 
             let r_label = if self.language == Language::De { "PEAK KANAL 2 (R)" } else { "PEAK CHANNEL 2 (R)" };
             render_hardware_metric(ui, card_w, r_label, &format!("{:.1} dBFS", report.peak_right_db), Color32::from_rgb(147, 130, 248));
-            ui.add_space(8.0);
 
             let headroom = (-1.5 - report.max_peak_db).max(0.0);
             let head_label = if self.language == Language::De { "HEADROOM (-1.5 dB Ziel)" } else { "HEADROOM (-1.5 dB Target)" };
             render_hardware_metric(ui, card_w, head_label, &format!("{:.1} dB", headroom), LED_AMBER);
-            ui.add_space(8.0);
 
             let (clip_str, clip_col) = if report.clipped_samples > 0 {
                 (format!("{} Samples", report.clipped_samples), LED_RED)
@@ -1597,32 +1498,11 @@ impl TapeDigizerApp {
 
         ui.add_space(18.0);
 
-        // Tactile Action Buttons
-        ui.horizontal(|ui| {
-            let retry_btn = egui::Button::new(RichText::new(self.language.btn_retry()).size(14.0))
-                .fill(Color32::from_rgb(52, 54, 62))
-                .stroke(Stroke::new(1.0, BORDER_MID))
-                .rounding(5.0)
-                .min_size(Vec2::new(260.0, 42.0));
-
-            if ui.add(retry_btn).clicked() {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(self.language.btn_retry()).clicked() {
                 self.active_tab = ActiveTab::Recording;
             }
-
-            ui.add_space(16.0);
-
-            let next_btn = egui::Button::new(
-                RichText::new(self.language.btn_proceed_to_split())
-                    .size(14.0)
-                    .color(Color32::WHITE)
-                    .strong(),
-            )
-            .fill(Color32::from_rgb(37, 99, 235))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(96, 165, 250)))
-            .rounding(5.0)
-            .min_size(Vec2::new(340.0, 42.0));
-
-            if ui.add(next_btn).clicked() {
+            if ui.add(primary_button(self.language.btn_proceed_to_split())).clicked() {
                 self.active_tab = ActiveTab::SplitAndExport;
             }
         });
@@ -1660,44 +1540,66 @@ impl TapeDigizerApp {
 
         ui.add_space(8.0);
 
-        // 2. Stereo Waveform Rack Card
-        render_hardware_rack_card(ui, self.text("Stereo-Wellenform", "Stereo waveform"), |ui| {
+        let show_scope = self.magnifier_scope_active && has_audio;
+        if show_scope {
+            ui.columns(2, |columns| {
+                let timeline = &mut columns[0];
+                self.render_timeline(timeline, total_sec, cur_sec, has_audio, 148.0);
+                self.render_pause_proposal(timeline);
+                let tracks = self.splitter.get_tracks(total_sec);
+                self.render_track_list(timeline, &tracks);
+
+                let details = &mut columns[1];
+                self.render_detail_panel(details, total_sec, cur_sec);
+                if self.show_inspector {
+                    self.render_marker_inspector(details, total_sec);
+                }
+            });
+        } else {
+            let height = (ui.available_height() * 0.37).clamp(148.0, 300.0);
+            self.render_timeline(ui, total_sec, cur_sec, has_audio, height);
+            if self.show_inspector {
+                self.render_marker_inspector(ui, total_sec);
+            }
+            self.render_pause_proposal(ui);
+            let tracks = self.splitter.get_tracks(total_sec);
+            self.render_track_list(ui, &tracks);
+        }
+    }
+
+    fn render_timeline(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64, has_audio: bool, waveform_height: f32) {
+        // Stereo waveform
+        studio_panel(ui, self.text("Stereo-Wellenform", "Stereo waveform"), |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (tool, name, key) in [
-                    (EditTool::Pointer, self.text("Zeiger", "Pointer"), "V"),
-                    (EditTool::Scissor, self.text("Schneiden", "Split"), "S"),
+                    (EditTool::Pointer, self.text("↖ Zeiger", "↖ Pointer"), "V"),
+                    (EditTool::Scissor, self.text("│ Schneiden", "│ Split"), "S"),
                     (EditTool::Select, self.text("Bereich", "Range"), "R"),
                 ] {
-                    if ui.selectable_label(self.active_edit_tool == tool, name).on_hover_text(key).clicked() {
+                    if ui.add(mode_button(format!("{name} · {key}"), self.active_edit_tool == tool)).clicked() {
                         self.active_edit_tool = tool;
                     }
                 }
-                ui.separator();
+            });
+            ui.horizontal(|ui| {
                 let preview = self.text("Hover-Vorhören", "Hover audition");
                 let detail = self.text("Detailansicht", "Detail view");
-                ui.toggle_value(&mut self.hover_preview_enabled, preview).on_hover_text("H");
-                ui.toggle_value(&mut self.magnifier_scope_active, detail).on_hover_text("L");
+                ui.toggle_value(&mut self.hover_preview_enabled, format!("{preview} · H"));
+                ui.toggle_value(&mut self.magnifier_scope_active, format!("{detail} · L"));
                 ui.separator();
-                if ui.add_enabled(self.splitter.can_undo(), egui::Button::new("↶"))
+                if ui.add_enabled(self.splitter.can_undo(), egui::Button::new("↶ ⌘Z"))
                     .on_hover_text(self.language.btn_undo()).clicked()
                 {
                     self.undo_marker_edit(false);
                 }
-                if ui.add_enabled(self.splitter.can_redo(), egui::Button::new("↷"))
+                if ui.add_enabled(self.splitter.can_redo(), egui::Button::new("↷ ⇧⌘Z"))
                     .on_hover_text(self.language.btn_redo()).clicked()
                 {
                     self.undo_marker_edit(true);
                 }
             });
 
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(self.language.tip_navigation())
-                    .size(11.0)
-                    .color(TEXT_MUTED),
-            );
 
-            ui.add_space(6.0);
 
             let mut selected_marker = self.selected_marker_idx;
             let interaction = render_stereo_waveform(
@@ -1713,10 +1615,10 @@ impl TapeDigizerApp {
                 self.selected_region,
                 &mut self.waveform_zoom,
                 &mut self.waveform_vertical_zoom,
-                self.waveform_height,
+                waveform_height,
                 &mut self.waveform_scroll,
                 self.active_edit_tool,
-                self.hover_is_auditioning,
+                self.player.is_auditioning(),
                 self.hover_audition_time,
             );
 
@@ -1748,51 +1650,7 @@ impl TapeDigizerApp {
                 self.selected_marker_idx = segment.checked_sub(1);
             }
 
-            // Hover Audition Engine
-            if self.hover_preview_enabled && has_audio && !ui.input(|i| i.pointer.primary_down())
-                && (!self.player.is_playing() || self.hover_is_auditioning) {
-                if interaction.is_mouse_over_waveform {
-                    if let Some(mouse_pos) = interaction.mouse_pos_in_waveform {
-                        let moved = self.hover_mouse_pos
-                            .map(|p| p.distance(mouse_pos) > 6.0)
-                            .unwrap_or(true);
-
-                        if moved {
-                            self.hover_mouse_pos = Some(mouse_pos);
-                            self.hover_stationary_since = Some(std::time::Instant::now());
-                            if self.hover_is_auditioning {
-                                self.player.pause();
-                                self.hover_is_auditioning = false;
-                                self.hover_audition_time = None;
-                            }
-                        } else if let Some(since) = self.hover_stationary_since {
-                            if !self.hover_is_auditioning && since.elapsed() >= std::time::Duration::from_millis(300) {
-                                if let Some(target_t) = interaction.hovered_time_sec {
-                                    self.player.seek_seconds(target_t);
-                                    self.player.play();
-                                    self.hover_is_auditioning = true;
-                                    self.hover_audition_time = Some(target_t);
-                                }
-                            }
-                        }
-                        if !self.hover_is_auditioning {
-                            ui.ctx().request_repaint_after(Duration::from_millis(300));
-                        }
-                    }
-                } else {
-                    if self.hover_is_auditioning {
-                        self.player.pause();
-                        self.hover_is_auditioning = false;
-                        self.hover_audition_time = None;
-                    }
-                    self.hover_stationary_since = None;
-                    self.hover_mouse_pos = None;
-                }
-            } else if self.hover_is_auditioning {
-                self.player.pause();
-                self.hover_is_auditioning = false;
-                self.hover_audition_time = None;
-            }
+            self.update_hover_audition(ui, &interaction, has_audio);
 
             ui.add_space(8.0);
 
@@ -1814,11 +1672,14 @@ impl TapeDigizerApp {
                     self.selected_marker_idx = None;
                     self.selected_segment_idx = None;
                 }
-                ui.separator();
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().slider_width = 64.0;
                 ui.add(egui::Slider::new(&mut self.waveform_zoom, 1.0..=25.0)
                     .text("Zoom").suffix("×"));
+                let gain = self.text("Pegel", "Gain");
                 ui.add(egui::Slider::new(&mut self.waveform_vertical_zoom, 1.0..=16.0)
-                    .text(self.language.label_vertical_zoom()).suffix("×"));
+                    .text(gain).suffix("×"));
                 if ui.button(self.text("Ganzes Band", "Fit tape")).clicked() {
                     self.waveform_zoom = 1.0;
                     self.waveform_vertical_zoom = 1.0;
@@ -1826,210 +1687,15 @@ impl TapeDigizerApp {
                 }
             });
         });
-        ui.add_space(8.0);
-        if self.show_inspector {
-            self.render_marker_inspector(ui, total_sec);
-        }
+    }
 
-        // 3. Detail-Lupenansicht (Magnifier Scope & Transient Analysis) when toggled
-        if self.magnifier_scope_active && has_audio {
-            ui.add_space(8.0);
-            render_hardware_rack_card(ui, self.language.card_magnifier_scope(), |ui| {
-                let active_region = self.selected_region.unwrap_or_else(|| {
-                    if let Some(m_idx) = self.selected_marker_idx {
-                        let m_time = self.splitter.markers.get(m_idx).copied().unwrap_or(cur_sec).floor();
-                        ((m_time - 1.5).max(0.0), (m_time + 1.5).min(total_sec))
-                    } else if let Some(s_idx) = self.selected_segment_idx {
-                        let tracks = self.splitter.get_tracks(total_sec);
-                        if let Some(t) = tracks.get(s_idx) {
-                            (t.start_seconds, t.end_seconds)
-                        } else {
-                            ((cur_sec.floor() - 1.5).max(0.0), (cur_sec.floor() + 1.5).min(total_sec))
-                        }
-                    } else {
-                        ((cur_sec.floor() - 1.5).max(0.0), (cur_sec.floor() + 1.5).min(total_sec))
-                    }
-                });
-
-                if self.selected_region.is_none() {
-                    self.set_scope_region(active_region);
-                }
-
-                let samples_l = self.player.get_samples_l();
-                let samples_r = self.player.get_samples_r();
-                let rate = self.player.sample_rate();
-
-                let transient_region = if active_region.1 - active_region.0 > 8.0 {
-                    let center = self.selected_marker_idx.and_then(|i| self.splitter.markers.get(i).copied())
-                        .unwrap_or(active_region.0 + 4.0);
-                    let start = (center - 4.0).clamp(active_region.0, active_region.1 - 8.0);
-                    // Keep the search window stable during small edits.
-                    let start = start.floor().max(active_region.0);
-                    (start, (start + 8.0).min(active_region.1))
-                } else {
-                    active_region
-                };
-                let transients = if self.show_transients && self.marker_drag.is_none()
-                    && !ui.input(|input| input.pointer.primary_down()) {
-                    let sensitivity = self.transient_sensitivity;
-                    if !self.transient_cache.as_ref().is_some_and(|cache| {
-                        cache.region == transient_region && cache.sensitivity == sensitivity
-                    }) {
-                        self.transient_cache = Some(TransientCache {
-                            region: transient_region,
-                            sensitivity,
-                            points: crate::splitter::detect_transients_in_range(
-                                &samples_l, &samples_r, rate, transient_region.0, transient_region.1, sensitivity,
-                            ).into(),
-                        });
-                    }
-                    self.transient_cache.as_ref().unwrap().points.clone()
-                } else {
-                    std::sync::Arc::from([])
-                };
-
-                // Scope Header Bar with Region Info, Transient Toggle, Zoom & Sensitivity Slider
-                ui.horizontal(|ui| {
-                    let r_start = active_region.0;
-                    let r_end = active_region.1;
-                    let r_dur = (r_end - r_start).max(0.0);
-                    let s_m = (r_start / 60.0).floor() as u64;
-                    let s_s = r_start % 60.0;
-                    let e_m = (r_end / 60.0).floor() as u64;
-                    let e_s = r_end % 60.0;
-
-                    let reg_badge = format!("🔍 BEREICH: {:02}:{:05.2} ➔ {:02}:{:05.2} ({:.2}s)", s_m, s_s, e_m, e_s, r_dur);
-                    ui.label(RichText::new(reg_badge).monospace().strong().color(Color32::from_rgb(255, 215, 0)));
-
-                    ui.add_space(6.0);
-
-                    // Transients Ein-/Ausblenden Toggle
-                    let trans_col = if self.show_transients { LED_GREEN } else { TEXT_MUTED };
-                    let trans_label = if self.show_transients {
-                        format!("⚡ Transienten: EIN ({})", transients.len())
-                    } else {
-                        "⚡ Transienten: AUS".to_string()
-                    };
-                    let trans_btn = egui::Button::new(RichText::new(trans_label).monospace().strong().color(trans_col))
-                        .rounding(4.0);
-                    if ui.add(trans_btn).on_hover_text("Transienten (Einsätze & Peaks) in der Lupe ein- oder ausblenden").clicked() {
-                        self.show_transients = !self.show_transients;
-                    }
-
-                });
-
-                let time_zoom = self.text("Zeitzoom", "Time zoom");
-                let auto_gain = self.text("Automatische Pegelanhebung", "Auto gain");
-                let vertical_gain = self.text("Vertikalzoom", "Vertical zoom");
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button(self.text("Ganze Auswahl", "Fit selection")).clicked() {
-                        self.scope_zoom = 1.0;
-                        self.scope_scroll = 0.0;
-                    }
-                    if ui.add(egui::Slider::new(&mut self.scope_zoom, 1.0..=50.0)
-                        .logarithmic(true).text(time_zoom).suffix("×")).changed()
-                    {
-                        self.scope_scroll = self.scope_scroll.min(1.0 - 1.0 / self.scope_zoom);
-                    }
-                    ui.checkbox(&mut self.scope_auto_gain, auto_gain);
-                    ui.add(egui::Slider::new(&mut self.scope_gain_db, -24.0..=36.0)
-                        .step_by(1.0).text(vertical_gain).suffix(" dB"));
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(self.text("Übersicht unten ziehen oder horizontal scrollen", "Drag the overview below or scroll horizontally"));
-                    if self.show_transients {
-                        ui.add(egui::Slider::new(&mut self.transient_sensitivity, 0.4..=3.0)
-                            .text(self.language.label_sensitivity()).suffix("×"));
-                    }
-                    if ui.button(self.language.btn_full_track_region()).clicked() {
-                        let tracks = self.splitter.get_tracks(total_sec);
-                        if let Some(track) = tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds) {
-                            self.set_scope_region((track.start_seconds, track.end_seconds));
-                        }
-                    }
-                    if ui.button(self.text("3 s Fokus", "3 s focus")).clicked() {
-                        self.set_scope_region(((cur_sec - 1.5).max(0.0), (cur_sec + 1.5).min(total_sec)));
-                    }
-                });
-
-                let scope_action = crate::ui::waveform_widget::render_detail_magnifier_scope(
-                    ui,
-                    self.waveform_cache.for_view(total_sec / (active_region.1 - active_region.0) * f64::from(self.scope_zoom)),
-                    &samples_l,
-                    &samples_r,
-                    rate,
-                    total_sec,
-                    active_region,
-                    &self.splitter.markers,
-                    self.selected_marker_idx,
-                    self.scope_auto_gain,
-                    self.scope_gain_db,
-                    &transients,
-                    self.show_transients,
-                    self.scope_zoom,
-                    &mut self.scope_scroll,
-                    cur_sec,
-                    self.player.is_playing(),
-                );
-
-                if let Some(t_seek) = scope_action.seek_to_time {
-                    self.player.seek_seconds(t_seek);
-                }
-                if let Some(t_trans) = scope_action.clicked_transient_time {
-                    self.add_marker(t_trans);
-                    self.player.seek_seconds(t_trans);
-                }
-                if let Some(s_idx) = scope_action.selected_marker_idx {
-                    self.select_marker(s_idx);
-                }
-                if let Some((idx, time)) = scope_action.dragged_marker {
-                    self.preview_marker_drag(idx, time);
-                }
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let play_label = if self.player.is_playing() {
-                        self.text("Pause", "Pause")
-                    } else {
-                        self.language.btn_play_region()
-                    };
-                    if ui.button(play_label).clicked() {
-                        self.player.toggle_range(active_region.0, active_region.1);
-                    }
-
-                    if ui.button("✂ Schnitt am Anfang").clicked() {
-                        self.add_marker(active_region.0);
-                    }
-
-                    if ui.button("✂ Schnitt am Ende").clicked() {
-                        self.add_marker(active_region.1);
-                    }
-
-                    if let Some((index, time)) = self.selected_marker_idx
-                        .and_then(|i| self.splitter.markers.get(i).map(|&time| (i, time)))
-                    {
-                        let closest = transients.iter().min_by(|a, b| {
-                            (a.time_sec - time).abs().total_cmp(&(b.time_sec - time).abs())
-                        }).filter(|point| (point.time_sec - time).abs() < 2.0);
-                        let snap = self.text("An Transiente einrasten", "Snap to transient");
-                        if ui.add_enabled(closest.is_some(), egui::Button::new(snap)).clicked() {
-                            self.splitter.move_marker(index, closest.unwrap().time_sec, total_sec, rate);
-                        }
-                    }
-                });
-            });
-        }
-
+    fn render_pause_proposal(&mut self, ui: &mut Ui) {
         if let Some((cuts, gaps)) = self.pause_preview.as_ref().map(|p| (p.markers.len(), p.pause_indices.len())) {
-            ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(format!("{}: {} · {}: {}", self.text("Vorgeschlagene Schnitte", "Suggested cuts"),
                     cuts, self.text("Pausen", "Gaps"), gaps));
-                ui.label(self.text(
-                    "Gestrichelte Linien zeigen die Vorschläge. Übernehmen ersetzt die Trackliste und ist rückgängig machbar.",
-                    "Dashed lines show the suggestions. Apply replaces the track list and can be undone.",
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button(self.text("Übernehmen", "Apply")).clicked() {
+                    if ui.add(primary_button(self.text("Übernehmen", "Apply")))
+                        .on_hover_text(self.text("Ersetzt die Trackliste. Mit ⌘Z rückgängig machen.", "Replaces the track list. Undo with ⌘Z.")).clicked() {
                         let before = self.splitter.snapshot();
                         self.splitter.restore(self.pause_preview.take().unwrap());
                         self.splitter.commit_edit(before);
@@ -2038,239 +1704,526 @@ impl TapeDigizerApp {
                     if ui.button(self.text("Verwerfen", "Discard")).clicked() {
                         self.pause_preview = None;
                     }
-                });
             });
         }
 
-        // 3. Delete Confirmation Banner (if pending)
-        if let Some((idx, sec, ref title)) = self.pending_delete_marker.clone() {
-            ui.add_space(8.0);
-            egui::Frame::none()
-                .fill(Color32::from_rgb(58, 24, 24))
-                .stroke(Stroke::new(1.5, LED_RED))
-                .rounding(6.0)
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let mins = (sec / 60.0).floor() as u64;
-                        let secs = (sec % 60.0).floor() as u64;
-                        ui.label(RichText::new("⚠️").size(18.0));
-                        ui.label(
-                            RichText::new(self.language.confirm_delete_question(mins, secs, &title))
-                                .strong()
-                                .color(Color32::WHITE),
-                        );
+    }
 
-                        ui.add_space(12.0);
+    fn render_detail_panel(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64) {
+        studio_panel(ui, self.text("Detailansicht", "Detail view"), |ui| {
+            let active_region = self.selected_region.unwrap_or_else(|| {
+                if let Some(m_idx) = self.selected_marker_idx {
+                    let m_time = self.splitter.markers.get(m_idx).copied().unwrap_or(cur_sec).floor();
+                    ((m_time - 1.5).max(0.0), (m_time + 1.5).min(total_sec))
+                } else if let Some(s_idx) = self.selected_segment_idx {
+                    let tracks = self.splitter.get_tracks(total_sec);
+                    if let Some(t) = tracks.get(s_idx) {
+                        (t.start_seconds, t.end_seconds)
+                    } else {
+                        ((cur_sec.floor() - 1.5).max(0.0), (cur_sec.floor() + 1.5).min(total_sec))
+                    }
+                } else {
+                    ((cur_sec.floor() - 1.5).max(0.0), (cur_sec.floor() + 1.5).min(total_sec))
+                }
+            });
 
-                        let confirm_btn = egui::Button::new(
-                            RichText::new(self.language.btn_confirm_delete()).strong().color(Color32::WHITE),
-                        )
-                        .fill(Color32::from_rgb(180, 30, 30))
-                        .rounding(4.0);
-                        if ui.add(confirm_btn).clicked() {
-                            if self.splitter.markers.get(idx) == Some(&sec) {
-                                self.splitter.remove_marker_at_index(idx);
-                                self.selected_marker_idx = None;
-                                self.selected_segment_idx = None;
-                            }
-                            self.pending_delete_marker = None;
-                        }
+            if self.selected_region.is_none() {
+                self.set_scope_region(active_region);
+            }
 
-                        if ui.button(self.language.btn_cancel()).clicked() {
-                            self.pending_delete_marker = None;
-                        }
+            let samples_l = self.player.get_samples_l();
+            let samples_r = self.player.get_samples_r();
+            let rate = self.player.sample_rate();
+
+            let transient_region = if active_region.1 - active_region.0 > 8.0 {
+                let center = self.selected_marker_idx.and_then(|i| self.splitter.markers.get(i).copied())
+                    .unwrap_or(active_region.0 + 4.0);
+                let start = (center - 4.0).clamp(active_region.0, active_region.1 - 8.0);
+                // Keep the search window stable during small edits.
+                let start = start.floor().max(active_region.0);
+                (start, (start + 8.0).min(active_region.1))
+            } else {
+                active_region
+            };
+            let transients = if self.show_transients && self.marker_drag.is_none()
+                && !ui.input(|input| input.pointer.primary_down()) {
+                let sensitivity = self.transient_sensitivity;
+                if !self.transient_cache.as_ref().is_some_and(|cache| {
+                    cache.region == transient_region && cache.sensitivity == sensitivity
+                }) {
+                    self.transient_cache = Some(TransientCache {
+                        region: transient_region,
+                        sensitivity,
+                        points: crate::splitter::detect_transients_in_range(
+                            &samples_l, &samples_r, rate, transient_region.0, transient_region.1, sensitivity,
+                        ).into(),
                     });
+                }
+                self.transient_cache.as_ref().unwrap().points.clone()
+            } else {
+                std::sync::Arc::from([])
+            };
+
+            ui.horizontal_wrapped(|ui| {
+                time_display(ui, format!("{}  →  {}", timecode(active_region.0), timecode(active_region.1)));
+                let label = self.text("Transienten", "Transients");
+                ui.toggle_value(&mut self.show_transients, label);
+            });
+
+            let time_zoom = self.text("Zeitzoom", "Time zoom");
+            let auto_gain = self.text("Auto-Pegel", "Auto gain");
+            let vertical_gain = self.text("Pegel", "Gain");
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().slider_width = 68.0;
+                if ui.button(self.text("Einpassen", "Fit")).clicked() {
+                    self.scope_zoom = 1.0;
+                    self.scope_scroll = 0.0;
+                }
+                if ui.add(egui::Slider::new(&mut self.scope_zoom, 1.0..=50.0)
+                    .logarithmic(true).text(time_zoom).suffix("×")).changed()
+                {
+                    self.scope_scroll = self.scope_scroll.min(1.0 - 1.0 / self.scope_zoom);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().slider_width = 68.0;
+                ui.checkbox(&mut self.scope_auto_gain, auto_gain);
+                ui.add(egui::Slider::new(&mut self.scope_gain_db, -24.0..=36.0)
+                    .step_by(1.0).text(vertical_gain).suffix(" dB"));
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().slider_width = 68.0;
+                if self.show_transients {
+                    ui.add(egui::Slider::new(&mut self.transient_sensitivity, 0.4..=3.0)
+                        .text(self.language.label_sensitivity()).suffix("×"));
+                }
+                if ui.button(self.text("Ganzer Track", "Full track")).clicked() {
+                    let tracks = self.splitter.get_tracks(total_sec);
+                    if let Some(track) = tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds) {
+                        self.set_scope_region((track.start_seconds, track.end_seconds));
+                    }
+                }
+                if ui.button(self.text("3 s Fokus", "3 s focus")).clicked() {
+                    self.set_scope_region(((cur_sec - 1.5).max(0.0), (cur_sec + 1.5).min(total_sec)));
+                }
+            });
+
+            let scope_action = crate::ui::waveform_widget::render_detail_magnifier_scope(
+                ui,
+                self.waveform_cache.for_view(total_sec / (active_region.1 - active_region.0) * f64::from(self.scope_zoom)),
+                &samples_l,
+                &samples_r,
+                rate,
+                total_sec,
+                active_region,
+                &self.splitter.markers,
+                self.selected_marker_idx,
+                self.scope_auto_gain,
+                self.scope_gain_db,
+                &transients,
+                self.show_transients,
+                self.scope_zoom,
+                &mut self.scope_scroll,
+                cur_sec,
+                self.player.is_playing(),
+            );
+
+            if let Some(t_seek) = scope_action.seek_to_time {
+                self.player.seek_seconds(t_seek);
+            }
+            if let Some(t_trans) = scope_action.clicked_transient_time {
+                self.add_marker(t_trans);
+                self.player.seek_seconds(t_trans);
+            }
+            if let Some(s_idx) = scope_action.selected_marker_idx {
+                self.select_marker(s_idx);
+            }
+            if let Some((idx, time)) = scope_action.dragged_marker {
+                self.preview_marker_drag(idx, time);
+            }
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                let play_label = if self.player.is_playing() {
+                    self.text("Pause", "Pause")
+                } else {
+                    self.text("▶ Auswahl", "▶ Selection")
+                };
+                if ui.button(play_label).clicked() {
+                    self.player.toggle_range(active_region.0, active_region.1);
+                }
+
+                if ui.button(self.text("│ Anfang", "│ Start")).clicked() {
+                    self.add_marker(active_region.0);
+                }
+
+                if ui.button(self.text("│ Ende", "│ End")).clicked() {
+                    self.add_marker(active_region.1);
+                }
+
+                if let Some((index, time)) = self.selected_marker_idx
+                    .and_then(|i| self.splitter.markers.get(i).map(|&time| (i, time)))
+                {
+                    let closest = transients.iter().min_by(|a, b| {
+                        (a.time_sec - time).abs().total_cmp(&(b.time_sec - time).abs())
+                    }).filter(|point| (point.time_sec - time).abs() < 2.0);
+                    let snap = self.text("Einrasten", "Snap");
+                    if ui.add_enabled(closest.is_some(), egui::Button::new(snap)).clicked() {
+                        self.splitter.move_marker(index, closest.unwrap().time_sec, total_sec, rate);
+                    }
+                }
+            });
+        });
+    }
+
+    fn render_track_list(&mut self, ui: &mut Ui, tracks: &[crate::splitter::TrackInfo]) {
+        if !self.show_tracks {
+            return;
+        }
+        if self.splitter.custom_titles.len() < tracks.len() {
+            self.splitter.custom_titles.resize(tracks.len(), String::new());
+        }
+
+        let per_page = ((ui.available_height() - 66.0) / 108.0).floor().max(1.0) as usize;
+        let pages = tracks.len().div_ceil(per_page).max(1);
+        self.track_page = self.track_page.min(pages - 1);
+        panel_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    panel_title(ui, self.text("Trackliste", "Track list"));
+                    ui.label(RichText::new(tracks.len().to_string()).color(TEXT_SECONDARY));
+                    page_controls(ui, &mut self.track_page, pages, self.language);
                 });
-        }
-
-        ui.add_space(10.0);
-
-        // 4. Tracklist Table with Pause Exclusions, Responsive Title Input & Nudge Controls
-        let tracks = self.splitter.get_tracks(total_sec);
-
-        while self.splitter.custom_titles.len() < tracks.len() {
-            self.splitter.custom_titles.push(String::new());
-        }
-
-        if self.show_tracks {
-            render_hardware_rack_card(ui, &self.language.card_tracklist(tracks.len()), |ui| {
-                egui::Grid::new("track_list").striped(true).min_col_width(40.0).spacing([10.0, 5.0])
-                    .show(ui, |ui| {
-                        for title in ["#", self.language.col_title(), self.language.col_start(),
-                            self.language.col_duration(), self.language.col_actions()] {
-                            ui.strong(title);
-                        }
-                        ui.end_row();
-                        for (i, track) in tracks.iter().enumerate() {
-                            let selected = self.selected_segment_idx == Some(i);
-                            let badge = if track.is_pause { "⏸".into() } else { format!("{:02}", track.index) };
-                            if ui.selectable_label(selected, badge).clicked() {
-                                self.selected_segment_idx = Some(i);
-                                self.selected_marker_idx = i.checked_sub(1);
-                                self.player.seek_seconds(track.start_seconds);
-                            }
-                            if track.is_pause {
-                                ui.label(self.language.badge_pause());
-                            } else {
-                                let response = ui.add(egui::TextEdit::singleline(&mut self.splitter.custom_titles[i])
-                                    .id_source(egui::Id::new("track_title_field").with(i))
-                                    .desired_width((ui.available_width() * 0.31).clamp(150.0, 360.0))
-                                    .hint_text(format!("Track {:02}", track.index)));
-                                if response.gained_focus() {
-                                    self.selected_segment_idx = Some(i);
-                                    self.selected_marker_idx = i.checked_sub(1);
+                ui.add_space(6.0);
+                let start = self.track_page * per_page;
+                for (index, track) in tracks.iter().enumerate().skip(start).take(per_page) {
+                    let selected = self.selected_segment_idx == Some(index);
+                    let border = if selected { ACCENT } else { BORDER_MID };
+                    egui::Frame::none()
+                        .fill(BG_WINDOW)
+                        .stroke(Stroke::new(1.0, border))
+                        .rounding(8.0)
+                        .inner_margin(10.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let badge = if track.is_pause { "Ⅱ".into() } else { format!("{:02}", track.index) };
+                                let badge = egui::Button::new(RichText::new(badge).monospace()).selected(selected);
+                                if ui.add_sized([38.0, 32.0], badge).clicked() {
+                                    self.selected_segment_idx = Some(index);
+                                    self.selected_marker_idx = index.checked_sub(1);
+                                    self.player.seek_seconds(track.start_seconds);
                                 }
-                                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                                    if let Some(next) = tracks.iter().skip(i + 1).find(|track| !track.is_pause) {
-                                        ui.memory_mut(|mem| mem.request_focus(egui::Id::new("track_title_field").with(next.segment_index)));
+
+                                if track.is_pause {
+                                    ui.label(RichText::new(self.language.badge_pause()).color(LED_AMBER));
+                                } else {
+                                    let width = ui.available_width();
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(&mut self.splitter.custom_titles[index])
+                                            .id(egui::Id::new("track_title_field").with(index))
+                                            .desired_width(width)
+                                            .min_size(Vec2::new(width, 32.0))
+                                            .margin(egui::Margin::symmetric(10.0, 6.0))
+                                            .hint_text(format!("Track {:02}", track.index)),
+                                    );
+                                    if response.gained_focus() {
+                                        self.selected_segment_idx = Some(index);
+                                        self.selected_marker_idx = index.checked_sub(1);
+                                    }
+                                    if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                                        if let Some(next) = tracks.iter().skip(index + 1).find(|track| !track.is_pause) {
+                                            self.track_page = next.segment_index / per_page;
+                                            ui.memory_mut(|mem| mem.request_focus(egui::Id::new("track_title_field").with(next.segment_index)));
+                                        }
                                     }
                                 }
-                            }
-                            if i > 0 {
-                                if ui.selectable_label(selected, RichText::new(timecode(track.start_seconds)).monospace()).clicked() {
-                                    self.select_marker(i - 1);
-                                    self.show_inspector = true;
+                            });
+
+                            ui.add_space(5.0);
+                            ui.horizontal_wrapped(|ui| {
+                                let start = RichText::new(timecode(track.start_seconds)).monospace();
+                                if index > 0 {
+                                    if ui.selectable_label(selected, start).clicked() {
+                                        self.select_marker(index - 1);
+                                        self.show_inspector = true;
+                                    }
+                                } else {
+                                    ui.label(start);
                                 }
-                            } else {
-                                ui.monospace(timecode(track.start_seconds));
-                            }
-                            ui.monospace(track.duration_formatted());
-                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(track.duration_formatted()).monospace().color(TEXT_SECONDARY));
+                                ui.separator();
                                 if ui.small_button(self.text("Anhören", "Audition")).clicked() {
                                     self.player.play_range(track.start_seconds, track.end_seconds);
                                 }
                                 let action = if track.is_pause { self.language.btn_make_track() } else { self.language.btn_make_pause() };
                                 if ui.small_button(action).clicked() {
-                                    self.splitter.toggle_pause(i);
+                                    self.splitter.toggle_pause(index);
+                                }
+                                if index > 0 && ui.small_button(self.text("× Marke", "× Marker"))
+                                    .on_hover_text(self.text("Schnittmarke am Trackanfang entfernen", "Remove marker at track start"))
+                                    .clicked()
+                                {
+                                    self.request_marker_delete(index - 1);
                                 }
                             });
-                            ui.end_row();
-                        }
-                    });
+                        });
+                    ui.add_space(5.0);
+                }
             });
-        }
-
-        self.render_export_dialog(ui, tracks, has_audio);
     }
 
-    fn render_export_dialog(&mut self, ui: &mut Ui, tracks: Vec<crate::splitter::TrackInfo>, has_audio: bool) {
-        if !self.show_export {
+    fn update_hover_audition(
+        &mut self,
+        ui: &Ui,
+        interaction: &crate::ui::waveform_widget::WaveformInteraction,
+        has_audio: bool,
+    ) {
+        let hover = interaction.mouse_pos_in_waveform.filter(|_| {
+            self.hover_preview_enabled && has_audio && !self.player.is_playing()
+                && self.pending_delete_marker.is_none()
+                && !ui.input(|input| input.pointer.any_down() || input.pointer.any_pressed())
+        });
+        let Some(pos) = hover else {
+            self.clear_hover_audition();
+            return;
+        };
+        if self.hover_mouse_pos.is_none_or(|previous| previous.distance(pos) > 6.0) {
+            self.clear_hover_audition();
+            self.hover_mouse_pos = Some(pos);
+            self.hover_stationary_since = Some(std::time::Instant::now());
+        }
+        if let Some(since) = self.hover_stationary_since {
+            let delay = Duration::from_millis(300);
+            if since.elapsed() >= delay {
+                if let Some(time) = interaction.hovered_time_sec {
+                    self.player.audition_at(time);
+                    self.hover_audition_time = Some(time);
+                    self.hover_stationary_since = None;
+                    ui.ctx().request_repaint();
+                }
+            } else {
+                ui.ctx().request_repaint_after(delay.saturating_sub(since.elapsed()));
+            }
+        } else if self.player.is_auditioning() {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn clear_hover_audition(&mut self) {
+        if self.hover_audition_time.take().is_some() {
+            self.player.stop_audition();
+        }
+        self.hover_mouse_pos = None;
+        self.hover_stationary_since = None;
+    }
+
+    fn render_export_dialog(&mut self, ctx: &egui::Context) {
+        let progress = self.job.as_ref().and_then(|job| job.export_progress.clone());
+        if progress.is_none() && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.show_export = false;
+            self.export_outcome = None;
             return;
         }
-        let mut show_export = true;
-        egui::Window::new(self.text("Tracks exportieren", "Export tracks"))
+
+        let screen = ctx.screen_rect();
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("export_backdrop")))
+            .rect_filled(screen, 0.0, Color32::from_black_alpha(144));
+        let width = (screen.width() - 48.0).min(640.0);
+        egui::Window::new("Track export")
             .id(egui::Id::new("export_dialog"))
-            .open(&mut show_export).collapsible(false).resizable(true)
-            .default_width(550.0).show(ui.ctx(), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.language.label_export_dir()).color(TEXT_SECONDARY));
-                ui.label(RichText::new(self.export_directory.display().to_string()).monospace().color(TEXT_PRIMARY));
-                if ui.button(self.language.btn_choose_folder()).clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.export_directory = folder;
-                        self.save_config();
-                    }
-                }
-            });
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .title_bar(false).resizable(false)
+            .default_width(width).default_height(0.0)
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(22.0).rounding(14.0))
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.heading(self.text("Tracks exportieren", "Export tracks"));
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("{}  ·  {}", self.tape_name, self.tape_side.label(self.language)))
+                    .color(TEXT_SECONDARY));
+                ui.add_space(14.0);
 
-            ui.add_space(4.0);
-
-            let effective_dir = self.effective_export_directory();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.language.label_export_target_preview()).color(LED_AMBER));
-                ui.label(RichText::new(effective_dir.display().to_string()).monospace().color(Color32::WHITE).strong());
-            });
-
-            ui.add_space(6.0);
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.language.label_normalization()).color(TEXT_SECONDARY));
-                if ui.radio_value(&mut self.normalization_mode, NormalizationMode::None, self.language.norm_original()).changed()
-                    || ui.radio_value(&mut self.normalization_mode, NormalizationMode::PeakPerTrack, self.language.norm_per_track()).changed()
-                    || ui.radio_value(&mut self.normalization_mode, NormalizationMode::PeakAlbum, self.language.norm_album()).changed()
-                {
-                    self.save_config();
-                }
-            });
-
-            ui.add_space(12.0);
-
-            let files: Vec<_> = tracks.iter().filter(|track| !track.is_pause).map(|track| {
-                let title = crate::project::sanitize_track_title(&track.title, track.index);
-                format!("{:02} - {title}.wav", track.index)
-            }).collect();
-            let active_count = files.len();
-            let conflict = files.iter().any(|name| effective_dir.join(name).exists());
-            ui.label(format!("{}: {}", self.text("Ausgelassene Pausen", "Excluded gaps"), tracks.len() - active_count));
-            egui::ScrollArea::vertical().max_height(175.0).show(ui, |ui| {
-                for name in &files {
-                    if effective_dir.join(name).exists() {
-                        ui.colored_label(LED_RED, format!("{} · {name}", self.text("Existiert bereits", "Already exists")));
+                if let Some(progress) = progress {
+                    let done = progress.finished.load(Ordering::Relaxed);
+                    let total = progress.total.load(Ordering::Relaxed);
+                    let cancelling = progress.cancelled.load(Ordering::Relaxed);
+                    ui.label(if cancelling {
+                        self.text("Export wird abgebrochen …", "Cancelling export …")
                     } else {
-                        ui.label(name);
-                    }
-                }
-            });
-            let export_enabled = has_audio && active_count > 0 && !conflict && self.job.is_none();
-            let export_btn = egui::Button::new(
-                RichText::new(self.language.btn_export_tracks(active_count))
-                    .size(15.0)
-                    .color(Color32::WHITE)
-                    .strong(),
-            )
-            .fill(if export_enabled { Color32::from_rgb(37, 99, 235) } else { Color32::from_rgb(50, 50, 58) })
-            .stroke(Stroke::new(1.0, if export_enabled { Color32::from_rgb(96, 165, 250) } else { BORDER_MID }))
-            .rounding(6.0)
-            .min_size(Vec2::new(380.0, 42.0));
-
-            if ui.add_enabled(export_enabled, export_btn).clicked() {
-                if let Some(source) = self.current_audio_path.clone() {
-                    let target_dir = self.effective_export_directory();
-                    let mode = self.normalization_mode.clone();
-                    self.export_status_message = None;
-                    let progress = Arc::new(ExportProgress::default());
-                    let worker_progress = progress.clone();
-                    self.start_job(ui.ctx(), self.text("Tracks werden exportiert …", "Exporting tracks …"), move || {
-                        let files = export_tracks(&source, &target_dir, &tracks, mode, |finished, total| {
-                            worker_progress.report(finished, total)
-                        })?;
-                        Ok(JobResult::Export(files.len(), target_dir))
+                        self.text("WAV-Dateien werden geschrieben …", "Writing WAV files …")
                     });
-                    if let Some(job) = &mut self.job {
-                        job.export_progress = Some(progress);
+                    ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                        .text(format!("{done} / {total}")).animate(true));
+                    ui.add_space(12.0);
+                    if ui.add_enabled(!cancelling, egui::Button::new(self.language.btn_cancel())).clicked() {
+                        progress.cancelled.store(true, Ordering::Relaxed);
                     }
+                    ctx.request_repaint_after(Duration::from_millis(150));
+                    return;
                 }
-            }
 
-            if let Some((is_success, ref msg)) = self.export_status_message {
-                ui.add_space(8.0);
-                let col = if is_success { LED_GREEN } else { LED_RED };
-                ui.horizontal(|ui| {
-                    ui.colored_label(col, msg);
-                    let target_dir = self.effective_export_directory();
-                    if is_success && ui.button(self.language.btn_show_in_finder()).clicked() {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("open").arg(&target_dir).spawn();
+                if let Some(ExportOutcome::Done { count, folder }) = &self.export_outcome {
+                    ui.label(RichText::new(format!("✓  {} {count}", self.text("Exportierte Tracks", "Exported tracks")))
+                        .strong().color(LED_GREEN));
+                    let path = folder.display().to_string();
+                    ui.add(egui::Label::new(&path).truncate()).on_hover_text(path);
+                    ui.add_space(16.0);
+                    let done_label = self.text("Fertig", "Done");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(done_label).clicked() {
+                            self.show_export = false;
+                        }
+                        if ui.button(self.language.btn_show_in_finder()).clicked() {
+                            #[cfg(target_os = "macos")]
+                            let _ = std::process::Command::new("open").arg(folder).spawn();
+                        }
+                    });
+                    if !self.show_export {
+                        self.export_outcome = None;
+                    }
+                    return;
+                }
+
+                let tracks = self.splitter.get_tracks(self.player.total_seconds());
+                let target = self.effective_export_directory();
+                let mut files = Vec::new();
+                for track in tracks.iter().filter(|track| !track.is_pause) {
+                    let name = track.export_filename();
+                    let exists = target.join(&name).exists();
+                    files.push((track, name, exists));
+                }
+                let count = files.len();
+                let conflicts = files.iter().filter(|(_, _, exists)| *exists).count();
+                let export_enabled = count > 0 && conflicts == 0 && self.current_audio_path.is_some()
+                    && self.job.is_none() && !self.recorder.is_busy();
+
+                ui.horizontal_wrapped(|ui| {
+                    panel_title(ui, self.text("Zielordner", "Destination"));
+                    if ui.button(self.text("Basisordner ändern …", "Change base folder …")).clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().set_directory(&self.export_directory).pick_folder() {
+                            self.export_directory = folder;
+                            self.export_outcome = None;
+                            self.save_config();
+                            ctx.request_repaint();
+                        }
                     }
                 });
-            }
-        });
-        self.show_export = show_export;
+                let target_label = self.effective_export_directory().display().to_string();
+                ui.add(egui::Label::new(RichText::new(&target_label).color(TEXT_SECONDARY)).truncate())
+                    .on_hover_text(target_label);
+
+                ui.add_space(12.0);
+                panel_title(ui, self.text("Audio", "Audio"));
+                ui.label(RichText::new(format!("WAV  ·  PCM 24-bit  ·  Stereo  ·  {} Hz", self.player.sample_rate()))
+                    .color(TEXT_SECONDARY));
+                let mode_label = |mode: &NormalizationMode| match mode {
+                    NormalizationMode::None => self.text("Originalpegel", "Original level"),
+                    NormalizationMode::PeakPerTrack => self.text("Peak pro Track · −0,3 dBFS", "Peak per track · −0.3 dBFS"),
+                    NormalizationMode::PeakAlbum => self.text("Einheitlicher Pegel für das Album", "Shared gain across the album"),
+                };
+                let previous = self.normalization_mode.clone();
+                let options = [NormalizationMode::None, NormalizationMode::PeakPerTrack, NormalizationMode::PeakAlbum];
+                let labels = options.each_ref().map(mode_label);
+                egui::ComboBox::from_label(self.text("Normalisierung", "Normalization"))
+                    .selected_text(mode_label(&previous))
+                    .show_ui(ui, |ui| {
+                        for (mode, label) in options.into_iter().zip(labels) {
+                            ui.selectable_value(&mut self.normalization_mode, mode, label);
+                        }
+                    });
+                if self.normalization_mode != previous {
+                    self.save_config();
+                }
+
+                ui.add_space(12.0);
+                let per_page = ((screen.height() - 414.0) / 30.0).floor().clamp(3.0, 10.0) as usize;
+                let pages = count.div_ceil(per_page).max(1);
+                self.export_page = self.export_page.min(pages - 1);
+                ui.horizontal(|ui| {
+                    panel_title(ui, &format!("{} {count}", self.text("Dateien", "Files")));
+                    page_controls(ui, &mut self.export_page, pages, self.language);
+                });
+                let gaps = tracks.len() - count;
+                if gaps > 0 {
+                    ui.label(RichText::new(format!("{} {gaps}", self.text("Ausgelassene Pausen", "Excluded gaps")))
+                        .color(TEXT_SECONDARY));
+                }
+                if count == 0 {
+                    ui.label(self.text("Keine Tracks zum Exportieren.", "No tracks to export."));
+                }
+                for (track, name, exists) in files.iter().skip(self.export_page * per_page).take(per_page) {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.monospace(track.duration_formatted());
+                        if *exists {
+                            ui.colored_label(LED_AMBER, self.text("Existiert bereits", "Already exists"));
+                        }
+                        ui.add(egui::Label::new(name).truncate()).on_hover_text(name);
+                    });
+                }
+                if conflicts > 0 {
+                    ui.colored_label(LED_AMBER, self.text(
+                        "Wähle einen anderen Basisordner oder räume den Zielordner frei.",
+                        "Choose a different base folder or clear the conflicting files.",
+                    ));
+                }
+                match &self.export_outcome {
+                    Some(ExportOutcome::Failed(error)) => { ui.add(egui::Label::new(RichText::new(error).color(LED_RED)).truncate()).on_hover_text(error); }
+                    Some(ExportOutcome::Cancelled) => {
+                        ui.label(self.text("Export abgebrochen.", "Export cancelled."));
+                    }
+                    _ => {}
+                }
+                ui.add_space(12.0);
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = self.text("Exportieren", "Export");
+                    let export = primary_button(label);
+                    if ui.add_enabled(export_enabled, export).clicked() && self.effective_export_directory() == target {
+                        if let Some(source) = self.current_audio_path.clone() {
+                            self.export_outcome = None;
+                            let mode = self.normalization_mode.clone();
+                            let progress = Arc::new(ExportProgress::default());
+                            let worker_progress = progress.clone();
+                            self.start_job(ctx, self.text("Tracks werden exportiert …", "Exporting tracks …"), move || {
+                                let files = export_tracks(&source, &target, &tracks, mode, |done, total| {
+                                    worker_progress.report(done, total)
+                                })?;
+                                Ok(JobResult::Export(files.len(), target))
+                            });
+                            if let Some(job) = &mut self.job {
+                                job.export_progress = Some(progress);
+                            }
+                        }
+                    }
+                    if ui.button(self.language.btn_cancel()).clicked() {
+                        self.show_export = false;
+                        self.export_outcome = None;
+                    }
+                });
+            });
     }
+
 }
 
-fn render_hardware_rack_card<F: FnOnce(&mut Ui)>(ui: &mut Ui, rack_title: &str, content: F) {
-    egui::Frame::none()
-        .fill(BG_CARD)
-        .stroke(Stroke::new(1.0, BORDER_DARK))
-        .rounding(6.0)
-        .inner_margin(14.0)
-        .show(ui, |ui| {
-            ui.label(RichText::new(rack_title).size(13.0).strong().color(TEXT_SECONDARY));
-            ui.add_space(8.0);
-            content(ui);
-        });
+fn page_controls(ui: &mut Ui, page: &mut usize, pages: usize, language: Language) {
+    if pages <= 1 {
+        return;
+    }
+    let (next, previous) = match language {
+        Language::De => ("Nächste Seite", "Vorherige Seite"),
+        Language::En => ("Next page", "Previous page"),
+    };
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui.add_enabled(*page + 1 < pages, egui::Button::new("›")).on_hover_text(next).clicked() {
+            *page += 1;
+        }
+        ui.label(RichText::new(format!("{} / {pages}", *page + 1)).monospace());
+        if ui.add_enabled(*page > 0, egui::Button::new("‹")).on_hover_text(previous).clicked() {
+            *page -= 1;
+        }
+    });
 }
 
 fn render_hardware_metric(ui: &mut Ui, width: f32, label: &str, value: &str, val_col: Color32) {
@@ -2462,7 +2415,8 @@ mod tests {
             selected_segment_idx: None,
             waveform_zoom: 1.0,
             waveform_vertical_zoom: 1.0,
-            waveform_height: 280.0,
+            track_page: 0,
+            export_page: 0,
             magnifier_scope_active: false,
             selected_region: None,
             transient_sensitivity: 1.0,
@@ -2476,11 +2430,10 @@ mod tests {
             hover_preview_enabled: true,
             hover_mouse_pos: None,
             hover_stationary_since: None,
-            hover_is_auditioning: false,
             hover_audition_time: None,
             export_directory: PathBuf::from("/tmp"),
             normalization_mode: NormalizationMode::None,
-            export_status_message: None,
+            export_outcome: None,
             ui_error_message: None,
             job: None,
             saved_edits: None,
@@ -2514,5 +2467,75 @@ mod tests {
                 app.render_tab_split_export(ui);
             });
         });
+
+        // A one-track project with a short name must still get a wide input.
+        app.splitter.custom_titles = vec!["cghcg".into()];
+        let tracks = app.splitter.get_tracks(1800.0);
+        for (window_width, minimum_field_width) in [(800.0, 650.0), (1140.0, 990.0)] {
+            // The scroll area uses the previous frame to calculate its clip rectangle.
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(window_width, 540.0))),
+                    ..Default::default()
+                }, |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none().inner_margin(16.0))
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| app.render_track_list(ui, &tracks));
+                        });
+                });
+            }
+            let field = ctx.read_response(egui::Id::new("track_title_field").with(0_usize)).unwrap();
+            assert!(field.interact_rect.width() >= minimum_field_width,
+                "Track title is only {} pt wide at {window_width} pt", field.interact_rect.width());
+        }
+
+        let audio = DecodedAudio { left: vec![0.1; 120_000], right: vec![0.2; 120_000], sample_rate: 1000 };
+        app.waveform_cache = WaveformCache::build(&audio);
+        app.analysis_report = Some(analyze_samples(&audio.left, &audio.right, audio.sample_rate).unwrap());
+        app.player.load_test_samples(audio);
+        app.splitter.markers = (1..10).map(|n| 10.0 * f64::from(n)).collect();
+        app.select_marker(1);
+        app.magnifier_scope_active = true;
+        app.pause_preview = Some(app.splitter.snapshot());
+        let workspace = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1060.0, 594.0));
+        ctx.set_visuals(crate::ui::theme::studio_visuals());
+        ctx.style_mut(|style| {
+            style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+            style.spacing.button_padding = Vec2::new(9.0, 4.0);
+        });
+        for tab in [ActiveTab::Recording, ActiveTab::Diagnosis, ActiveTab::SplitAndExport] {
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput { screen_rect: Some(workspace), ..Default::default() }, |ctx| {
+                    egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(16.0))
+                        .show(ctx, |ui| {
+                            let bounds = ui.max_rect();
+                            match tab {
+                                ActiveTab::Recording => app.render_tab_recording(ui),
+                                ActiveTab::Diagnosis => app.render_tab_diagnosis(ui),
+                                ActiveTab::SplitAndExport => app.render_tab_split_export(ui),
+                            }
+                            assert!(bounds.expand(1.0).contains_rect(ui.min_rect()),
+                                "{} extends outside its workspace: {:?} vs {bounds:?}",
+                                tab as usize, ui.min_rect());
+                        });
+                });
+            }
+        }
+
+        // Check the dialog at the minimum window size, including the completion state.
+        let screen = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 540.0));
+        app.show_export = true;
+        app.export_directory = PathBuf::from("/Music").join("Long folder name ".repeat(10));
+        for outcome in [None, Some(ExportOutcome::Done { count: 1, folder: app.export_directory.clone() })] {
+            app.export_outcome = outcome;
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                    app.render_export_dialog(ctx);
+                });
+            }
+            let dialog = ctx.memory(|memory| memory.area_rect(egui::Id::new("export_dialog"))).unwrap();
+            assert!(screen.contains_rect(dialog), "Export dialog exceeds the window: {dialog:?}");
+        }
     }
 }

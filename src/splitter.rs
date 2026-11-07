@@ -19,6 +19,11 @@ pub struct TrackInfo {
 }
 
 impl TrackInfo {
+    pub fn export_filename(&self) -> String {
+        let title = crate::project::sanitize_track_title(&self.title, self.index);
+        format!("{:02} - {title}.wav", self.index)
+    }
+
     pub fn duration_seconds(&self) -> f64 {
         (self.end_seconds - self.start_seconds).max(0.0)
     }
@@ -464,8 +469,7 @@ pub fn export_tracks(
         {
             return Err(format!("Invalid export range for track {}", track.index));
         }
-        let title = crate::project::sanitize_track_title(&track.title, track.index);
-        let path = out_dir.join(format!("{:02} - {title}.wav", track.index));
+        let path = out_dir.join(track.export_filename());
         if path.exists() || !names.insert(path.clone()) {
             return Err(format!("Export destination already exists: {}", path.display()));
         }

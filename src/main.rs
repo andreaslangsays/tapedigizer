@@ -34,8 +34,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("TapeDigizer")
             .with_icon(app_icon())
-            .with_inner_size([1140.0, 840.0])
-            .with_min_inner_size([800.0, 540.0]),
+            .with_inner_size([1260.0, 820.0])
+            .with_min_inner_size([1060.0, 700.0]),
         ..Default::default()
     };
 

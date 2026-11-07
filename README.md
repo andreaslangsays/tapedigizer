@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.0-blue.svg" alt="Version 1.3.0" />
+  <img src="https://img.shields.io/badge/version-1.4.0-blue.svg" alt="Version 1.4.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -39,6 +39,8 @@
 2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
    * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
    * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
+   * **Automatischer Aufnahmestart & Nachlaufzeit (Neu in v1.4.0):** Aufnahmestart wartet optional auf das Signal (> -50 dBFS) und schützt Band-Ausläufe mit 60 Sekunden Nachlaufzeit (Run-On) vor abruptem Abschneiden.
+   * **Robuste Core Audio Drainage:** Garantiert vollständigen Schreibpuffer-Abschluss bei Stream-Beendigung.
 
 3. **✂️ Tab 3: Track-Schnitt, Lupenansicht & Transienten (Neu in v1.2.0)**
    * **🌊 Überarbeitete Standard-Wellenansicht mit Pixel-Binning & Nulllinien (Neu in v1.2.0):**
@@ -66,6 +68,8 @@
 2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
    * Automatische Vollauswertung nach der Aufnahme: Spitzenpegel (Peak L/R in dBFS), Headroom und Zählung übersteuerter Samples.
    * **Konkreter Zoom L-12 Gain-Ratgeber:** Sagt dir genau, ob und wie weit das analoge Gain-Poti aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss.
+   * **Automatischer Aufnahmestart & Nachlaufzeit (Neu in v1.4.0):** Aufnahmestart wartet optional auf das Signal (> -50 dBFS) und schützt Band-Ausläufe mit 60 Sekunden Nachlaufzeit (Run-On) vor abruptem Abschneiden.
+   * **Robuste Core Audio Drainage:** Garantiert vollständigen Schreibpuffer-Abschluss bei Stream-Beendigung.
 
 3. **✂️ Tab 3: Track-Schnitt & Mastering-Export**
    * **Tonband- & Album-Organisation (A- & B-Seite):** Gib den Albumnamen ein und wähle **Seite A** oder **Seite B**. Beim Export werden automatisch strukturierte Unterordner angelegt: `<Zielordner>/<Album-Name>/Seite A/` bzw. `Seite B/`.

@@ -19,7 +19,6 @@ pub struct WaveformInteraction {
     pub delete_marker_idx: Option<usize>,
     pub hovered_time_sec: Option<f64>,
     pub mouse_pos_in_waveform: Option<Pos2>,
-    pub is_mouse_over_waveform: bool,
     pub clicked_segment_idx: Option<usize>,
     pub new_selected_region: Option<(f64, f64)>,
 }
@@ -67,12 +66,11 @@ pub fn render_stereo_waveform(
         delete_marker_idx: None,
         hovered_time_sec: None,
         mouse_pos_in_waveform: None,
-        is_mouse_over_waveform: false,
         clicked_segment_idx: None,
         new_selected_region: None,
     };
 
-    let desired_height = waveform_height.clamp(200.0, 520.0);
+    let desired_height = waveform_height.clamp(148.0, 520.0);
     let available_width = ui.available_width().max(380.0);
     let size = Vec2::new(available_width, desired_height);
 
@@ -92,7 +90,7 @@ pub fn render_stereo_waveform(
     let overview_h = 22.0;
     let padding_y = 26.0;
     let wf_top = rect.min.y + 10.0;
-    let wf_h = (desired_height - ruler_h - overview_h - padding_y).max(110.0);
+    let wf_h = (desired_height - ruler_h - overview_h - padding_y).max(70.0);
     let wf_bottom = wf_top + wf_h;
     let wf_rect = Rect::from_min_max(Pos2::new(wf_left, wf_top), Pos2::new(wf_right, wf_bottom));
 
@@ -142,13 +140,13 @@ pub fn render_stereo_waveform(
     // -------------------------------------------------------------
     // Zoom & Horizontal Scrolling via Mouse Wheel & Gestures
     // -------------------------------------------------------------
-    let (scroll_delta, alt_pressed, shift_pressed, cmd_pressed) = ui.input(|i| {
+    let (scroll_delta, alt_pressed, shift_pressed) = ui.input(|i| {
         let delta = if i.smooth_scroll_delta != Vec2::ZERO {
             i.smooth_scroll_delta
         } else {
             i.raw_scroll_delta
         };
-        (delta, i.modifiers.alt, i.modifiers.shift, i.modifiers.command)
+        (delta, i.modifiers.alt, i.modifiers.shift)
     });
 
     let is_hovered = response.hovered();
@@ -624,13 +622,14 @@ pub fn render_stereo_waveform(
                 Vec2::new(flag_w, flag_h),
             );
 
-            if let Some(pos) = mouse_pos_opt {
-                if flag_rect.expand(4.0).contains(pos) {
-                    hovered_marker_idx = Some(idx);
-                }
+            let hits_marker = |pos: Pos2| {
+                flag_rect.expand(4.0).contains(pos)
+                    || (wf_rect.contains(pos) && (pos.x - mx).abs() <= 4.0)
+            };
+            if mouse_pos_opt.is_some_and(hits_marker) {
+                hovered_marker_idx = Some(idx);
             }
-
-            if origin.is_some_and(|p| flag_rect.expand(4.0).contains(p)) {
+            if origin.is_some_and(hits_marker) {
                 pressed_marker = Some(idx);
             }
 
@@ -727,18 +726,20 @@ pub fn render_stereo_waveform(
     // -------------------------------------------------------------
     // Mouse Pointer Inspection, Tool Cursors & Cutting Guide
     // -------------------------------------------------------------
-    let is_scissor = active_tool == EditTool::Scissor || shift_pressed || cmd_pressed;
+    let is_scissor = active_tool == EditTool::Scissor;
 
     if let Some(pos) = mouse_pos_opt {
         if wf_rect.contains(pos) {
-            interaction.is_mouse_over_waveform = true;
-            interaction.mouse_pos_in_waveform = Some(pos);
+            interaction.mouse_pos_in_waveform = response.hovered().then_some(pos);
             let mouse_t = screen_x_to_time(pos.x);
             interaction.hovered_time_sec = Some(mouse_t);
 
             // Dynamic Cutting Guide Line in Scissor Mode
             if is_scissor {
-                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                ui.ctx().set_cursor_icon(CursorIcon::None);
+                let cursor = [pos - Vec2::new(0.0, 8.0), pos + Vec2::new(0.0, 8.0)];
+                painter.line_segment(cursor, Stroke::new(5.0, BG_INSET));
+                painter.line_segment(cursor, Stroke::new(2.0, LED_AMBER));
 
                 // Dashed vertical cutting line
                 let dash_len = 5.0;
@@ -767,10 +768,12 @@ pub fn render_stereo_waveform(
                     egui::FontId::monospace(9.5),
                     LED_AMBER,
                 );
-            } else if active_tool == EditTool::Select || ui.input(|i| i.modifiers.shift) {
+            } else if active_tool == EditTool::Select {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if hovered_marker_idx.is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            } else {
+                ui.ctx().set_cursor_icon(CursorIcon::Default);
             }
         } else if ruler_rect.contains(pos) {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -781,7 +784,7 @@ pub fn render_stereo_waveform(
     // A drag stays bound to the boundary hit at pointer-down.
     let drag_id = response.id.with("marker_drag");
     if response.drag_started_by(egui::PointerButton::Primary) {
-        if let Some(index) = pressed_marker {
+        if let Some(index) = pressed_marker.filter(|_| active_tool == EditTool::Pointer) {
             ui.data_mut(|data| data.insert_temp(drag_id, index));
         }
     }
@@ -807,10 +810,11 @@ pub fn render_stereo_waveform(
             if ruler_rect.contains(pos) {
                 interaction.seek_to_seconds = Some(time);
             } else if wf_rect.contains(pos) {
-                if let Some(index) = hovered_marker_idx {
-                    *selected_marker_idx = Some(index);
-                } else if is_scissor {
+                if is_scissor {
                     interaction.add_marker_at_seconds = Some(time);
+                } else if let Some(index) = hovered_marker_idx.filter(|_| active_tool == EditTool::Pointer) {
+                    *selected_marker_idx = Some(index);
+                    interaction.seek_to_seconds = markers.get(index).copied();
                 } else {
                     let index = markers.partition_point(|&marker| marker <= time);
                     interaction.clicked_segment_idx = Some(index);
@@ -1100,7 +1104,7 @@ pub fn render_detail_magnifier_scope(
 ) -> ScopeInteraction {
     let mut interaction = ScopeInteraction::default();
 
-    let scope_h = 202.0;
+    let scope_h = 158.0;
     let available_w = ui.available_width().max(380.0);
     let size = Vec2::new(available_w, scope_h);
 
@@ -1164,7 +1168,7 @@ pub fn render_detail_magnifier_scope(
     let audio_end_t = end_t.min(base_end_t);
 
     let scope_top = rect.min.y + 6.0;
-    let scope_wf_h = 128.0;
+    let scope_wf_h = 84.0;
     let scope_bottom = scope_top + scope_wf_h;
     let scope_rect = Rect::from_min_max(Pos2::new(scope_left, scope_top), Pos2::new(scope_right, scope_bottom));
 
