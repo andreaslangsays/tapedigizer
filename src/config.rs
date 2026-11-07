@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub last_channel_right: Option<usize>,
     pub export_directory: Option<PathBuf>,
     pub timer_minutes: Option<u32>,
+    pub time_headroom_minutes: Option<u32>,
     pub silence_autostop: Option<bool>,
     pub autostop_threshold_db: Option<f32>,
     pub autostop_silence_secs: Option<f32>,
@@ -36,9 +37,10 @@ impl Default for AppConfig {
             last_channel_right: Some(11),
             export_directory: None,
             timer_minutes: Some(45),
+            time_headroom_minutes: Some(5),
             silence_autostop: Some(true),
-            autostop_threshold_db: Some(-52.0),
-            autostop_silence_secs: Some(15.0),
+            autostop_threshold_db: Some(-90.0),
+            autostop_silence_secs: Some(20.0),
             run_on_seconds: Some(15),
             pause_threshold_db: Some(-45.0),
             pause_min_seconds: Some(1.8),
@@ -106,11 +108,14 @@ mod tests {
         cfg.last_channel_left = Some(10);
         cfg.last_channel_right = Some(11);
         cfg.timer_minutes = Some(45);
+        cfg.time_headroom_minutes = Some(5);
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.last_device_name.as_deref(), Some("ZOOM L-12 Driver"));
         assert_eq!(loaded.last_channel_left, Some(10));
         assert_eq!(loaded.last_channel_right, Some(11));
         assert_eq!(loaded.timer_minutes, Some(45));
+        assert_eq!(loaded.time_headroom_minutes, Some(5));
+        assert_eq!(loaded.autostop_threshold_db, Some(-90.0));
     }
 }

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.5.0-blue.svg" alt="Version 1.5.0" />
+  <img src="https://img.shields.io/badge/version-1.5.1-blue.svg" alt="Version 1.5.1" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -23,12 +23,15 @@
 
 **TapeDigizer** ist eine hochpräzise, native macOS-Desktop-App (entwickelt in **Rust** mit hardwarebeschleunigter Benutzeroberfläche), die das Digitalisieren von **Schallplatten (Vinyl LP & Single 45)**, **Kassetten** und **Tonbändern** so einfach, präzise und professionell wie möglich macht.
 
-### ✨ Hauptfunktionen (Neu in v1.5.0)
+### ✨ Hauptfunktionen (Neu in v1.5.1)
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
    * **Analoge Audioquellen-Profile:** Vorkonfigurierte Voreinstellungen für **Kassette (Compact Cassette)**, **Tonband (Reel-to-Reel)**, **Vinyl LP (33⅓ RPM)** und **Single (45 RPM)** mit optimierten Standard-Aufnahmezeiten und passenden Stille-Erkennungsparametern.
+   * **⏱ Einstellbarer Zeit-Headroom (Aufnahme-Puffer):** Verhindert verfrühtes Abschneiden bei überlangen Kassetten (z. B. C-90 mit reellen 47–49 min). Einstellbar per Schnellwahltasten (`+0m`, `+2m`, `+5m`, `+10m`, `+15m`) oder stufenlosem Schieberegler (Standard: `+5 min` Headroom).
+   * **🔇 Hochempfindliche Stille-Erkennung & Erkennung fehlenden Signals (-100 dBFS):** Erkennt echten Signalverlust (wenn das Kassettendeck stoppt oder abschaltet) und schützt vor vorzeitigem Aufnahmeabbruch bei leisen Passagen oder Bandrauschen. Schwellenwert bis **-100 dBFS** stufenlos justierbar inklusive Direktwahl-Button `-100 dB (Kein Signal)`.
+   * **Live-Stille-Anzeige:** Während der Aufnahme wird bei Unterschreitung der Schwelle die erkannte Stilledauer in Echtzeit angezeigt (`⏳ Stille: 2.1s / 20s`).
    * **Band & Ablage:** Name des Albums/Bandes und Seite (A/B) direkt vorab festlegen. Automatisch strukturierte Ordner.
-   * **Erweiterte Auto-Stopp-Steuerung:** Einstellbare Stille-Schwelle (-60 dBFS bis -30 dBFS), Haltezeit (5 s bis 45 s) und schützende Nachlaufzeit (Run-On 0 s bis 120 s). Ein *Sofort-Stopp*-Button beendet die Aufnahme bei Bedarf unmittelbar ohne Nachlauf.
+   * **Erweiterte Auto-Stopp-Steuerung:** Einstellbare Stille-Schwelle (-100 dBFS bis -30 dBFS), Haltezeit (3 s bis 60 s) und schützende Nachlaufzeit (Run-On 0 s bis 60 s). Ein *Sofort-Stopp*-Button beendet die Aufnahme bei Bedarf unmittelbar ohne Nachlauf.
    * **Automatische Zwischensicherung vor Analyse:** Nach Aufnahmeende wird die 24-Bit-WAV-Datei und das `.tapedigizer`-Projekt sofort auf Disk gesichert.
    * **Zoom LiveTrak L-12 Mehrkanal-Routing:** Automatische Erkennung und Voreinstellung von **Kanäle 11/12 (Stereo Line)** für Kassetten-/Tape-Decks und Phono-Preamps (auch 9/10, Master 13/14 oder diskrete Kanalpaare wählbar).
    * **Responsive Studio LED-Stereokette:** 36 Segmente (-60 bis 0 dBFS) mit Spitzenwert-Ticks, separater numerischer dBFS-Anzeige und klickbarem CLIP-Reset.
@@ -71,11 +74,14 @@
 
 **TapeDigizer** is a high-precision native macOS desktop application (built with **Rust** and hardware-accelerated GUI) designed to digitize **vinyl records (LP 33⅓ & Single 45)**, **cassettes**, and **reel-to-reel tapes** effortlessly with studio-grade fidelity.
 
-### ✨ Key Features (New in v1.5.0)
+### ✨ Key Features (New in v1.5.1)
 
 1. **🎙️ Tab 1: Recording & Calibration**
    * **Analog Media Profiles:** Presets for **Compact Cassette**, **Reel-to-Reel Tape**, **Vinyl LP (33⅓ RPM)**, and **Single (45 RPM)** with customized duration presets and silence detection thresholds.
-   * **Configurable Auto-Stop:** Fine-tune silence threshold (-60 dBFS to -30 dBFS), duration (5s to 45s), and run-on tail (0s to 120s), plus an instant-stop button.
+   * **⏱ Configurable Time Headroom (Buffer):** Prevents premature cutoffs on tapes running longer than nominal length (e.g. C-90 running 47–49 min). Adjustable via quick-preset chips (`+0m`, `+2m`, `+5m`, `+10m`, `+15m`) or free slider (default: `+5 min` safety buffer).
+   * **🔇 Ultra-Sensitive Silence & Missing Signal Detection (-100 dBFS):** Detects complete signal loss (when tape deck stops or shuts off) down to **-100 dBFS** to prevent early stops during quiet music passages or tape hiss. Includes `-100 dB (No signal)` one-click preset.
+   * **Live Silence Duration Indicator:** Shows detected silence duration in real-time during recording (`⏳ Silence: 2.1s / 20s`).
+   * **Configurable Auto-Stop:** Fine-tune silence threshold (-100 dBFS to -30 dBFS), hold time (3s to 60s), and run-on tail (0s to 60s), plus an instant-stop button.
    * **Zoom LiveTrak L-12 Multi-channel Routing:** Preconfigures **Channels 11/12 (Stereo Line)** as standard for tape decks and phono preamps.
    * **Real-time Studio LED Ladder Meters:** 36-segment responsive meters with peak-hold ticks, numeric dBFS readouts, and clickable clip indicators.
    * **Immediate Persistence:** Audio and project files are safely flushed to disk before analysis begins.

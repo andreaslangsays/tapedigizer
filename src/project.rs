@@ -33,11 +33,16 @@ impl MediaSourceType {
     /// pause detection threshold (dB), and minimum pause duration (s).
     pub fn defaults(&self) -> (u32, f32, f32, f32, f32) {
         match self {
-            MediaSourceType::Cassette => (45, -52.0, 15.0, -45.0, 1.8),
-            MediaSourceType::ReelToReel => (60, -54.0, 15.0, -48.0, 2.0),
-            MediaSourceType::VinylLp => (25, -42.0, 12.0, -38.0, 1.4),
-            MediaSourceType::VinylSingle => (10, -42.0, 10.0, -38.0, 1.2),
+            MediaSourceType::Cassette => (45, -90.0, 20.0, -48.0, 1.8),
+            MediaSourceType::ReelToReel => (60, -90.0, 20.0, -50.0, 2.0),
+            MediaSourceType::VinylLp => (25, -85.0, 15.0, -42.0, 1.4),
+            MediaSourceType::VinylSingle => (10, -85.0, 12.0, -42.0, 1.2),
         }
+    }
+
+    /// Recommended default time headroom (buffer) in minutes.
+    pub fn default_headroom_minutes(&self) -> u32 {
+        5
     }
 }
 

@@ -122,6 +122,7 @@ pub struct TapeDigizerApp {
 
     // Timer & Auto-Stop Settings
     selected_timer_minutes: u32,
+    time_headroom_minutes: u32,
     enable_silence_autostop: bool,
     autostop_threshold_db: f32,
     autostop_silence_secs: f32,
@@ -239,6 +240,7 @@ impl TapeDigizerApp {
         let (def_timer, def_auto_db, def_auto_sec, def_pause_db, def_pause_sec) = media_source.defaults();
 
         let timer_minutes = cfg.timer_minutes.unwrap_or(def_timer);
+        let time_headroom_minutes = cfg.time_headroom_minutes.unwrap_or(5);
         let silence_stop = cfg.silence_autostop.unwrap_or(true);
         let autostop_threshold_db = cfg.autostop_threshold_db.unwrap_or(def_auto_db);
         let autostop_silence_secs = cfg.autostop_silence_secs.unwrap_or(def_auto_sec);
@@ -281,6 +283,7 @@ impl TapeDigizerApp {
             player: AudioPlayer::new(),
             splitter: TrackSplitter::new(),
             selected_timer_minutes: timer_minutes,
+            time_headroom_minutes,
             enable_silence_autostop: silence_stop,
             autostop_threshold_db,
             autostop_silence_secs,
@@ -342,6 +345,7 @@ impl TapeDigizerApp {
         self.media_source = source;
         let (timer, auto_db, auto_sec, pause_db, pause_sec) = source.defaults();
         self.selected_timer_minutes = timer;
+        self.time_headroom_minutes = source.default_headroom_minutes();
         self.autostop_threshold_db = auto_db;
         self.autostop_silence_secs = auto_sec;
         self.pause_threshold_db = pause_db;
@@ -416,6 +420,7 @@ impl TapeDigizerApp {
             last_channel_right: pair.as_ref().map(|p| p.right_channel),
             export_directory: Some(self.export_directory.clone()),
             timer_minutes: Some(self.selected_timer_minutes),
+            time_headroom_minutes: Some(self.time_headroom_minutes),
             silence_autostop: Some(self.enable_silence_autostop),
             autostop_threshold_db: Some(self.autostop_threshold_db),
             autostop_silence_secs: Some(self.autostop_silence_secs),
@@ -1290,8 +1295,13 @@ impl TapeDigizerApp {
             self.autostop_silence_secs,
             self.run_on_seconds,
         );
-        let timer = (self.selected_timer_minutes != 0)
-            .then(|| Duration::from_secs(u64::from(self.selected_timer_minutes) * 60));
+        let total_minutes = if self.selected_timer_minutes != 0 {
+            self.selected_timer_minutes + self.time_headroom_minutes
+        } else {
+            0
+        };
+        let timer = (total_minutes != 0)
+            .then(|| Duration::from_secs(u64::from(total_minutes) * 60));
         self.ui_error_message = self.next_recording_path().and_then(|target| {
             self.recorder.start_recording(&device_name, pair, target, timer, self.enable_silence_autostop)
         }).err();
@@ -1472,8 +1482,10 @@ impl TapeDigizerApp {
                 ui.add_space(7.0);
                 studio_panel(ui, self.text("Aufnahmedauer & Auto-Stopp", "Duration & auto-stop"), |ui| {
                     let before_timer = self.selected_timer_minutes;
+                    let before_headroom = self.time_headroom_minutes;
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(RichText::new(self.text("Dauer:", "Length:")).color(TEXT_SECONDARY).small());
                         for (minutes, label) in [
                             (10, "10m"), (25, "25m"), (30, "30m"), (45, "45m"), (60, "60m"), (90, "90m"),
                             (0, self.language.preset_unlimited()),
@@ -1484,7 +1496,40 @@ impl TapeDigizerApp {
                         }
                     });
 
-                    let mut cfg_changed = self.selected_timer_minutes != before_timer;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(RichText::new(self.text("Zeit-Headroom:", "Time Headroom:")).color(TEXT_SECONDARY).small());
+                        for (mins, label) in [(0, "+0m"), (2, "+2m"), (5, "+5m"), (10, "+10m"), (15, "+15m")] {
+                            if ui.selectable_label(self.time_headroom_minutes == mins, label)
+                                .on_hover_text(self.text(
+                                    "Zusätzlicher Zeit-Puffer über die Nenn-Bandlänge hinaus (schützt vor Abschneiden bei überlangen Kassetten)",
+                                    "Safety time buffer added to nominal tape length (prevents cutoff on tapes longer than nominal length)",
+                                ))
+                                .clicked()
+                            {
+                                self.time_headroom_minutes = mins;
+                            }
+                        }
+                        ui.spacing_mut().slider_width = 55.0;
+                        ui.add(egui::Slider::new(&mut self.time_headroom_minutes, 0..=30).suffix(" m"));
+                    });
+
+                    let summary_text = if self.selected_timer_minutes > 0 {
+                        let total = self.selected_timer_minutes + self.time_headroom_minutes;
+                        format!(
+                            "⏱ {} min + {} min {} = {}:00 min max.",
+                            self.selected_timer_minutes,
+                            self.time_headroom_minutes,
+                            self.text("Headroom", "Headroom"),
+                            total
+                        )
+                    } else {
+                        self.text("⏱ Unbegrenzt (kein Zeitlimit)", "⏱ Unlimited (no time limit)").to_string()
+                    };
+                    ui.label(RichText::new(summary_text).color(LED_AMBER).small());
+
+                    let mut cfg_changed = self.selected_timer_minutes != before_timer
+                        || self.time_headroom_minutes != before_headroom;
 
                     ui.horizontal_wrapped(|ui| {
                         let auto_stop = self.text("Auto-Stopp bei Stille", "Auto-stop on silence");
@@ -1509,20 +1554,46 @@ impl TapeDigizerApp {
 
                     if self.enable_silence_autostop {
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().slider_width = 76.0;
+                            ui.label(RichText::new(self.text("Schwelle:", "Threshold:")).color(TEXT_SECONDARY).small());
+                            for (db, label) in [
+                                (-100.0, self.text("-100 dB (Kein Signal)", "-100 dB (No signal)")),
+                                (-90.0, "-90 dB"),
+                                (-80.0, "-80 dB"),
+                                (-65.0, "-65 dB"),
+                            ] {
+                                if ui.selectable_label((self.autostop_threshold_db - db).abs() < 1.0, label)
+                                    .on_hover_text(self.text(
+                                        "-100 dBFS erkennt nur absoluten Signalverlust (Deck stoppt/aus), schützt leise Musik",
+                                        "-100 dBFS detects only complete signal loss (deck stopped/off), protects quiet music",
+                                    ))
+                                    .clicked()
+                                {
+                                    self.autostop_threshold_db = db;
+                                    cfg_changed = true;
+                                }
+                            }
+                        });
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().slider_width = 85.0;
                             let thresh_lbl = self.text("Schwelle", "Threshold");
-                            if ui.add(egui::Slider::new(&mut self.autostop_threshold_db, -65.0..=-30.0)
-                                .step_by(1.0).text(thresh_lbl).suffix(" dB")).changed()
+                            if ui.add(egui::Slider::new(&mut self.autostop_threshold_db, -100.0..=-30.0)
+                                .step_by(1.0).text(thresh_lbl).suffix(" dBFS")).changed()
                             {
                                 cfg_changed = true;
                             }
-                            let dur_lbl = self.text("Dauer", "Hold");
-                            if ui.add(egui::Slider::new(&mut self.autostop_silence_secs, 3.0..=30.0)
+                            let dur_lbl = self.text("Haltedauer", "Hold");
+                            if ui.add(egui::Slider::new(&mut self.autostop_silence_secs, 3.0..=60.0)
                                 .step_by(1.0).text(dur_lbl).suffix(" s")).changed()
                             {
                                 cfg_changed = true;
                             }
                         });
+
+                        ui.label(RichText::new(self.text(
+                            "💡 Tipp: -100 dBFS sucht nach fehlendem Signal und verhindert vorzeitiges Abbrechen bei Bandrauschen oder Pausen.",
+                            "💡 Tip: -100 dBFS searches for lost signal and prevents early cutoff during tape hiss or gaps.",
+                        )).color(TEXT_SECONDARY).small());
                     }
 
                     if cfg_changed {
@@ -1579,7 +1650,7 @@ impl TapeDigizerApp {
                 let recording = matches!(state, RecorderState::Recording | RecorderState::RunOn);
                 let elapsed = self.recorder.elapsed_duration().as_secs_f64();
                 let limit = (self.selected_timer_minutes > 0)
-                    .then(|| f64::from(self.selected_timer_minutes) * 60.0 + self.run_on_seconds as f64);
+                    .then(|| f64::from(self.selected_timer_minutes + self.time_headroom_minutes) * 60.0 + self.run_on_seconds as f64);
                 let idle = match state {
                     RecorderState::WaitingForSignal => self.text("Warte auf Eingangssignal …", "Waiting for input signal …"),
                     RecorderState::Monitoring => self.language.live_waveform_monitoring(),
@@ -1593,9 +1664,15 @@ impl TapeDigizerApp {
                     if let Some(remaining) = self.recorder.remaining_duration() {
                         let label = self.text("Verbleibend", "Remaining");
                         ui.label(format!("{label}  {}", timecode(remaining.as_secs_f64())));
-                    } else {
-                        ui.label(RichText::new(format!("PCM 24-bit · Stereo · {}", self.media_source.label(self.language))).color(TEXT_SECONDARY));
                     }
+                    if recording && self.enable_silence_autostop {
+                        let sil = self.recorder.silence_seconds_detected();
+                        if sil > 0.5 {
+                            let sil_msg = format!("⏳ Stille: {:.1}s / {:.0}s ({:.0} dB)", sil, self.autostop_silence_secs, self.autostop_threshold_db);
+                            ui.label(RichText::new(sil_msg).color(LED_AMBER).small());
+                        }
+                    }
+                    ui.label(RichText::new(format!("PCM 24-bit · Stereo · {}", self.media_source.label(self.language))).color(TEXT_SECONDARY));
                 });
             });
         });
@@ -2883,6 +2960,7 @@ mod tests {
             player: AudioPlayer::new(),
             splitter: TrackSplitter::new(),
             selected_timer_minutes: 45,
+            time_headroom_minutes: 5,
             enable_silence_autostop: true,
             autostop_threshold_db: -48.0,
             autostop_silence_secs: 10.0,

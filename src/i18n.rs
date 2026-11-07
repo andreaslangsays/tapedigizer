@@ -308,8 +308,8 @@ impl Language {
     }
     pub fn checkbox_silence_autostop(&self) -> &'static str {
         match self {
-            Language::De => "Auto-Stopp bei Bandende (sobald nach mindestens 30 Sek. 15 Sek. Stille herrscht)",
-            Language::En => "Auto-stop at tape end (stops when silence is detected for >= 15s after 30s)",
+            Language::De => "Auto-Stopp bei Bandende / echtem Signalverlust (einstellbar bis -100 dBFS)",
+            Language::En => "Auto-stop at tape end / true signal loss (configurable down to -100 dBFS)",
         }
     }
 

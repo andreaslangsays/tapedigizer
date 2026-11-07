@@ -28,7 +28,7 @@ pub struct StereoWaveformPoint {
     pub max_r: f32,
 }
 
-const START_SIGNAL_DBFS: f32 = -50.0;
+const START_SIGNAL_DBFS: f32 = -60.0;
 const RUN_ON_DURATION: Duration = Duration::from_secs(60);
 
 type SampleChunk = Vec<(f32, f32)>;
@@ -89,8 +89,8 @@ impl AudioRecorder {
             run_on_duration: RUN_ON_DURATION,
             timer_limit: None,
             silence_autostop_enabled: false,
-            autostop_threshold_db: -55.0,
-            autostop_silence_secs: 15.0,
+            autostop_threshold_db: -90.0,
+            autostop_silence_secs: 20.0,
             silence_seconds_detected: Arc::new(RwLock::new(0.0)),
             current_filepath: None,
             sample_rate: 48000,
@@ -98,9 +98,13 @@ impl AudioRecorder {
     }
 
     pub fn configure_autostop(&mut self, threshold_db: f32, silence_secs: f32, run_on_secs: u32) {
-        self.autostop_threshold_db = threshold_db.clamp(-80.0, -20.0);
-        self.autostop_silence_secs = silence_secs.clamp(3.0, 120.0);
+        self.autostop_threshold_db = threshold_db.clamp(-120.0, -20.0);
+        self.autostop_silence_secs = silence_secs.clamp(2.0, 300.0);
         self.run_on_duration = Duration::from_secs(u64::from(run_on_secs));
+    }
+
+    pub fn silence_seconds_detected(&self) -> f32 {
+        *self.silence_seconds_detected.read()
     }
 
     pub fn reset_meter_peaks(&self) {
@@ -762,6 +766,15 @@ mod tests {
     use super::*;
     use crate::audio::device::list_input_devices;
     use crate::analysis::analyze_wav_file;
+
+    #[test]
+    fn test_configure_autostop_supports_down_to_minus_100_db() {
+        let mut recorder = AudioRecorder::new();
+        recorder.configure_autostop(-100.0, 25.0, 30);
+        assert_eq!(recorder.autostop_threshold_db, -100.0);
+        assert_eq!(recorder.autostop_silence_secs, 25.0);
+        assert_eq!(recorder.run_on_duration, Duration::from_secs(30));
+    }
 
     #[test]
     fn signal_starts_the_timer_and_stop_adds_one_minute() {
