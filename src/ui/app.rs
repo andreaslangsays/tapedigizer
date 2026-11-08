@@ -1824,11 +1824,7 @@ impl TapeDigizerApp {
         }
 
         let show_scope = self.magnifier_scope_active && has_audio;
-        let wf_height = if show_scope {
-            112.0
-        } else {
-            (ui.available_height() * 0.34).clamp(124.0, 240.0)
-        };
+        let wf_height = (ui.available_height() * 0.34).clamp(124.0, 240.0);
 
         // Full-width main Stereo Waveform always at the top
         self.render_timeline(ui, total_sec, cur_sec, has_audio, wf_height);
