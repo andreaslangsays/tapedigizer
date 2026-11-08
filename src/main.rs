@@ -36,6 +36,8 @@ fn main() -> eframe::Result<()> {
             .with_icon(app_icon())
             .with_inner_size([1260.0, 820.0])
             .with_min_inner_size([1060.0, 700.0]),
+        renderer: eframe::Renderer::Wgpu,
+        vsync: true,
         ..Default::default()
     };
 

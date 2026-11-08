@@ -907,7 +907,7 @@ impl eframe::App for TapeDigizerApp {
         let is_playing = self.player.is_playing();
 
         if self.recorder.is_busy() || is_monitoring || is_playing {
-            ctx.request_repaint_after(Duration::from_millis(16));
+            ctx.request_repaint();
         }
 
         self.recorder.poll_auto_stop();
