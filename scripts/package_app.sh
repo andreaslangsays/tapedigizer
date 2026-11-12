@@ -77,3 +77,14 @@ codesign --verify --verbose "$APP_BUNDLE"
 touch "$APP_BUNDLE"
 
 echo "=== Successfully built $APP_BUNDLE ==="
+
+if [[ -x "$SCRIPT_DIR/build_au_installer.sh" ]]; then
+    "$SCRIPT_DIR/build_au_installer.sh"
+    if [[ -d "$ROOT_DIR/TapeDigizerDenoiser.component" ]]; then
+        rm -rf "$RESOURCES_DIR/TapeDigizerDenoiser.component"
+        cp -R "$ROOT_DIR/TapeDigizerDenoiser.component" "$RESOURCES_DIR/TapeDigizerDenoiser.component"
+        codesign --force --deep --sign - "$APP_BUNDLE"
+    fi
+elif [[ -x "$SCRIPT_DIR/build_audiounit.sh" ]]; then
+    "$SCRIPT_DIR/build_audiounit.sh"
+fi

@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use egui::{Color32, Pos2, RichText, Stroke, Ui, Vec2};
 use crate::analysis::{analyze_samples, AudioAnalysisReport, LevelDiagnosis};
+use crate::audio::denoiser::{
+    crop_trim_audio_to_range, cut_delete_audio_range, write_stereo_wav_atomic,
+    AuditionMode, DenoiserParams, NoisePresetManager, NoiseProfile, SpectralDenoiser,
+};
 use crate::audio::device::{get_channel_pairs_for_device, list_input_devices, AudioDeviceInfo, ChannelPair};
 use crate::audio::player::{AudioPlayer, DecodedAudio};
 use crate::audio::recorder::{AudioRecorder, RecorderState, StereoWaveformPoint};
@@ -34,6 +38,14 @@ enum JobResult {
     Export(usize, PathBuf),
     Pauses(MarkerSnapshot),
     Saved(PathBuf, Option<PathBuf>, SavedEdits),
+    AudioModified {
+        audio: DecodedAudio,
+        waveform: WaveformCache,
+        report: AudioAnalysisReport,
+        markers: MarkerSnapshot,
+        status_msg: Option<String>,
+        disable_live_denoiser: bool,
+    },
 }
 
 enum ExportOutcome {
@@ -176,6 +188,18 @@ pub struct TapeDigizerApp {
     export_fade_ms: u32,
     export_balance_db: f32,
     export_outcome: Option<ExportOutcome>,
+
+    // Spectral Denoiser, Presets & Original Recording Cut
+    denoiser_panel_active: bool,
+    denoiser_params: DenoiserParams,
+    active_noise_profile: Option<NoiseProfile>,
+    active_noise_samples: Option<(Vec<f32>, Vec<f32>, u32)>,
+    saved_noise_presets: Vec<NoiseProfile>,
+    selected_preset_idx: Option<usize>,
+    preset_save_name: String,
+    auto_overwrite_original_wav: bool,
+    last_saved_bytes_info: Option<String>,
+    export_apply_denoiser: bool,
 
     // General status/error
     ui_error_message: Option<String>,
@@ -327,6 +351,16 @@ impl TapeDigizerApp {
             export_fade_ms,
             export_balance_db: 0.0,
             export_outcome: None,
+            denoiser_panel_active: false,
+            denoiser_params: DenoiserParams::default(),
+            active_noise_profile: None,
+            active_noise_samples: None,
+            saved_noise_presets: NoisePresetManager::list_presets(),
+            selected_preset_idx: None,
+            preset_save_name: String::new(),
+            auto_overwrite_original_wav: true,
+            last_saved_bytes_info: None,
+            export_apply_denoiser: true,
             ui_error_message: None,
             job: None,
             saved_edits: None,
@@ -520,6 +554,71 @@ impl TapeDigizerApp {
                     self.export_page = 0;
                     self.show_export = true;
                 }
+                Command::ToggleFilterStudio => {
+                    self.denoiser_panel_active = !self.denoiser_panel_active;
+                    if self.denoiser_panel_active {
+                        self.magnifier_scope_active = false;
+                        self.refresh_noise_presets();
+                        self.active_tab = ActiveTab::SplitAndExport;
+                    }
+                }
+                Command::ToggleScope => {
+                    self.magnifier_scope_active = !self.magnifier_scope_active;
+                    if self.magnifier_scope_active {
+                        self.denoiser_panel_active = false;
+                        self.active_tab = ActiveTab::SplitAndExport;
+                    }
+                }
+                Command::ToggleTracks => {
+                    self.show_tracks = !self.show_tracks;
+                }
+                Command::ToggleLiveFilter => {
+                    self.denoiser_params.enabled = !self.denoiser_params.enabled;
+                    self.player.set_denoiser_params(self.denoiser_params.clone());
+                }
+                Command::LearnNoise if self.player.total_samples() > 0 => {
+                    let total_sec = self.player.total_seconds();
+                    let cur_sec = self.player.current_seconds();
+                    let (s0, s1) = self.active_selection_or_window(total_sec, cur_sec);
+                    self.learn_noise_from_region(s0, s1);
+                }
+                Command::BakeFilterTrack if self.player.total_samples() > 0 => {
+                    let total_sec = self.player.total_seconds();
+                    let cur_sec = self.player.current_seconds();
+                    let tracks = self.splitter.get_tracks(total_sec);
+                    let seg_idx = self.selected_segment_idx.unwrap_or_else(|| {
+                        tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds)
+                            .map(|t| t.segment_index).unwrap_or(0)
+                    });
+                    self.bake_denoiser_into_track(ctx, seg_idx);
+                }
+                Command::BakeFilterAll if self.player.total_samples() > 0 => {
+                    self.bake_denoiser_into_recording(ctx);
+                }
+                Command::FilterAllTracks => {
+                    let total_sec = self.player.total_seconds();
+                    let count = self.splitter.get_tracks(total_sec).len();
+                    self.splitter.set_all_tracks_filtered(count, true);
+                }
+                Command::FilterNoTracks => {
+                    let total_sec = self.player.total_seconds();
+                    let count = self.splitter.get_tracks(total_sec).len();
+                    self.splitter.set_all_tracks_filtered(count, false);
+                }
+                Command::ToggleSelectedTrackFilter => {
+                    let total_sec = self.player.total_seconds();
+                    let cur_sec = self.player.current_seconds();
+                    let tracks = self.splitter.get_tracks(total_sec);
+                    let seg_idx = self.selected_segment_idx.unwrap_or_else(|| {
+                        tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds)
+                            .map(|t| t.segment_index).unwrap_or(0)
+                    });
+                    self.splitter.toggle_track_filter(seg_idx);
+                }
+                Command::ToggleSubsonicFilter => {
+                    self.export_highpass_20hz = !self.export_highpass_20hz;
+                    self.save_config();
+                }
                 _ => {}
             }
         }
@@ -573,6 +672,7 @@ impl TapeDigizerApp {
                     markers: project.markers,
                     custom_titles: project.custom_titles,
                     pause_indices: project.pause_indices,
+                    disabled_filter_indices: project.disabled_filter_indices,
                 });
                 self.normalization_mode = match project.normalization_mode.as_str() {
                     "track" => NormalizationMode::PeakPerTrack,
@@ -598,6 +698,39 @@ impl TapeDigizerApp {
             Ok(JobResult::Pauses(snapshot)) => self.pause_preview = Some(snapshot),
             Ok(JobResult::Saved(path, audio_path, edits)) => {
                 self.apply_saved_project(path, audio_path, edits);
+            }
+            Ok(JobResult::AudioModified {
+                audio,
+                waveform,
+                report,
+                markers,
+                status_msg,
+                disable_live_denoiser,
+            }) => {
+                self.waveform_cache = waveform;
+                self.analysis_report = Some(report);
+                let before = self.splitter.snapshot();
+                self.splitter.restore(markers);
+                self.splitter.commit_edit(before);
+                self.selected_region = None;
+                self.selected_marker_idx = None;
+                self.selected_segment_idx = None;
+                self.last_saved_bytes_info = status_msg;
+                if disable_live_denoiser {
+                    self.denoiser_params.enabled = false;
+                    self.player.set_denoiser_params(self.denoiser_params.clone());
+                }
+                if let Err(e) = self.player.replace_decoded(audio) {
+                    self.ui_error_message = Some(e);
+                }
+                // Keep associated .tapedigizer project file in sync with modified audio
+                if let Some(proj_path) = self.current_project_path.clone() {
+                    let doc = self.project_document();
+                    let src = self.current_audio_path.clone();
+                    if doc.save_to_file(&proj_path, src.as_deref()).is_ok() {
+                        self.saved_edits = Some(self.edits());
+                    }
+                }
             }
             Err(error) if export => {
                 self.export_outcome = Some(if error == "Export cancelled" {
@@ -660,6 +793,7 @@ impl TapeDigizerApp {
             self.splitter.markers.clone(),
             self.splitter.custom_titles.clone(),
             self.splitter.pause_indices.clone(),
+            self.splitter.disabled_filter_indices.clone(),
             norm.into(),
         )
     }
@@ -767,7 +901,7 @@ impl TapeDigizerApp {
                 {
                     let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
                     let document = TapeDigizerProject::new(
-                        name, TapeSide::SideA, String::new(), Vec::new(), Vec::new(), Vec::new(), "none".into(),
+                        name, TapeSide::SideA, String::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), "none".into(),
                     );
                     (document, None, Some(path))
                 } else {
@@ -786,6 +920,7 @@ impl TapeDigizerApp {
                         last = frame;
                     }
                     document.pause_indices.retain(|&index| index <= document.markers.len());
+                    document.disabled_filter_indices.retain(|&index| index <= document.markers.len());
                     let waveform = WaveformCache::build(&decoded);
                     let report = analyze_samples(&decoded.left, &decoded.right, decoded.sample_rate)?;
                     Some(PreparedAudio { path, decoded, waveform, report })
@@ -1011,6 +1146,16 @@ impl eframe::App for TapeDigizerApp {
                 }
                 if key_l {
                     self.magnifier_scope_active = !self.magnifier_scope_active;
+                    if self.magnifier_scope_active {
+                        self.denoiser_panel_active = false;
+                    }
+                }
+                if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::F)) {
+                    self.denoiser_panel_active = !self.denoiser_panel_active;
+                    if self.denoiser_panel_active {
+                        self.magnifier_scope_active = false;
+                        self.refresh_noise_presets();
+                    }
                 }
                 if let Some(m_idx) = self.selected_marker_idx {
                     let total_sec = self.player.total_seconds();
@@ -1072,6 +1217,14 @@ impl eframe::App for TapeDigizerApp {
                             self.reveal_session_in_finder();
                             ui.close_menu();
                         }
+                        ui.separator();
+                        let export_lbl = self.text("Tracks exportieren … (⇧⌘E)", "Export tracks … (⇧⌘E)");
+                        if ui.add_enabled(self.player.total_samples() > 0 && !self.recorder.is_busy(), egui::Button::new(export_lbl)).clicked() {
+                            self.active_tab = ActiveTab::SplitAndExport;
+                            self.export_page = 0;
+                            self.show_export = true;
+                            ui.close_menu();
+                        }
                     });
 
                     ui.menu_button(self.language.menu_edit(), |ui| {
@@ -1081,6 +1234,122 @@ impl eframe::App for TapeDigizerApp {
                         }
                         if ui.button(format!("{} (⇧⌘Z)", self.language.menu_redo())).clicked() {
                             self.undo_marker_edit(true);
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button(self.language.menu_view(), |ui| {
+                        if ui.button(format!("{} (⌘1)", self.text("Aufnahme", "Record"))).clicked() {
+                            self.active_tab = ActiveTab::Recording;
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!self.recorder.is_busy(), egui::Button::new(format!("{} (⌘2)", self.text("Pegel", "Levels")))).clicked() {
+                            self.active_tab = ActiveTab::Diagnosis;
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!self.recorder.is_busy(), egui::Button::new(format!("{} (⌘3)", self.text("Schnitt", "Edit")))).clicked() {
+                            self.active_tab = ActiveTab::SplitAndExport;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button(format!("{} (F)", self.language.menu_toggle_filter_studio())).clicked() {
+                            self.denoiser_panel_active = !self.denoiser_panel_active;
+                            if self.denoiser_panel_active {
+                                self.magnifier_scope_active = false;
+                                self.refresh_noise_presets();
+                                self.active_tab = ActiveTab::SplitAndExport;
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button(format!("{} (L)", self.language.menu_toggle_scope())).clicked() {
+                            self.magnifier_scope_active = !self.magnifier_scope_active;
+                            if self.magnifier_scope_active {
+                                self.denoiser_panel_active = false;
+                                self.active_tab = ActiveTab::SplitAndExport;
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button(self.language.menu_toggle_tracks()).clicked() {
+                            self.show_tracks = !self.show_tracks;
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button(self.language.menu_filter(), |ui| {
+                        if ui.button(format!("{} (F)", self.language.menu_toggle_filter_studio())).clicked() {
+                            self.denoiser_panel_active = !self.denoiser_panel_active;
+                            if self.denoiser_panel_active {
+                                self.magnifier_scope_active = false;
+                                self.refresh_noise_presets();
+                                self.active_tab = ActiveTab::SplitAndExport;
+                            }
+                            ui.close_menu();
+                        }
+                        let live_lbl = if self.denoiser_params.enabled {
+                            self.text("Echtzeit-Filter: AUS schalten", "Turn Real-Time Filter OFF")
+                        } else {
+                            self.text("Echtzeit-Filter: AN schalten", "Turn Real-Time Filter ON")
+                        };
+                        if ui.button(live_lbl).clicked() {
+                            self.denoiser_params.enabled = !self.denoiser_params.enabled;
+                            self.player.set_denoiser_params(self.denoiser_params.clone());
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(self.player.total_samples() > 0, egui::Button::new(self.language.menu_learn_noise())).clicked() {
+                            let total_sec = self.player.total_seconds();
+                            let cur_sec = self.player.current_seconds();
+                            let (s0, s1) = self.active_selection_or_window(total_sec, cur_sec);
+                            self.learn_noise_from_region(s0, s1);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        let has_audio = self.player.total_samples() > 0;
+                        let can_bake = has_audio && (self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled);
+                        let total_sec = self.player.total_seconds();
+                        let cur_sec = self.player.current_seconds();
+                        let tracks = self.splitter.get_tracks(total_sec);
+                        let cur_track = self.selected_segment_idx.or_else(|| {
+                            tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds).map(|t| t.segment_index)
+                        }).and_then(|idx| tracks.iter().find(|t| t.segment_index == idx && !t.is_pause));
+
+                        let bake_track_lbl = if let Some(ref t) = cur_track {
+                            format!("{} (Track {:02})", self.language.menu_bake_selected_track(), t.index)
+                        } else {
+                            self.language.menu_bake_selected_track().to_string()
+                        };
+                        if ui.add_enabled(can_bake && cur_track.is_some(), egui::Button::new(bake_track_lbl)).clicked() {
+                            if let Some(t) = cur_track {
+                                self.bake_denoiser_into_track(ctx, t.segment_index);
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(can_bake, egui::Button::new(self.language.menu_bake_all())).clicked() {
+                            self.bake_denoiser_into_recording(ctx);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.add_enabled(!tracks.is_empty(), egui::Button::new(self.language.menu_filter_all_tracks())).clicked() {
+                            self.splitter.set_all_tracks_filtered(tracks.len(), true);
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!tracks.is_empty(), egui::Button::new(self.language.menu_filter_no_tracks())).clicked() {
+                            self.splitter.set_all_tracks_filtered(tracks.len(), false);
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!tracks.is_empty(), egui::Button::new(self.language.menu_toggle_track_filter())).clicked() {
+                            let seg_idx = self.selected_segment_idx.unwrap_or(0);
+                            self.splitter.toggle_track_filter(seg_idx);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        let hp_lbl = if self.export_highpass_20hz {
+                            self.text("20 Hz Subsonic-Filter: AUS schalten", "Turn 20 Hz Subsonic Filter OFF")
+                        } else {
+                            self.text("20 Hz Subsonic-Filter: AN schalten", "Turn 20 Hz Subsonic Filter ON")
+                        };
+                        if ui.button(hp_lbl).clicked() {
+                            self.export_highpass_20hz = !self.export_highpass_20hz;
+                            self.save_config();
                             ui.close_menu();
                         }
                     });
@@ -1325,7 +1594,14 @@ impl TapeDigizerApp {
                 self.add_marker(position);
             }
             let lupe = self.text("🔍 Schnitt-Lupe · L", "🔍 Cut Magnifier · L");
-            ui.toggle_value(&mut self.magnifier_scope_active, lupe);
+            if ui.toggle_value(&mut self.magnifier_scope_active, lupe).clicked() && self.magnifier_scope_active {
+                self.denoiser_panel_active = false;
+            }
+            let denoise_lbl = self.text("🔇 Rausch- & DC-Filter · F", "🔇 Noise & DC Filter · F");
+            if ui.toggle_value(&mut self.denoiser_panel_active, denoise_lbl).clicked() && self.denoiser_panel_active {
+                self.magnifier_scope_active = false;
+                self.refresh_noise_presets();
+            }
             let tracks = self.text("Trackliste", "Track list");
             ui.toggle_value(&mut self.show_tracks, tracks);
             if ui.add_enabled(total > 0.0, primary_button(self.text("Exportieren … · ⇧⌘E", "Export … · ⇧⌘E"))).clicked() {
@@ -1824,6 +2100,7 @@ impl TapeDigizerApp {
         }
 
         let show_scope = self.magnifier_scope_active && has_audio;
+        let show_denoiser = self.denoiser_panel_active && has_audio;
         let wf_height = (ui.available_height() * 0.34).clamp(124.0, 240.0);
 
         // Full-width main Stereo Waveform always at the top
@@ -1831,7 +2108,14 @@ impl TapeDigizerApp {
         ui.add_space(4.0);
 
         let tracks = self.splitter.get_tracks(total_sec);
-        if show_scope && self.show_tracks {
+        if show_denoiser && self.show_tracks {
+            ui.columns(2, |columns| {
+                self.render_track_list(&mut columns[0], &tracks);
+                self.render_denoiser_and_cut_panel(&mut columns[1], total_sec, cur_sec);
+            });
+        } else if show_denoiser {
+            self.render_denoiser_and_cut_panel(ui, total_sec, cur_sec);
+        } else if show_scope && self.show_tracks {
             ui.columns(2, |columns| {
                 self.render_track_list(&mut columns[0], &tracks);
                 self.render_detail_panel(&mut columns[1], total_sec, cur_sec);
@@ -1860,10 +2144,17 @@ impl TapeDigizerApp {
                 ui.separator();
                 let preview = self.text("Vorhören", "Audition");
                 let detail = self.text("🔍 Lupe", "🔍 Scope");
+                let flt = self.text("🔇 Filter", "🔇 Filter");
                 let zc_lbl = self.text("0-Snap", "0-Snap");
                 let zc_tip = self.text("Schnittmarken automatisch auf Nulldurchgang einrasten (verhindert Knackser)", "Snap markers to zero crossings to prevent clicks");
                 ui.toggle_value(&mut self.hover_preview_enabled, format!("{preview}·H"));
-                ui.toggle_value(&mut self.magnifier_scope_active, format!("{detail}·L"));
+                if ui.toggle_value(&mut self.magnifier_scope_active, format!("{detail}·L")).clicked() && self.magnifier_scope_active {
+                    self.denoiser_panel_active = false;
+                }
+                if ui.toggle_value(&mut self.denoiser_panel_active, format!("{flt}·F")).clicked() && self.denoiser_panel_active {
+                    self.magnifier_scope_active = false;
+                    self.refresh_noise_presets();
+                }
                 if ui.checkbox(&mut self.zero_crossing_snap, zc_lbl)
                     .on_hover_text(zc_tip)
                     .changed()
@@ -1921,7 +2212,9 @@ impl TapeDigizerApp {
             }
             if let Some((r_start, r_end)) = interaction.new_selected_region {
                 self.set_scope_region((r_start, r_end));
-                self.magnifier_scope_active = true;
+                if !self.denoiser_panel_active {
+                    self.magnifier_scope_active = true;
+                }
             }
             if let Some(target_sec) = interaction.seek_to_seconds {
                 if has_audio {
@@ -2277,6 +2570,14 @@ impl TapeDigizerApp {
                 {
                     self.player.play_range((ref_t - 1.5).max(0.0), (ref_t + 1.5).min(total_sec));
                 }
+                if ui.small_button(self.text("🔇 Rauschfilter & Schnitt", "🔇 Denoise & Cut"))
+                    .on_hover_text(self.text("Wechselt zum Rauschfilter & Originalschnitt-Studio (Taste F)", "Switch to Denoise & Original Cut Studio (Key F)"))
+                    .clicked()
+                {
+                    self.denoiser_panel_active = true;
+                    self.magnifier_scope_active = false;
+                    self.refresh_noise_presets();
+                }
 
                 if self.show_transients && !transients.is_empty() {
                     ui.separator();
@@ -2305,6 +2606,927 @@ impl TapeDigizerApp {
         });
     }
 
+    fn refresh_noise_presets(&mut self) {
+        self.saved_noise_presets = NoisePresetManager::list_presets();
+        if let Some(ref active) = self.active_noise_profile {
+            self.selected_preset_idx = self.saved_noise_presets.iter().position(|p| p.name == active.name);
+        }
+    }
+
+    fn active_selection_or_window(&self, total_sec: f64, cur_sec: f64) -> (f64, f64) {
+        if let Some((s, e)) = self.selected_region {
+            if e > s + 0.05 {
+                return (s.clamp(0.0, total_sec), e.clamp(0.0, total_sec));
+            }
+        }
+        let start = cur_sec.clamp(0.0, (total_sec - 0.5).max(0.0));
+        let end = (start + 2.0).min(total_sec);
+        (start, end)
+    }
+
+    fn learn_noise_from_region(&mut self, start_sec: f64, end_sec: f64) {
+        let sr = self.player.sample_rate();
+        let left = self.player.get_samples_l();
+        let right = self.player.get_samples_r();
+        let len = left.len().min(right.len());
+        if sr == 0 || len == 0 {
+            return;
+        }
+        let s_idx = ((start_sec * f64::from(sr)).round() as usize).min(len);
+        let e_idx = ((end_sec * f64::from(sr)).round() as usize).min(len);
+        if e_idx <= s_idx {
+            return;
+        }
+        let slice_l = left[s_idx..e_idx].to_vec();
+        let slice_r = right[s_idx..e_idx].to_vec();
+        let default_name = format!(
+            "{} ({})",
+            self.tape_name.trim(),
+            self.media_source.label(self.language)
+        );
+        match NoiseProfile::learn_from_samples(
+            &slice_l,
+            &slice_r,
+            sr,
+            &default_name,
+            self.media_source.label(Language::En),
+        ) {
+            Ok(profile) => {
+                if self.preset_save_name.trim().is_empty() {
+                    self.preset_save_name = default_name;
+                }
+                self.active_noise_samples = Some((slice_l, slice_r, sr));
+                self.active_noise_profile = Some(profile.clone());
+                self.selected_preset_idx = None;
+                self.denoiser_params.enabled = true;
+                self.player.set_noise_profile(Some(profile));
+                self.player.set_denoiser_params(self.denoiser_params.clone());
+                self.ui_error_message = None;
+                self.last_saved_bytes_info = Some(
+                    self.text(
+                        "✓ Rauschmuster aus Auswahl gelernt & Vorhören aktiviert",
+                        "✓ Learned noise print from selection & enabled audition",
+                    )
+                    .to_string(),
+                );
+            }
+            Err(err) => {
+                self.ui_error_message = Some(err);
+            }
+        }
+    }
+
+    fn save_current_noise_preset(&mut self) {
+        let name = if self.preset_save_name.trim().is_empty() {
+            format!("{} Rauschen", self.tape_name.trim())
+        } else {
+            self.preset_save_name.trim().to_string()
+        };
+        let media = self.media_source.label(Language::En).to_string();
+
+        let res = if let Some((ref sl, ref sr, rate)) = self.active_noise_samples {
+            NoisePresetManager::save_preset(&name, &media, sl, sr, rate)
+        } else if let Some((r_start, r_end)) = self.selected_region {
+            let rate = self.player.sample_rate();
+            let left = self.player.get_samples_l();
+            let right = self.player.get_samples_r();
+            let len = left.len().min(right.len());
+            let s_idx = ((r_start * f64::from(rate)).round() as usize).min(len);
+            let e_idx = ((r_end * f64::from(rate)).round() as usize).min(len);
+            if e_idx > s_idx {
+                let sl = left[s_idx..e_idx].to_vec();
+                let sr_vec = right[s_idx..e_idx].to_vec();
+                self.active_noise_samples = Some((sl.clone(), sr_vec.clone(), rate));
+                NoisePresetManager::save_preset(&name, &media, &sl, &sr_vec, rate)
+            } else {
+                Err(self.text("Bitte zuerst einen Rausch-Bereich auswählen.", "Please select a noise region first.").into())
+            }
+        } else {
+            Err(self.text("Kein Rausch-Sample zum Speichern vorhanden.", "No noise sample available to save.").into())
+        };
+
+        match res {
+            Ok((profile, wav_path)) => {
+                self.active_noise_profile = Some(profile.clone());
+                self.player.set_noise_profile(Some(profile));
+                self.denoiser_params.enabled = true;
+                self.player.set_denoiser_params(self.denoiser_params.clone());
+                self.refresh_noise_presets();
+                self.ui_error_message = None;
+                self.last_saved_bytes_info = Some(format!(
+                    "✓ Preset gespeichert (App & Logic AU): {}",
+                    wav_path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            Err(err) => self.ui_error_message = Some(err),
+        }
+    }
+
+    fn cut_or_trim_original_recording(&mut self, ctx: &egui::Context, crop_to_selection: bool) {
+        let Some((r_start, r_end)) = self.selected_region else {
+            self.ui_error_message = Some(
+                self.text(
+                    "Bitte markiere zuerst mit 'Bereich·R' einen Abschnitt in der Wellenform.",
+                    "Please select a time range on the waveform using 'Range·R' first.",
+                )
+                .into(),
+            );
+            return;
+        };
+        let left = self.player.get_samples_l();
+        let right = self.player.get_samples_r();
+        let sr = self.player.sample_rate();
+        let mut markers = self.splitter.snapshot();
+        let audio_path = self.current_audio_path.clone();
+        let overwrite = self.auto_overwrite_original_wav;
+        let is_de = self.language == Language::De;
+
+        self.player.pause();
+        let label = if crop_to_selection {
+            self.text("Aufnahme wird auf Auswahl getrimmt …", "Trimming recording to selection …")
+        } else {
+            self.text("Auswahl wird aus Aufnahme geschnitten …", "Cutting selection from recording …")
+        };
+
+        self.start_job(ctx, label, move || {
+            let old_bytes = audio_path
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len());
+
+            let (new_l, new_r) = if crop_to_selection {
+                crop_trim_audio_to_range(&left, &right, sr, r_start, r_end, &mut markers)?
+            } else {
+                cut_delete_audio_range(&left, &right, sr, r_start, r_end, &mut markers)?
+            };
+
+            let status_msg = if overwrite {
+                if let Some(ref target) = audio_path {
+                    write_stereo_wav_atomic(target, &new_l, &new_r, sr)?;
+                    let new_bytes = std::fs::metadata(target).ok().map(|m| m.len());
+                    if let (Some(old_b), Some(new_b)) = (old_bytes, new_bytes) {
+                        let saved_mb = (old_b.saturating_sub(new_b) as f64) / (1024.0 * 1024.0);
+                        Some(if is_de {
+                            format!("✓ Original-WAV ohne Backup überschrieben (−{saved_mb:.1} MB Speicherplatz gespart)")
+                        } else {
+                            format!("✓ Overwrote original WAV without backup (−{saved_mb:.1} MB disk space saved)")
+                        })
+                    } else {
+                        Some(if is_de {
+                            "✓ Original-WAV direkt überschrieben".into()
+                        } else {
+                            "✓ Overwrote original WAV directly".into()
+                        })
+                    }
+                } else {
+                    None
+                }
+            } else {
+                Some(if is_de {
+                    "✓ Schnitt im Speicher angewendet (zum Sichern 'WAV speichern' klicken)".into()
+                } else {
+                    "✓ Applied cut in memory (click 'Save WAV' to write to disk)".into()
+                })
+            };
+
+            let decoded = DecodedAudio {
+                left: new_l,
+                right: new_r,
+                sample_rate: sr,
+            };
+            let waveform = WaveformCache::build(&decoded);
+            let report = analyze_samples(&decoded.left, &decoded.right, sr)?;
+            Ok(JobResult::AudioModified {
+                audio: decoded,
+                waveform,
+                report,
+                markers,
+                status_msg,
+                disable_live_denoiser: false,
+            })
+        });
+    }
+
+    fn bake_denoiser_into_recording(&mut self, ctx: &egui::Context) {
+        let left = self.player.get_samples_l();
+        let right = self.player.get_samples_r();
+        let sr = self.player.sample_rate();
+        if left.is_empty() || sr == 0 {
+            return;
+        }
+        let markers = self.splitter.snapshot();
+        let profile = self.active_noise_profile.clone();
+        let mut params = self.denoiser_params.clone();
+        params.enabled = true;
+        params.audition_mode = AuditionMode::Wet;
+        let audio_path = self.current_audio_path.clone();
+        let overwrite = self.auto_overwrite_original_wav;
+        let is_de = self.language == Language::De;
+
+        self.player.pause();
+        self.start_job(
+            ctx,
+            self.text(
+                "Rausch- & DC-Filter wird in Aufnahme eingerechnet …",
+                "Applying noise & DC filter to recording …",
+            ),
+            move || {
+                let (clean_l, clean_r) =
+                    SpectralDenoiser::process_offline_stereo(&left, &right, sr, profile, &params);
+                let status_msg = if overwrite {
+                    if let Some(ref target) = audio_path {
+                        write_stereo_wav_atomic(target, &clean_l, &clean_r, sr)?;
+                        Some(if is_de {
+                            "✓ Aufnahme entrauscht & Original-WAV direkt aktualisiert".into()
+                        } else {
+                            "✓ Denoised recording & updated original WAV directly".into()
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(if is_de {
+                        "✓ Filter in Aufnahme eingerechnet".into()
+                    } else {
+                        "✓ Baked filter into recording".into()
+                    })
+                };
+                let decoded = DecodedAudio {
+                    left: clean_l,
+                    right: clean_r,
+                    sample_rate: sr,
+                };
+                let waveform = WaveformCache::build(&decoded);
+                let report = analyze_samples(&decoded.left, &decoded.right, sr)?;
+                Ok(JobResult::AudioModified {
+                    audio: decoded,
+                    waveform,
+                    report,
+                    markers,
+                    status_msg,
+                    disable_live_denoiser: true,
+                })
+            },
+        );
+    }
+
+    fn bake_denoiser_into_track(&mut self, ctx: &egui::Context, segment_idx: usize) {
+        let left = self.player.get_samples_l();
+        let right = self.player.get_samples_r();
+        let sr = self.player.sample_rate();
+        let total_sec = self.player.total_seconds();
+        if left.is_empty() || sr == 0 || total_sec <= 0.0 {
+            return;
+        }
+        let tracks = self.splitter.get_tracks(total_sec);
+        let Some(track) = tracks.iter().find(|t| t.segment_index == segment_idx).cloned() else {
+            return;
+        };
+
+        let s0 = (track.start_seconds * sr as f64).round() as usize;
+        let s1 = ((track.end_seconds * sr as f64).round() as usize).min(left.len());
+        if s0 >= s1 || s0 >= left.len() {
+            return;
+        }
+
+        let markers = self.splitter.snapshot();
+        let profile = self.active_noise_profile.clone();
+        let mut params = self.denoiser_params.clone();
+        params.enabled = true;
+        params.audition_mode = AuditionMode::Wet;
+        let audio_path = self.current_audio_path.clone();
+        let overwrite = self.auto_overwrite_original_wav;
+        let is_de = self.language == Language::De;
+        let track_name = track.title.clone();
+        let track_idx = track.index;
+
+        self.player.pause();
+        let job_lbl = if is_de {
+            "Rauschfilter wird in Track eingerechnet …"
+        } else {
+            "Applying noise filter to track …"
+        };
+        self.start_job(
+            ctx,
+            job_lbl,
+            move || {
+                let track_slice_l = &left[s0..s1];
+                let track_slice_r = &right[s0..s1];
+                let (mut clean_l, mut clean_r) =
+                    SpectralDenoiser::process_offline_stereo(track_slice_l, track_slice_r, sr, profile, &params);
+
+                // Crossfade boundary samples (5ms) to prevent clicks
+                let xfade = ((sr as f64 * 0.005).round() as usize).min(clean_l.len() / 4);
+                if xfade > 0 {
+                    for i in 0..xfade {
+                        let w = i as f32 / xfade as f32;
+                        clean_l[i] = track_slice_l[i] * (1.0 - w) + clean_l[i] * w;
+                        clean_r[i] = track_slice_r[i] * (1.0 - w) + clean_r[i] * w;
+
+                        let end_idx = clean_l.len() - 1 - i;
+                        clean_l[end_idx] = track_slice_l[end_idx] * (1.0 - w) + clean_l[end_idx] * w;
+                        clean_r[end_idx] = track_slice_r[end_idx] * (1.0 - w) + clean_r[end_idx] * w;
+                    }
+                }
+
+                let mut out_l = (*left).clone();
+                let mut out_r = (*right).clone();
+                out_l[s0..s1].copy_from_slice(&clean_l);
+                out_r[s0..s1].copy_from_slice(&clean_r);
+
+                let status_msg = if overwrite {
+                    if let Some(ref target) = audio_path {
+                        write_stereo_wav_atomic(target, &out_l, &out_r, sr)?;
+                        Some(if is_de {
+                            format!("✓ Track {:02} („{}“) entrauscht & Original-WAV aktualisiert", track_idx, track_name)
+                        } else {
+                            format!("✓ Track {:02} (\"{}\") denoised & updated original WAV", track_idx, track_name)
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(if is_de {
+                        format!("✓ Filter in Track {:02} („{}“) eingerechnet", track_idx, track_name)
+                    } else {
+                        format!("✓ Baked filter into Track {:02} (\"{}\")", track_idx, track_name)
+                    })
+                };
+
+                let decoded = DecodedAudio {
+                    left: out_l,
+                    right: out_r,
+                    sample_rate: sr,
+                };
+                let waveform = WaveformCache::build(&decoded);
+                let report = analyze_samples(&decoded.left, &decoded.right, sr)?;
+                Ok(JobResult::AudioModified {
+                    audio: decoded,
+                    waveform,
+                    report,
+                    markers,
+                    status_msg,
+                    disable_live_denoiser: false,
+                })
+            },
+        );
+    }
+
+    fn overwrite_original_wav_now(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.current_audio_path.clone() else {
+            return;
+        };
+        let left = self.player.get_samples_l();
+        let right = self.player.get_samples_r();
+        let sr = self.player.sample_rate();
+        let markers = self.splitter.snapshot();
+        let is_de = self.language == Language::De;
+
+        self.start_job(
+            ctx,
+            self.text("Original-WAV wird überschrieben …", "Overwriting original WAV …"),
+            move || {
+                let old_bytes = std::fs::metadata(&target).ok().map(|m| m.len());
+                write_stereo_wav_atomic(&target, &left, &right, sr)?;
+                let new_bytes = std::fs::metadata(&target).ok().map(|m| m.len());
+                let status_msg = if let (Some(old_b), Some(new_b)) = (old_bytes, new_bytes) {
+                    let saved_mb = (old_b.saturating_sub(new_b) as f64) / (1024.0 * 1024.0);
+                    Some(if is_de {
+                        format!("✓ Original-WAV gespeichert (−{saved_mb:.1} MB)")
+                    } else {
+                        format!("✓ Saved original WAV (−{saved_mb:.1} MB)")
+                    })
+                } else {
+                    Some(if is_de { "✓ Original-WAV gespeichert".into() } else { "✓ Saved original WAV".into() })
+                };
+                let decoded = DecodedAudio {
+                    left: (*left).clone(),
+                    right: (*right).clone(),
+                    sample_rate: sr,
+                };
+                let waveform = WaveformCache::build(&decoded);
+                let report = analyze_samples(&decoded.left, &decoded.right, sr)?;
+                Ok(JobResult::AudioModified {
+                    audio: decoded,
+                    waveform,
+                    report,
+                    markers,
+                    status_msg,
+                    disable_live_denoiser: false,
+                })
+            },
+        );
+    }
+
+    fn render_denoiser_and_cut_panel(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64) {
+        let (sel_start, sel_end) = self.active_selection_or_window(total_sec, cur_sec);
+        let sel_dur = (sel_end - sel_start).max(0.0);
+
+        studio_panel(
+            ui,
+            self.text(
+                "Rausch- & DC-Filter-Studio",
+                "Noise & DC Filter Studio",
+            ),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+
+                // -------------------------------------------------------------
+                // ROW 1: ORIGINALE AUFNAHME SCHNEIDEN (OHNE BACKUP SPEICHERN)
+                // -------------------------------------------------------------
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+
+                    let mut r0 = sel_start;
+                    let mut r1 = sel_end;
+                    let r0_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut r0)
+                                .range(0.0..=r1.max(0.05) - 0.05)
+                                .speed(0.05)
+                                .custom_formatter(|s, _| timecode(s))
+                                .custom_parser(parse_timecode),
+                        )
+                        .on_hover_text(self.text("Start der Bereichsauswahl", "Selection start"))
+                        .changed();
+                    ui.label(RichText::new("–").color(TEXT_MUTED).small());
+                    let r1_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut r1)
+                                .range((r0 + 0.05).min(total_sec)..=total_sec)
+                                .speed(0.05)
+                                .custom_formatter(|s, _| timecode(s))
+                                .custom_parser(parse_timecode),
+                        )
+                        .on_hover_text(self.text("Ende der Bereichsauswahl", "Selection end"))
+                        .changed();
+                    if r0_changed || r1_changed {
+                        self.selected_region = Some((r0.min(r1 - 0.05), r1.max(r0 + 0.05)));
+                    }
+
+                    if ui
+                        .small_button(format!("▶{:.1}s", sel_dur))
+                        .on_hover_text(self.text(
+                            "Ausgewählten Bereich vorhören",
+                            "Audition selected range",
+                        ))
+                        .clicked()
+                    {
+                        self.selected_region = Some((sel_start, sel_end));
+                        self.player.play_range(sel_start, sel_end);
+                    }
+
+                    if ui
+                        .add_enabled(
+                            sel_dur >= 0.05,
+                            egui::Button::new(
+                                RichText::new(self.text("✂ Löschen", "✂ Delete")).color(LED_AMBER).small(),
+                            )
+                            .small(),
+                        )
+                        .on_hover_text(self.text(
+                            "Schneidet den markierten Bereich aus der Originalaufnahme heraus (inkl. 5ms Crossfade & Marker-Korrektur)",
+                            "Cuts the selected range out of the original recording (with 5ms crossfade & marker shift)",
+                        ))
+                        .clicked()
+                    {
+                        self.selected_region = Some((sel_start, sel_end));
+                        self.cut_or_trim_original_recording(ui.ctx(), false);
+                    }
+
+                    if ui
+                        .add_enabled(
+                            sel_dur >= 0.1 && sel_dur < total_sec - 0.05,
+                            egui::Button::new(RichText::new(self.text("⬚ Trim", "⬚ Crop")).small()).small(),
+                        )
+                        .on_hover_text(self.text(
+                            "Behält nur den markierten Bereich und entfernt Vor- und Nachlauf der Aufnahme",
+                            "Keeps only the selected range and removes everything before and after",
+                        ))
+                        .clicked()
+                    {
+                        self.selected_region = Some((sel_start, sel_end));
+                        self.cut_or_trim_original_recording(ui.ctx(), true);
+                    }
+
+                    let overwrite_lbl = self.text("WAV direkt", "Direct WAV");
+                    let overwrite_tip = self.text(
+                        "Überschreibt die Original-WAV direkt ohne Sicherheitskopie, um Speicherplatz zu sparen",
+                        "Overwrites the original WAV directly without backup to save disk space",
+                    );
+                    ui.checkbox(
+                        &mut self.auto_overwrite_original_wav,
+                        RichText::new(overwrite_lbl).small(),
+                    )
+                    .on_hover_text(overwrite_tip);
+
+                    if !self.auto_overwrite_original_wav && self.current_audio_path.is_some() {
+                        if ui
+                            .small_button("💾")
+                            .on_hover_text(self.text("Original-WAV jetzt überschreiben", "Overwrite original WAV now"))
+                            .clicked()
+                        {
+                            self.overwrite_original_wav_now(ui.ctx());
+                        }
+                    }
+
+                    if ui
+                        .small_button("🔍")
+                        .on_hover_text(self.text("Zur Schnitt-Lupe wechseln (Taste L)", "Switch to Cut Magnifier (Key L)"))
+                        .clicked()
+                    {
+                        self.magnifier_scope_active = true;
+                        self.denoiser_panel_active = false;
+                    }
+                });
+
+                // -------------------------------------------------------------
+                // ROW 2: RAUSCH-SAMPLE LERNEN & PRESET-VERWALTUNG (WAV + JSON)
+                // -------------------------------------------------------------
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+
+                    let learn_lbl = self.text("🎯 Rauschen lernen", "🎯 Learn Noise");
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(learn_lbl).color(Color32::BLACK).strong().small(),
+                            )
+                            .fill(ACCENT)
+                            .small(),
+                        )
+                        .on_hover_text(self.text(
+                            "Analysiert das Bandrauschen & DC-Signal im gewählten Bereich und aktiviert das Vorhören",
+                            "Analyzes tape hiss & DC offset in the selected region and activates live audition",
+                        ))
+                        .clicked()
+                    {
+                        self.selected_region = Some((sel_start, sel_end));
+                        self.learn_noise_from_region(sel_start, sel_end);
+                    }
+
+                    let active_preset_label = self
+                        .active_noise_profile
+                        .as_ref()
+                        .map(|p| format!("{} ({:.0}dB)", p.name, p.rms_db_l.max(p.rms_db_r)))
+                        .unwrap_or_else(|| self.text("Kein Preset", "No preset").into());
+
+                    egui::ComboBox::from_id_salt("noise_preset_combo")
+                        .width(115.0)
+                        .truncate()
+                        .selected_text(RichText::new(active_preset_label).small())
+                        .show_ui(ui, |ui| {
+                            for (idx, preset) in self.saved_noise_presets.clone().into_iter().enumerate() {
+                                let label = format!(
+                                    "{} · {} ({:.1} dB)",
+                                    preset.name,
+                                    preset.media_source,
+                                    preset.rms_db_l.max(preset.rms_db_r)
+                                );
+                                if ui
+                                    .selectable_label(self.selected_preset_idx == Some(idx), label)
+                                    .clicked()
+                                {
+                                    self.selected_preset_idx = Some(idx);
+                                    self.preset_save_name = preset.name.clone();
+                                    self.active_noise_profile = Some(preset.clone());
+                                    if let Some(ref wav_name) = preset.wav_filename {
+                                        let wav_path = NoisePresetManager::default_presets_dir().join(wav_name);
+                                        if let Ok(decoded) = AudioPlayer::decode_file(&wav_path) {
+                                            self.active_noise_samples =
+                                                Some((decoded.left, decoded.right, decoded.sample_rate));
+                                        }
+                                    }
+                                    self.denoiser_params.enabled = true;
+                                    self.player.set_noise_profile(Some(preset));
+                                    self.player.set_denoiser_params(self.denoiser_params.clone());
+                                }
+                            }
+                        });
+
+                    let preset_hint = self.text("Preset-Name …", "Preset name …");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.preset_save_name)
+                            .desired_width(86.0)
+                            .margin(egui::Margin::symmetric(4.0, 2.0))
+                            .hint_text(preset_hint),
+                    );
+
+                    if ui
+                        .add_enabled(
+                            self.active_noise_profile.is_some() || self.selected_region.is_some(),
+                            egui::Button::new(RichText::new(self.text("💾 Preset", "💾 Save")).small()).small(),
+                        )
+                        .on_hover_text(self.text(
+                            "Speichert die Rausch-Samples als WAV + Spektralprofil für andere Aufnahmen & das Logic Pro AudioUnit",
+                            "Saves noise samples as WAV + spectral profile for other recordings & Logic Pro AudioUnit",
+                        ))
+                        .clicked()
+                    {
+                        self.save_current_noise_preset();
+                    }
+
+                    if ui
+                        .small_button("📂")
+                        .on_hover_text(self.text(
+                            "Externe Rausch-WAV-Datei als Profil laden",
+                            "Load external noise WAV file as profile",
+                        ))
+                        .clicked()
+                    {
+                        let dir = NoisePresetManager::default_presets_dir();
+                        let _ = std::fs::create_dir_all(&dir);
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_directory(&dir)
+                            .add_filter("WAV Audio", &["wav"])
+                            .pick_file()
+                        {
+                            match NoisePresetManager::load_profile_from_wav(&path) {
+                                Ok(prof) => {
+                                    if let Ok(dec) = AudioPlayer::decode_file(&path) {
+                                        self.active_noise_samples = Some((dec.left, dec.right, dec.sample_rate));
+                                    }
+                                    self.preset_save_name = prof.name.clone();
+                                    self.active_noise_profile = Some(prof.clone());
+                                    self.denoiser_params.enabled = true;
+                                    self.player.set_noise_profile(Some(prof));
+                                    self.player.set_denoiser_params(self.denoiser_params.clone());
+                                    self.refresh_noise_presets();
+                                }
+                                Err(e) => self.ui_error_message = Some(e),
+                            }
+                        }
+                    }
+
+                    if let Some(idx) = self.selected_preset_idx {
+                        if ui
+                            .small_button("🗑")
+                            .on_hover_text(self.text("Gewähltes Preset löschen", "Delete selected preset"))
+                            .clicked()
+                        {
+                            if let Some(prof) = self.saved_noise_presets.get(idx).cloned() {
+                                let _ = NoisePresetManager::delete_preset_in_dir(
+                                    &NoisePresetManager::default_presets_dir(),
+                                    &prof,
+                                );
+                                self.selected_preset_idx = None;
+                                self.refresh_noise_presets();
+                            }
+                        }
+                    }
+                });
+
+                // -------------------------------------------------------------
+                // ROW 3: ECHTZEIT-VORHÖREN, REGLER & IN AUFNAHME EINRECHNEN
+                // -------------------------------------------------------------
+                let mut params_changed = false;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.spacing_mut().button_padding = Vec2::new(4.0, 2.0);
+
+                    let active_lbl = if self.denoiser_params.enabled {
+                        self.text("🟢 AN", "🟢 ON")
+                    } else {
+                        self.text("⚪ AUS", "⚪ OFF")
+                    };
+                    if ui
+                        .selectable_label(self.denoiser_params.enabled, RichText::new(active_lbl).small().strong())
+                        .on_hover_text(self.text(
+                            "Schaltet den Echtzeit-Rausch- und DC-Filter für die Wiedergabe ein/aus",
+                            "Toggles real-time noise and DC filtering during playback",
+                        ))
+                        .clicked()
+                    {
+                        self.denoiser_params.enabled = !self.denoiser_params.enabled;
+                        params_changed = true;
+                    }
+
+                    for (mode, label, tip) in [
+                        (
+                            AuditionMode::Wet,
+                            self.text("🎧Wet", "🎧Wet"),
+                            self.text("Spielt das entrauschte & DC-bereinigte Signal", "Plays the denoised & DC-cleaned signal"),
+                        ),
+                        (
+                            AuditionMode::Bypass,
+                            "A/B",
+                            self.text("Unbearbeitetes Signal zum direkten Vergleich", "Unprocessed signal for instant A/B comparison"),
+                        ),
+                        (
+                            AuditionMode::DeltaNoiseOnly,
+                            self.text("🔍Δ", "🔍Δ"),
+                            self.text(
+                                "Spielt NUR das entfernte Rauschen ab – ideal zur Kontrolle, dass keine Musik angegriffen wird",
+                                "Plays ONLY the removed noise – ideal to verify no music harmonics are stripped",
+                            ),
+                        ),
+                    ] {
+                        if ui
+                            .add_enabled(
+                                self.denoiser_params.enabled,
+                                egui::SelectableLabel::new(
+                                    self.denoiser_params.audition_mode == mode,
+                                    RichText::new(label).small(),
+                                ),
+                            )
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.denoiser_params.audition_mode = mode;
+                            params_changed = true;
+                        }
+                    }
+
+                    let dc_tip = self.text(
+                        "Entfernt Gleichspannungs-Offsets (DC) und tieffrequentes Band-/Plattenrumpeln (20 Hz)",
+                        "Removes DC offset and low-frequency tape/turntable rumble (20 Hz)",
+                    );
+                    if ui
+                        .checkbox(&mut self.denoiser_params.dc_filter_enabled, RichText::new("DC").small())
+                        .on_hover_text(dc_tip)
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+
+                    let red_tip = self.text(
+                        "Stärke der Rauschunterdrückung in dB (12–18 dB empfohlen für natürlichen Bandklang)",
+                        "Noise reduction amount in dB (12–18 dB recommended for natural tape tone)",
+                    );
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.denoiser_params.reduction_db)
+                                .range(0.0..=36.0)
+                                .speed(0.2)
+                                .prefix("-")
+                                .suffix("dB"),
+                        )
+                        .on_hover_text(red_tip)
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+
+                    let sens_tip = self.text(
+                        "Empfindlichkeit (Threshold) gegenüber dem gelernten Rauschprofil",
+                        "Sensitivity (Threshold) relative to the learned noise profile",
+                    );
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.denoiser_params.sensitivity)
+                                .range(0.5..=3.5)
+                                .speed(0.02)
+                                .suffix("×"),
+                        )
+                        .on_hover_text(sens_tip)
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+
+                    let smooth_tip = self.text(
+                        "Spektrale und zeitliche Glättung gegen Artefakte (Musical Noise)",
+                        "Spectral and temporal smoothing to prevent musical noise artifacts",
+                    );
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.denoiser_params.smoothing)
+                                .range(0.0..=0.95)
+                                .speed(0.01)
+                                .prefix("S:"),
+                        )
+                        .on_hover_text(smooth_tip)
+                        .changed()
+                    {
+                        params_changed = true;
+                    }
+
+                    let tracks = self.splitter.get_tracks(total_sec);
+                    let target_seg = self.selected_segment_idx.or_else(|| {
+                        tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds).map(|t| t.segment_index)
+                    });
+                    let selected_track = target_seg.and_then(|idx| tracks.iter().find(|t| t.segment_index == idx && !t.is_pause));
+                    let can_apply = self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled;
+
+                    let bake_btn_lbl = self.text("✨ Einrechnen ▼", "✨ Apply ▼");
+                    let bake_tip = self.text(
+                        "Filter permanent einrechnen: Klick für Optionen (nur gewählter Track oder ganze Aufnahme)",
+                        "Bake filter permanently: Click for options (selected track only or entire recording)",
+                    );
+                    ui.add_enabled_ui(can_apply, |ui| {
+                        ui.menu_button(RichText::new(bake_btn_lbl).color(LED_GREEN).strong().small(), |ui| {
+                            if let Some(ref track) = selected_track {
+                                let track_seg = track.segment_index;
+                                let track_txt = if self.language == Language::De {
+                                    format!("Track {:02} filtern („{}“)", track.index, track.title)
+                                } else {
+                                    format!("Filter Track {:02} (\"{}\")", track.index, track.title)
+                                };
+                                if ui.button(track_txt).clicked() {
+                                    self.bake_denoiser_into_track(ui.ctx(), track_seg);
+                                    ui.close_menu();
+                                }
+                            }
+                            let all_txt = self.text("Ganze Aufnahme filtern", "Filter entire recording");
+                            if ui.button(all_txt).clicked() {
+                                self.bake_denoiser_into_recording(ui.ctx());
+                                ui.close_menu();
+                            }
+                        }).response.on_hover_text(bake_tip);
+                    });
+                });
+
+                if params_changed {
+                    self.player.set_denoiser_params(self.denoiser_params.clone());
+                }
+
+                // -------------------------------------------------------------
+                // ROW 4: SPEKTRALES RAUSCHPROFIL-DISPLAY & STATUS
+                // -------------------------------------------------------------
+                let desired_h = (ui.available_height() - 4.0).clamp(24.0, 96.0);
+                let (spec_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), desired_h), egui::Sense::hover());
+                let painter = ui.painter();
+                draw_recessed_well(painter, spec_rect, 4.0, BG_INSET);
+
+                if let Some(ref prof) = self.active_noise_profile {
+                    let num_bars = 48_usize;
+                    let pad_x = 8.0;
+                    let inner_w = (spec_rect.width() - pad_x * 2.0).max(48.0);
+                    let step_w = inner_w / num_bars as f32;
+                    let bar_w = (step_w * 0.72).max(2.0);
+                    let bins = prof.noise_power_l.len().min(prof.noise_power_r.len());
+
+                    for b in 0..num_bars {
+                        let t0 = (b as f32) / (num_bars as f32);
+                        let t1 = ((b + 1) as f32) / (num_bars as f32);
+                        let k0 = ((bins as f32).powf(t0).floor() as usize).clamp(1, bins.saturating_sub(1));
+                        let k1 = ((bins as f32).powf(t1).ceil() as usize).clamp(k0 + 1, bins);
+
+                        let mut sum_p = 0.0_f32;
+                        for k in k0..k1 {
+                            sum_p += 0.5 * (prof.noise_power_l[k] + prof.noise_power_r[k]);
+                        }
+                        let avg_amp = (sum_p / ((k1 - k0).max(1) as f32)).sqrt() / 512.0;
+                        let db = crate::audio::meter::linear_to_db(avg_amp);
+                        let norm_h = ((db + 90.0) / 70.0).clamp(0.06, 1.0);
+                        let bar_h = norm_h * (spec_rect.height() - 8.0);
+                        let x = spec_rect.min.x + pad_x + b as f32 * step_w;
+                        let bar_rect = egui::Rect::from_min_max(
+                            Pos2::new(x, spec_rect.max.y - 3.0 - bar_h),
+                            Pos2::new(x + bar_w, spec_rect.max.y - 3.0),
+                        );
+                        let col = if self.denoiser_params.enabled {
+                            Color32::from_rgba_unmultiplied(56, 189, 248, 175)
+                        } else {
+                            Color32::from_rgba_unmultiplied(120, 130, 150, 110)
+                        };
+                        painter.rect_filled(bar_rect, 1.5, col);
+                    }
+
+                    let dc_pct = (prof.dc_offset_l.abs().max(prof.dc_offset_r.abs())) * 100.0;
+                    let info = if let Some(ref msg) = self.last_saved_bytes_info {
+                        format!(
+                            "{} · {} ({:.1} dB · DC {:.2}%)",
+                            msg,
+                            prof.name,
+                            prof.rms_db_l.max(prof.rms_db_r),
+                            dc_pct
+                        )
+                    } else {
+                        format!(
+                            "Profil: {} · RMS {:.1}/{:.1} dBFS · DC {:.2}% · -{:.1} dB",
+                            prof.name, prof.rms_db_l, prof.rms_db_r, dc_pct, self.denoiser_params.reduction_db
+                        )
+                    };
+                    painter.text(
+                        Pos2::new(spec_rect.min.x + 8.0, spec_rect.min.y + 9.0),
+                        egui::Align2::LEFT_CENTER,
+                        info,
+                        egui::FontId::monospace(9.0),
+                        LED_GREEN,
+                    );
+                } else {
+                    let hint = self.last_saved_bytes_info.as_deref().unwrap_or_else(|| {
+                        self.text(
+                            "Bereich mit Rauschen wählen ('Bereich·R') -> '🎯 Rauschen lernen'",
+                            "Select region with hiss ('Range·R') -> '🎯 Learn Noise'",
+                        )
+                    });
+                    painter.text(
+                        spec_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        hint,
+                        egui::FontId::monospace(9.5),
+                        if self.last_saved_bytes_info.is_some() { LED_GREEN } else { TEXT_SECONDARY },
+                    );
+                }
+            },
+        );
+    }
+
     fn render_track_list(&mut self, ui: &mut Ui, tracks: &[crate::splitter::TrackInfo]) {
         if !self.show_tracks {
             return;
@@ -2324,7 +3546,52 @@ impl TapeDigizerApp {
             ui.horizontal(|ui| {
                 panel_title(ui, self.text("Trackliste", "Track list"));
                 let active_tracks = tracks.iter().filter(|t| !t.is_pause).count();
+                let filtered_tracks = tracks.iter().filter(|t| !t.is_pause && t.is_filtered).count();
                 ui.label(RichText::new(format!("{active_tracks} Tracks")).color(TEXT_SECONDARY).small());
+
+                let filter_menu_lbl = format!("🔇 Filter ({filtered_tracks}/{active_tracks})");
+                ui.menu_button(&filter_menu_lbl, |ui| {
+                    if ui.button(self.text("Alle Tracks filtern", "Filter all tracks")).clicked() {
+                        self.splitter.set_all_tracks_filtered(tracks.len(), true);
+                        ui.close_menu();
+                    }
+                    if ui.button(self.text("Keine Tracks filtern", "Filter no tracks")).clicked() {
+                        self.splitter.set_all_tracks_filtered(tracks.len(), false);
+                        ui.close_menu();
+                    }
+                    if let Some(seg_idx) = self.selected_segment_idx {
+                        if let Some(t) = tracks.iter().find(|t| t.segment_index == seg_idx && !t.is_pause) {
+                            ui.separator();
+                            let toggle_lbl = if self.language == Language::De {
+                                if t.is_filtered {
+                                    format!("Track {:02} nicht filtern", t.index)
+                                } else {
+                                    format!("Track {:02} filtern", t.index)
+                                }
+                            } else if t.is_filtered {
+                                format!("Don't filter Track {:02}", t.index)
+                            } else {
+                                format!("Filter Track {:02}", t.index)
+                            };
+                            if ui.button(toggle_lbl).clicked() {
+                                self.splitter.toggle_track_filter(t.segment_index);
+                                ui.close_menu();
+                            }
+                            if self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled {
+                                let bake_lbl = if self.language == Language::De {
+                                    format!("✨ Track {:02} jetzt filtern (einrechnen)", t.index)
+                                } else {
+                                    format!("✨ Bake filter into Track {:02}", t.index)
+                                };
+                                if ui.button(bake_lbl).clicked() {
+                                    self.bake_denoiser_into_track(ui.ctx(), t.segment_index);
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                    }
+                });
+
                 if ui.small_button(self.text("📋 Liste einfügen", "📋 Paste list"))
                     .on_hover_text(self.text("Mehrere Tracknamen auf einmal einfügen (1 Zeile pro Track)", "Paste multiple track titles at once (1 line per track)"))
                     .clicked()
@@ -2413,8 +3680,8 @@ impl TapeDigizerApp {
                             // Reserve exact space for the compact right-hand controls so the Track Title field
                             // is always >= 20 characters wide (>= 180 pt in split view, >= 520 pt in full view)
                             // while never overflowing the row width.
-                            let right_controls_w = if index > 0 { 184.0 } else { 162.0 };
-                            let title_width = (ui.available_width() - right_controls_w).max(180.0);
+                            let right_controls_w = if index > 0 { 210.0 } else { 188.0 };
+                            let title_width = (ui.available_width() - right_controls_w).max(150.0);
 
                             if track.is_pause {
                                 ui.add_sized(
@@ -2461,6 +3728,42 @@ impl TapeDigizerApp {
                                 .clicked()
                             {
                                 self.player.play_range(track.start_seconds, track.end_seconds);
+                            }
+
+                            if !track.is_pause {
+                                let flt_color = if track.is_filtered { LED_GREEN } else { TEXT_MUTED };
+                                let flt_tip = if self.language == Language::De {
+                                    if track.is_filtered {
+                                        format!("Rauschfilter für Track {:02} AKTIV (Klick zum Deaktivieren)", track.index)
+                                    } else {
+                                        format!("Rauschfilter für Track {:02} AUS (Klick zum Aktivieren)", track.index)
+                                    }
+                                } else if track.is_filtered {
+                                    format!("Noise filter ACTIVE for Track {:02} (Click to disable)", track.index)
+                                } else {
+                                    format!("Noise filter OFF for Track {:02} (Click to enable)", track.index)
+                                };
+                                let btn_resp = ui.small_button(RichText::new("🔇").color(flt_color)).on_hover_text(flt_tip);
+                                if btn_resp.clicked() {
+                                    self.splitter.toggle_track_filter(track.segment_index);
+                                }
+                                btn_resp.context_menu(|ui| {
+                                    let tog_txt = if track.is_filtered {
+                                        self.text("Rauschfilter für diesen Track deaktivieren", "Disable noise filter for this track")
+                                    } else {
+                                        self.text("Rauschfilter für diesen Track aktivieren", "Enable noise filter for this track")
+                                    };
+                                    if ui.button(tog_txt).clicked() {
+                                        self.splitter.toggle_track_filter(track.segment_index);
+                                        ui.close_menu();
+                                    }
+                                    if self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled {
+                                        if ui.button(self.text("✨ Filter jetzt in diesen Track einrechnen", "✨ Bake filter into this track now")).clicked() {
+                                            self.bake_denoiser_into_track(ui.ctx(), track.segment_index);
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
                             }
 
                             let pause_icon = if track.is_pause { "↩" } else { "⏸" };
@@ -2676,6 +3979,22 @@ impl TapeDigizerApp {
                     ui.separator();
                     ui.label(RichText::new("L/R Trim:").color(TEXT_SECONDARY).small());
                     ui.add(egui::DragValue::new(&mut self.export_balance_db).range(-12.0..=12.0).speed(0.1).suffix(" dB"));
+                    if self.active_noise_profile.is_some() {
+                        ui.separator();
+                        let nr_lbl = self.text("Rauschfilter anwenden", "Apply noise filter");
+                        ui.checkbox(&mut self.export_apply_denoiser, nr_lbl);
+                        if self.export_apply_denoiser {
+                            let filtered_tracks_count = tracks.iter().filter(|t| !t.is_pause && t.is_filtered).count();
+                            let total_active_tracks = tracks.iter().filter(|t| !t.is_pause).count();
+                            ui.label(RichText::new(format!("({filtered_tracks_count}/{total_active_tracks} Tracks)")).color(TEXT_SECONDARY).small());
+                            if ui.small_button(self.text("Alle", "All")).on_hover_text(self.text("Filter für alle Tracks aktivieren", "Enable filter for all tracks")).clicked() {
+                                self.splitter.set_all_tracks_filtered(tracks.len(), true);
+                            }
+                            if ui.small_button(self.text("Keine", "None")).on_hover_text(self.text("Filter für alle Tracks deaktivieren", "Disable filter for all tracks")).clicked() {
+                                self.splitter.set_all_tracks_filtered(tracks.len(), false);
+                            }
+                        }
+                    }
                 });
 
                 ui.add_space(8.0);
@@ -2698,6 +4017,24 @@ impl TapeDigizerApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.monospace(track.duration_formatted());
+                        if self.export_apply_denoiser && self.active_noise_profile.is_some() {
+                            let (flt_lbl, flt_col, flt_tip) = if track.is_filtered {
+                                (
+                                    self.text("🔇 Filter", "🔇 Filter"),
+                                    LED_GREEN,
+                                    self.text("Dieser Track wird entrauscht. Klick zum Deaktivieren.", "This track will be denoised. Click to disable."),
+                                )
+                            } else {
+                                (
+                                    self.text("🔈 Bypass", "🔈 Bypass"),
+                                    TEXT_MUTED,
+                                    self.text("Dieser Track wird ungefiltert exportiert. Klick zum Aktivieren.", "This track will be exported unfiltered. Click to enable."),
+                                )
+                            };
+                            if ui.small_button(RichText::new(flt_lbl).color(flt_col).small()).on_hover_text(flt_tip).clicked() {
+                                self.splitter.toggle_track_filter(track.segment_index);
+                            }
+                        }
                         if *exists {
                             ui.colored_label(LED_AMBER, self.text("Existiert bereits", "Already exists"));
                         }
@@ -2725,12 +4062,21 @@ impl TapeDigizerApp {
                     if ui.add_enabled(export_enabled, export).clicked() && self.effective_export_directory() == target {
                         if let Some(source) = self.current_audio_path.clone() {
                             self.export_outcome = None;
+                            let denoiser = if self.export_apply_denoiser && self.active_noise_profile.is_some() {
+                                let mut p = self.denoiser_params.clone();
+                                p.enabled = true;
+                                p.audition_mode = AuditionMode::Wet;
+                                Some((self.active_noise_profile.clone(), p))
+                            } else {
+                                None
+                            };
                             let opts = ExportOptions {
                                 norm_mode: self.normalization_mode.clone(),
                                 highpass_20hz: self.export_highpass_20hz,
                                 fade_ms: self.export_fade_ms,
                                 stereo_balance_db: self.export_balance_db,
                                 artist: (!self.artist_name.trim().is_empty()).then(|| self.artist_name.trim().to_string()),
+                                denoiser,
                             };
                             let progress = Arc::new(ExportProgress::default());
                             let worker_progress = progress.clone();
@@ -2998,6 +4344,16 @@ mod tests {
             export_fade_ms: 15,
             export_balance_db: 0.0,
             export_outcome: None,
+            denoiser_panel_active: false,
+            denoiser_params: DenoiserParams::default(),
+            active_noise_profile: None,
+            active_noise_samples: None,
+            saved_noise_presets: Vec::new(),
+            selected_preset_idx: None,
+            preset_save_name: String::new(),
+            auto_overwrite_original_wav: true,
+            last_saved_bytes_info: None,
+            export_apply_denoiser: true,
             ui_error_message: None,
             job: None,
             saved_edits: None,
@@ -3086,6 +4442,24 @@ mod tests {
                         });
                 });
             }
+        }
+
+        // Also verify the Denoiser & Original Cut Studio panel fits within the minimum workspace
+        app.active_tab = ActiveTab::SplitAndExport;
+        app.magnifier_scope_active = false;
+        app.denoiser_panel_active = true;
+        app.learn_noise_from_region(0.0, 2.0);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(workspace), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(16.0))
+                    .show(ctx, |ui| {
+                        let bounds = ui.max_rect();
+                        app.render_tab_split_export(ui);
+                        assert!(bounds.expand(1.0).contains_rect(ui.min_rect()),
+                            "Denoiser panel extends outside its workspace: {:?} vs {bounds:?}",
+                            ui.min_rect());
+                    });
+            });
         }
 
         // Check the dialog at the minimum window size, including the completion state.

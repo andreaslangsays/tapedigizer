@@ -8,7 +8,7 @@ use objc2_foundation::NSString;
 
 use crate::i18n::Language;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(isize)]
 pub enum Command {
     New = 1,
@@ -23,6 +23,17 @@ pub enum Command {
     Edit,
     Export,
     Quit,
+    ToggleFilterStudio,
+    ToggleScope,
+    ToggleTracks,
+    ToggleLiveFilter,
+    LearnNoise,
+    BakeFilterTrack,
+    BakeFilterAll,
+    FilterAllTracks,
+    FilterNoTracks,
+    ToggleSelectedTrackFilter,
+    ToggleSubsonicFilter,
 }
 
 struct MenuState {
@@ -61,7 +72,28 @@ const COMMANDS: &[Command] = &[
     Command::Edit,
     Command::Export,
     Command::Quit,
+    Command::ToggleFilterStudio,
+    Command::ToggleScope,
+    Command::ToggleTracks,
+    Command::ToggleLiveFilter,
+    Command::LearnNoise,
+    Command::BakeFilterTrack,
+    Command::BakeFilterAll,
+    Command::FilterAllTracks,
+    Command::FilterNoTracks,
+    Command::ToggleSelectedTrackFilter,
+    Command::ToggleSubsonicFilter,
 ];
+
+pub enum MenuItemDef<'a> {
+    Item {
+        command: Command,
+        title: &'a str,
+        key: &'a str,
+        shift: bool,
+    },
+    Separator,
+}
 
 pub struct MacMenu {
     target: Retained<MenuTarget>,
@@ -83,60 +115,85 @@ impl MacMenu {
         let target: Retained<MenuTarget> = unsafe { msg_send![super(target), init] };
         let translated = |de, en| if language == Language::De { de } else { en };
         let file = [
-            (Command::New, language.menu_new_project(), "n", false),
-            (Command::Open, language.menu_open_project(), "o", false),
-            (Command::Save, language.menu_save_project(), "s", false),
-            (Command::SaveAs, language.menu_save_project_as(), "s", true),
-            (Command::Reveal, language.menu_reveal_in_finder(), "", false),
-            (
-                Command::Export,
-                translated("Tracks exportieren …", "Export tracks …"),
-                "e",
-                true,
-            ),
+            MenuItemDef::Item { command: Command::New, title: language.menu_new_project(), key: "n", shift: false },
+            MenuItemDef::Item { command: Command::Open, title: language.menu_open_project(), key: "o", shift: false },
+            MenuItemDef::Separator,
+            MenuItemDef::Item { command: Command::Save, title: language.menu_save_project(), key: "s", shift: false },
+            MenuItemDef::Item { command: Command::SaveAs, title: language.menu_save_project_as(), key: "s", shift: true },
+            MenuItemDef::Separator,
+            MenuItemDef::Item { command: Command::Reveal, title: language.menu_reveal_in_finder(), key: "", shift: false },
+            MenuItemDef::Separator,
+            MenuItemDef::Item {
+                command: Command::Export,
+                title: translated("Tracks exportieren …", "Export tracks …"),
+                key: "e",
+                shift: true,
+            },
         ];
         let edit = [
             // Let the focused text field receive undo/redo keystrokes through egui.
-            (Command::Undo, language.menu_undo(), "", false),
-            (Command::Redo, language.menu_redo(), "", false),
+            MenuItemDef::Item { command: Command::Undo, title: language.menu_undo(), key: "", shift: false },
+            MenuItemDef::Item { command: Command::Redo, title: language.menu_redo(), key: "", shift: false },
         ];
         let view = [
-            (
-                Command::Record,
-                translated("Aufnahme", "Record"),
-                "1",
-                false,
-            ),
-            (Command::Levels, translated("Pegel", "Levels"), "2", false),
-            (Command::Edit, translated("Schnitt", "Edit"), "3", false),
+            MenuItemDef::Item { command: Command::Record, title: translated("Aufnahme", "Record"), key: "1", shift: false },
+            MenuItemDef::Item { command: Command::Levels, title: translated("Pegel", "Levels"), key: "2", shift: false },
+            MenuItemDef::Item { command: Command::Edit, title: translated("Schnitt", "Edit"), key: "3", shift: false },
+            MenuItemDef::Separator,
+            MenuItemDef::Item { command: Command::ToggleFilterStudio, title: language.menu_toggle_filter_studio(), key: "f", shift: false },
+            MenuItemDef::Item { command: Command::ToggleScope, title: language.menu_toggle_scope(), key: "l", shift: false },
+            MenuItemDef::Item { command: Command::ToggleTracks, title: language.menu_toggle_tracks(), key: "t", shift: false },
+        ];
+        let filter = [
+            MenuItemDef::Item { command: Command::ToggleFilterStudio, title: language.menu_toggle_filter_studio(), key: "f", shift: false },
+            MenuItemDef::Item { command: Command::ToggleLiveFilter, title: language.menu_toggle_live_filter(), key: "", shift: false },
+            MenuItemDef::Item { command: Command::LearnNoise, title: language.menu_learn_noise(), key: "", shift: false },
+            MenuItemDef::Separator,
+            MenuItemDef::Item { command: Command::BakeFilterTrack, title: language.menu_bake_selected_track(), key: "", shift: false },
+            MenuItemDef::Item { command: Command::BakeFilterAll, title: language.menu_bake_all(), key: "", shift: false },
+            MenuItemDef::Separator,
+            MenuItemDef::Item { command: Command::FilterAllTracks, title: language.menu_filter_all_tracks(), key: "", shift: false },
+            MenuItemDef::Item { command: Command::FilterNoTracks, title: language.menu_filter_no_tracks(), key: "", shift: false },
+            MenuItemDef::Item { command: Command::ToggleSelectedTrackFilter, title: language.menu_toggle_track_filter(), key: "", shift: false },
+            MenuItemDef::Separator,
+            MenuItemDef::Item { command: Command::ToggleSubsonicFilter, title: language.menu_toggle_subsonic(), key: "", shift: false },
         ];
         let mut groups = Vec::new();
         for (title, entries) in [
             (language.menu_file(), file.as_slice()),
             (language.menu_edit(), edit.as_slice()),
-            (translated("Ansicht", "View"), view.as_slice()),
+            (language.menu_view(), view.as_slice()),
+            (language.menu_filter(), filter.as_slice()),
         ] {
-            let title = NSString::from_str(title);
+            let title_ns = NSString::from_str(title);
             let group = NSMenuItem::new(mtm);
-            group.setTitle(&title);
-            let submenu = NSMenu::initWithTitle(mtm.alloc(), &title);
-            for &(command, title, key, shift) in entries {
-                let item = unsafe {
-                    NSMenuItem::initWithTitle_action_keyEquivalent(
-                        mtm.alloc(),
-                        &NSString::from_str(title),
-                        Some(sel!(tapeDigizerMenuAction:)),
-                        &NSString::from_str(key),
-                    )
-                };
-                if shift {
-                    item.setKeyEquivalentModifierMask(
-                        NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
-                    );
+            group.setTitle(&title_ns);
+            let submenu = NSMenu::initWithTitle(mtm.alloc(), &title_ns);
+            for entry in entries {
+                match entry {
+                    MenuItemDef::Item { command, title, key, shift } => {
+                        let item = unsafe {
+                            NSMenuItem::initWithTitle_action_keyEquivalent(
+                                mtm.alloc(),
+                                &NSString::from_str(title),
+                                Some(sel!(tapeDigizerMenuAction:)),
+                                &NSString::from_str(key),
+                            )
+                        };
+                        if *shift {
+                            item.setKeyEquivalentModifierMask(
+                                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                            );
+                        }
+                        item.setTag(*command as isize);
+                        unsafe { item.setTarget(Some(&target)) };
+                        submenu.addItem(&item);
+                    }
+                    MenuItemDef::Separator => {
+                        let sep = NSMenuItem::separatorItem(mtm);
+                        submenu.addItem(&sep);
+                    }
                 }
-                item.setTag(command as isize);
-                unsafe { item.setTarget(Some(&target)) };
-                submenu.addItem(&item);
             }
             group.setSubmenu(Some(&submenu));
             bar.addItem(&group);

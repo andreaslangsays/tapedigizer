@@ -16,6 +16,7 @@ pub struct TrackInfo {
     pub start_seconds: f64,
     pub end_seconds: f64,
     pub is_pause: bool,
+    pub is_filtered: bool,
 }
 
 impl TrackInfo {
@@ -51,12 +52,14 @@ pub struct MarkerSnapshot {
     pub markers: Vec<f64>,
     pub custom_titles: Vec<String>,
     pub pause_indices: Vec<usize>,
+    pub disabled_filter_indices: Vec<usize>,
 }
 
 pub struct TrackSplitter {
     pub markers: Vec<f64>, // Split points in seconds
     pub custom_titles: Vec<String>,
     pub pause_indices: Vec<usize>, // Segments marked as excluded pauses (wont be exported)
+    pub disabled_filter_indices: Vec<usize>, // Segments that will NOT have the filter applied
     pub undo_stack: Vec<MarkerSnapshot>,
     pub redo_stack: Vec<MarkerSnapshot>,
 }
@@ -67,6 +70,7 @@ impl TrackSplitter {
             markers: Vec::new(),
             custom_titles: Vec::new(),
             pause_indices: Vec::new(),
+            disabled_filter_indices: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -77,6 +81,7 @@ impl TrackSplitter {
             markers: self.markers.clone(),
             custom_titles: self.custom_titles.clone(),
             pause_indices: self.pause_indices.clone(),
+            disabled_filter_indices: self.disabled_filter_indices.clone(),
         }
     }
 
@@ -101,6 +106,7 @@ impl TrackSplitter {
             self.markers = prev.markers;
             self.custom_titles = prev.custom_titles;
             self.pause_indices = prev.pause_indices;
+            self.disabled_filter_indices = prev.disabled_filter_indices;
             true
         } else {
             false
@@ -114,6 +120,7 @@ impl TrackSplitter {
             self.markers = next.markers;
             self.custom_titles = next.custom_titles;
             self.pause_indices = next.pause_indices;
+            self.disabled_filter_indices = next.disabled_filter_indices;
             true
         } else {
             false
@@ -156,6 +163,16 @@ impl TrackSplitter {
             self.pause_indices.push(index + 1);
             self.pause_indices.sort_unstable();
         }
+        let split_disabled = self.disabled_filter_indices.contains(&index);
+        for item in &mut self.disabled_filter_indices {
+            if *item > index {
+                *item += 1;
+            }
+        }
+        if split_disabled {
+            self.disabled_filter_indices.push(index + 1);
+            self.disabled_filter_indices.sort_unstable();
+        }
         Some(index)
     }
 
@@ -173,6 +190,13 @@ impl TrackSplitter {
         for pause in &mut self.pause_indices {
             if *pause > index + 1 {
                 *pause -= 1;
+            }
+        }
+        let merged_disabled = !self.is_track_filtered(index) && !self.is_track_filtered(index + 1);
+        self.disabled_filter_indices.retain(|&p| p != index + 1 && (p != index || merged_disabled));
+        for item in &mut self.disabled_filter_indices {
+            if *item > index + 1 {
+                *item -= 1;
             }
         }
     }
@@ -217,15 +241,17 @@ impl TrackSplitter {
         self.markers = snapshot.markers;
         self.custom_titles = snapshot.custom_titles;
         self.pause_indices = snapshot.pause_indices;
+        self.disabled_filter_indices = snapshot.disabled_filter_indices;
     }
 
     pub fn clear_markers(&mut self) {
-        if !self.markers.is_empty() || !self.pause_indices.is_empty() {
+        if !self.markers.is_empty() || !self.pause_indices.is_empty() || !self.disabled_filter_indices.is_empty() {
             self.push_undo();
         }
         self.markers.clear();
         self.custom_titles.clear();
         self.pause_indices.clear();
+        self.disabled_filter_indices.clear();
     }
 
     pub fn toggle_pause(&mut self, segment_index: usize) {
@@ -241,6 +267,37 @@ impl TrackSplitter {
     #[allow(dead_code)]
     pub fn is_pause(&self, segment_index: usize) -> bool {
         self.pause_indices.contains(&segment_index)
+    }
+
+    pub fn is_track_filtered(&self, segment_index: usize) -> bool {
+        !self.disabled_filter_indices.contains(&segment_index)
+    }
+
+    pub fn set_track_filtered(&mut self, segment_index: usize, filtered: bool) {
+        let is_curr = self.is_track_filtered(segment_index);
+        if is_curr != filtered {
+            self.push_undo();
+            if filtered {
+                self.disabled_filter_indices.retain(|&idx| idx != segment_index);
+            } else if !self.disabled_filter_indices.contains(&segment_index) {
+                self.disabled_filter_indices.push(segment_index);
+                self.disabled_filter_indices.sort_unstable();
+            }
+        }
+    }
+
+    pub fn toggle_track_filter(&mut self, segment_index: usize) {
+        let currently_filtered = self.is_track_filtered(segment_index);
+        self.set_track_filtered(segment_index, !currently_filtered);
+    }
+
+    pub fn set_all_tracks_filtered(&mut self, total_segments: usize, filtered: bool) {
+        self.push_undo();
+        if filtered {
+            self.disabled_filter_indices.clear();
+        } else {
+            self.disabled_filter_indices = (0..total_segments).collect();
+        }
     }
 
     pub fn get_tracks(&self, total_duration: f64) -> Vec<TrackInfo> {
@@ -262,6 +319,7 @@ impl TrackSplitter {
             let start = points[i];
             let end = points[i + 1];
             let is_p = self.pause_indices.contains(&i);
+            let is_f = !self.disabled_filter_indices.contains(&i);
 
             let export_index = if is_p {
                 0
@@ -284,6 +342,7 @@ impl TrackSplitter {
                 start_seconds: start,
                 end_seconds: end,
                 is_pause: is_p,
+                is_filtered: is_f,
             });
         }
 
@@ -454,6 +513,7 @@ pub struct ExportOptions {
     pub fade_ms: u32,
     pub stereo_balance_db: f32,
     pub artist: Option<String>,
+    pub denoiser: Option<(Option<crate::audio::denoiser::NoiseProfile>, crate::audio::denoiser::DenoiserParams)>,
 }
 
 impl Default for ExportOptions {
@@ -464,6 +524,7 @@ impl Default for ExportOptions {
             fade_ms: 0,
             stereo_balance_db: 0.0,
             artist: None,
+            denoiser: None,
         }
     }
 }
@@ -526,7 +587,7 @@ pub fn export_tracks_with_options(
         if path.exists() || !names.insert(path.clone()) {
             return Err(format!("Export destination already exists: {}", path.display()));
         }
-        exports.push((start, end, path));
+        exports.push((start, end, path, track.is_filtered));
     }
     if exports.is_empty() {
         return Err("No tracks to export".into());
@@ -573,7 +634,7 @@ pub fn export_tracks_with_options(
     let mut staged = Vec::new();
     let mut published = Vec::new();
     let result = (|| {
-        for (index, (start, end, destination)) in exports.into_iter().enumerate() {
+        for (index, (start, end, destination, is_track_filtered)) in exports.into_iter().enumerate() {
             let count = end - start;
             let gain = if options.norm_mode == NormalizationMode::PeakPerTrack {
                 peak_scale(read_peak(&mut reader, start, count * channels, || report(index))?)
@@ -592,44 +653,117 @@ pub fn export_tracks_with_options(
             let mut hp_prev_in_r = 0.0_f64;
             let mut hp_prev_out_r = 0.0_f64;
 
-            for frame in 0..count {
-                if frame % 16_384 == 0 { report(index)?; }
-                let raw_l = f64::from(next_pcm(&mut samples)?);
-                let raw_r = if channels == 2 { f64::from(next_pcm(&mut samples)?) } else { raw_l };
-
-                let (filt_l, filt_r) = if options.highpass_20hz {
-                    let out_l = hp_alpha * (hp_prev_out_l + raw_l - hp_prev_in_l);
-                    hp_prev_in_l = raw_l;
-                    hp_prev_out_l = out_l;
-                    let out_r = hp_alpha * (hp_prev_out_r + raw_r - hp_prev_in_r);
-                    hp_prev_in_r = raw_r;
-                    hp_prev_out_r = out_r;
-                    (out_l, out_r)
+            let full_scale_inv = 1.0 / ((1_i64 << (spec.bits_per_sample - 1)) as f32);
+            let full_scale_mul = (1_i64 << (spec.bits_per_sample - 1)) as f64;
+            let mut track_denoiser = options.denoiser.as_ref().and_then(|(prof, params)| {
+                if params.enabled && is_track_filtered {
+                    let mut d = crate::audio::denoiser::SpectralDenoiser::new(spec.sample_rate);
+                    d.set_noise_profile(prof.clone());
+                    let mut p = params.clone();
+                    p.audition_mode = crate::audio::denoiser::AuditionMode::Wet;
+                    Some((d, p))
                 } else {
-                    (raw_l, raw_r)
-                };
+                    None
+                }
+            });
 
-                let fade_env = if fade_frames > 0 && count > fade_frames * 2 {
-                    if frame < fade_frames {
-                        f64::from(frame) / f64::from(fade_frames)
-                    } else if frame >= count - fade_frames {
-                        f64::from(count - 1 - frame) / f64::from(fade_frames)
+            if let Some((ref mut denoiser, ref d_params)) = track_denoiser {
+                // Prime STFT latency window then stream track with 0 latency offset
+                let latency = crate::audio::denoiser::STFT_LATENCY_SAMPLES as u32;
+                let mut last_l = 0.0_f32;
+                let mut last_r = 0.0_f32;
+                let total_steps = count + latency;
+                for step in 0..total_steps {
+                    if step % 16_384 == 0 { report(index)?; }
+                    if step < count {
+                        last_l = (next_pcm(&mut samples)? as f32) * full_scale_inv;
+                        last_r = if channels == 2 {
+                            (next_pcm(&mut samples)? as f32) * full_scale_inv
+                        } else {
+                            last_l
+                        };
+                    }
+                    let (clean_l, clean_r) = denoiser.process_sample(last_l, last_r, d_params);
+                    if step >= latency {
+                        let frame = step - latency;
+                        let raw_l = f64::from(clean_l) * full_scale_mul;
+                        let raw_r = f64::from(clean_r) * full_scale_mul;
+
+                        let (filt_l, filt_r) = if options.highpass_20hz && !d_params.dc_filter_enabled {
+                            let out_l = hp_alpha * (hp_prev_out_l + raw_l - hp_prev_in_l);
+                            hp_prev_in_l = raw_l;
+                            hp_prev_out_l = out_l;
+                            let out_r = hp_alpha * (hp_prev_out_r + raw_r - hp_prev_in_r);
+                            hp_prev_in_r = raw_r;
+                            hp_prev_out_r = out_r;
+                            (out_l, out_r)
+                        } else {
+                            (raw_l, raw_r)
+                        };
+
+                        let fade_env = if fade_frames > 0 && count > fade_frames * 2 {
+                            if frame < fade_frames {
+                                f64::from(frame) / f64::from(fade_frames)
+                            } else if frame >= count - fade_frames {
+                                f64::from(count - 1 - frame) / f64::from(fade_frames)
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        };
+
+                        let enc_l = (filt_l * pcm_factor * gain * bal_gain_l * fade_env)
+                            .round()
+                            .clamp(-8_388_608.0, 8_388_607.0) as i32;
+                        let enc_r = (filt_r * pcm_factor * gain * bal_gain_r * fade_env)
+                            .round()
+                            .clamp(-8_388_608.0, 8_388_607.0) as i32;
+
+                        writer.write_sample(enc_l).map_err(|e| e.to_string())?;
+                        writer.write_sample(enc_r).map_err(|e| e.to_string())?;
+                    }
+                }
+            } else {
+                for frame in 0..count {
+                    if frame % 16_384 == 0 { report(index)?; }
+                    let raw_l = f64::from(next_pcm(&mut samples)?);
+                    let raw_r = if channels == 2 { f64::from(next_pcm(&mut samples)?) } else { raw_l };
+
+                    let (filt_l, filt_r) = if options.highpass_20hz {
+                        let out_l = hp_alpha * (hp_prev_out_l + raw_l - hp_prev_in_l);
+                        hp_prev_in_l = raw_l;
+                        hp_prev_out_l = out_l;
+                        let out_r = hp_alpha * (hp_prev_out_r + raw_r - hp_prev_in_r);
+                        hp_prev_in_r = raw_r;
+                        hp_prev_out_r = out_r;
+                        (out_l, out_r)
+                    } else {
+                        (raw_l, raw_r)
+                    };
+
+                    let fade_env = if fade_frames > 0 && count > fade_frames * 2 {
+                        if frame < fade_frames {
+                            f64::from(frame) / f64::from(fade_frames)
+                        } else if frame >= count - fade_frames {
+                            f64::from(count - 1 - frame) / f64::from(fade_frames)
+                        } else {
+                            1.0
+                        }
                     } else {
                         1.0
-                    }
-                } else {
-                    1.0
-                };
+                    };
 
-                let enc_l = (filt_l * pcm_factor * gain * bal_gain_l * fade_env)
-                    .round()
-                    .clamp(-8_388_608.0, 8_388_607.0) as i32;
-                let enc_r = (filt_r * pcm_factor * gain * bal_gain_r * fade_env)
-                    .round()
-                    .clamp(-8_388_608.0, 8_388_607.0) as i32;
+                    let enc_l = (filt_l * pcm_factor * gain * bal_gain_l * fade_env)
+                        .round()
+                        .clamp(-8_388_608.0, 8_388_607.0) as i32;
+                    let enc_r = (filt_r * pcm_factor * gain * bal_gain_r * fade_env)
+                        .round()
+                        .clamp(-8_388_608.0, 8_388_607.0) as i32;
 
-                writer.write_sample(enc_l).map_err(|e| e.to_string())?;
-                writer.write_sample(enc_r).map_err(|e| e.to_string())?;
+                    writer.write_sample(enc_l).map_err(|e| e.to_string())?;
+                    writer.write_sample(enc_r).map_err(|e| e.to_string())?;
+                }
             }
             writer.finalize().map_err(|e| e.to_string())?;
             report(index + 1)?;
@@ -1138,5 +1272,97 @@ mod tests {
         let snapped = snap_to_zero_crossing(&samples, &samples, sample_rate, 0.0120, 4.0);
         let idx = (snapped * sample_rate as f64).round() as usize;
         assert!(samples[idx].abs() < 0.1, "Snapped sample amplitude {} should be near zero", samples[idx]);
+    }
+
+    #[test]
+    fn test_track_filter_toggle_and_undo() {
+        let mut editor = TrackSplitter::new();
+        editor.markers = vec![10.0, 20.0, 30.0];
+        // 4 tracks: 0, 1, 2, 3
+        assert!(editor.is_track_filtered(0));
+        assert!(editor.is_track_filtered(1));
+
+        // Toggle track 1 off
+        editor.toggle_track_filter(1);
+        assert!(!editor.is_track_filtered(1));
+        assert!(editor.is_track_filtered(0));
+
+        let tracks = editor.get_tracks(40.0);
+        assert!(tracks[0].is_filtered);
+        assert!(!tracks[1].is_filtered);
+        assert!(tracks[2].is_filtered);
+        assert!(tracks[3].is_filtered);
+
+        // Undo restores track 1 to filtered
+        assert!(editor.undo());
+        assert!(editor.is_track_filtered(1));
+
+        // Redo disables it again
+        assert!(editor.redo());
+        assert!(!editor.is_track_filtered(1));
+
+        // Disable all tracks
+        editor.set_all_tracks_filtered(4, false);
+        assert!(!editor.is_track_filtered(0));
+        assert!(!editor.is_track_filtered(1));
+        assert!(!editor.is_track_filtered(2));
+        assert!(!editor.is_track_filtered(3));
+
+        // Enable all tracks
+        editor.set_all_tracks_filtered(4, true);
+        assert!(editor.is_track_filtered(0));
+        assert!(editor.is_track_filtered(1));
+    }
+
+    #[test]
+    fn test_export_tracks_with_per_track_filtering() {
+        use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+        let base = std::env::temp_dir();
+        let (source, file) = crate::project::unique_file(&base, "tapedigizer-filter-export-test", "wav").unwrap();
+        let output = source.with_extension("filter_output");
+        // 1.0s at 48 kHz stereo = 96,000 samples
+        let samples: Vec<i32> = (0..96_000).map(|i| if i % 2 == 0 { 100_000 } else { -100_000 }).collect();
+        let mut writer = WavWriter::new(file, WavSpec {
+            channels: 2, sample_rate: 48_000, bits_per_sample: 24, sample_format: SampleFormat::Int,
+        }).unwrap();
+        for &sample in &samples {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let mut editor = TrackSplitter::new();
+        editor.markers = vec![0.5]; // Split at 0.5s into 2 tracks
+        // Disable filtering for track 0, leave track 1 enabled
+        editor.set_track_filtered(0, false);
+        let tracks = editor.get_tracks(1.0);
+        assert_eq!(tracks.len(), 2);
+        assert!(!tracks[0].is_filtered);
+        assert!(tracks[1].is_filtered);
+
+        let mut denoiser_params = crate::audio::denoiser::DenoiserParams::default();
+        denoiser_params.enabled = true;
+        denoiser_params.reduction_db = 18.0;
+
+        let options = ExportOptions {
+            norm_mode: NormalizationMode::None,
+            denoiser: Some((None, denoiser_params)),
+            ..ExportOptions::default()
+        };
+
+        let proceed = |_, _| true;
+        let paths = export_tracks_with_options(&source, &output, &tracks, &options, proceed).unwrap();
+        assert_eq!(paths.len(), 2);
+
+        let r0: Vec<i32> = WavReader::open(&paths[0]).unwrap().samples::<i32>().map(|s| s.unwrap()).collect();
+        let r1: Vec<i32> = WavReader::open(&paths[1]).unwrap().samples::<i32>().map(|s| s.unwrap()).collect();
+
+        // Track 0 was NOT filtered, so samples match original (first 48,000 samples)
+        assert_eq!(r0, &samples[..48_000]);
+        // Track 1 was filtered by denoiser
+        assert_eq!(r1.len(), 48_000);
+
+        // Cleanup
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_dir_all(output);
     }
 }

@@ -153,6 +153,84 @@ impl Language {
             Language::En => "Edit",
         }
     }
+    pub fn menu_view(&self) -> &'static str {
+        match self {
+            Language::De => "Ansicht",
+            Language::En => "View",
+        }
+    }
+    pub fn menu_filter(&self) -> &'static str {
+        match self {
+            Language::De => "Filter",
+            Language::En => "Filter",
+        }
+    }
+    pub fn menu_toggle_filter_studio(&self) -> &'static str {
+        match self {
+            Language::De => "Rausch- & DC-Filter-Studio",
+            Language::En => "Noise & DC Filter Studio",
+        }
+    }
+    pub fn menu_toggle_scope(&self) -> &'static str {
+        match self {
+            Language::De => "Schnitt-Lupe",
+            Language::En => "Cut Magnifier",
+        }
+    }
+    pub fn menu_toggle_tracks(&self) -> &'static str {
+        match self {
+            Language::De => "Trackliste",
+            Language::En => "Track List",
+        }
+    }
+    pub fn menu_toggle_live_filter(&self) -> &'static str {
+        match self {
+            Language::De => "Echtzeit-Filterung umschalten",
+            Language::En => "Toggle Real-Time Filter",
+        }
+    }
+    pub fn menu_learn_noise(&self) -> &'static str {
+        match self {
+            Language::De => "Bandrauschen aus Auswahl lernen",
+            Language::En => "Learn Tape Noise from Selection",
+        }
+    }
+    pub fn menu_bake_selected_track(&self) -> &'static str {
+        match self {
+            Language::De => "Filter in gewählten Track einrechnen …",
+            Language::En => "Bake Filter into Selected Track …",
+        }
+    }
+    pub fn menu_bake_all(&self) -> &'static str {
+        match self {
+            Language::De => "Filter in gesamte Aufnahme einrechnen …",
+            Language::En => "Bake Filter into Entire Recording …",
+        }
+    }
+    pub fn menu_filter_all_tracks(&self) -> &'static str {
+        match self {
+            Language::De => "Alle Tracks filtern (Export)",
+            Language::En => "Filter All Tracks (Export)",
+        }
+    }
+    pub fn menu_filter_no_tracks(&self) -> &'static str {
+        match self {
+            Language::De => "Keine Tracks filtern (Export)",
+            Language::En => "Filter No Tracks (Export)",
+        }
+    }
+    pub fn menu_toggle_track_filter(&self) -> &'static str {
+        match self {
+            Language::De => "Filter für gewählten Track umschalten",
+            Language::En => "Toggle Filter for Selected Track",
+        }
+    }
+    pub fn menu_toggle_subsonic(&self) -> &'static str {
+        match self {
+            Language::De => "20 Hz Subsonic- & Rumpelfilter umschalten",
+            Language::En => "Toggle 20 Hz Subsonic Rumble Filter",
+        }
+    }
     pub fn menu_undo(&self) -> &'static str {
         match self {
             Language::De => "Widerrufen",

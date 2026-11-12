@@ -49,6 +49,8 @@ pub fn studio_wordmark(ui: &mut Ui) {
     ui.painter().circle_stroke(mark.center(), 7.0, Stroke::new(1.2, ACCENT));
     ui.painter().circle_filled(mark.center(), 2.5, ACCENT);
     ui.label(RichText::new("TapeDigizer").size(16.0).strong().color(ACCENT));
+    ui.add_space(2.0);
+    ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(TEXT_SECONDARY).monospace());
 }
 
 pub fn studio_panel(ui: &mut Ui, title: &str, contents: impl FnOnce(&mut Ui)) {

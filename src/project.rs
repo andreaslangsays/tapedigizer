@@ -88,6 +88,8 @@ pub struct TapeDigizerProject {
     pub custom_titles: Vec<String>,
     #[serde(default)]
     pub pause_indices: Vec<usize>,
+    #[serde(default)]
+    pub disabled_filter_indices: Vec<usize>,
     pub normalization_mode: String,
     pub created_at: String,
 }
@@ -100,6 +102,7 @@ impl TapeDigizerProject {
         markers: Vec<f64>,
         custom_titles: Vec<String>,
         pause_indices: Vec<usize>,
+        disabled_filter_indices: Vec<usize>,
         normalization_mode: String,
     ) -> Self {
         Self {
@@ -110,6 +113,7 @@ impl TapeDigizerProject {
             markers,
             custom_titles,
             pause_indices,
+            disabled_filter_indices,
             normalization_mode,
             created_at: chrono_like_now(),
         }
@@ -301,7 +305,7 @@ mod tests {
         drop(handle);
         std::fs::write(&file, b"original project").unwrap();
         let source = file.with_extension("wav");
-        let project = TapeDigizerProject::new("Test".into(), TapeSide::SideA, "".into(), vec![], vec![], vec![], "none".into());
+        let project = TapeDigizerProject::new("Test".into(), TapeSide::SideA, "".into(), vec![], vec![], vec![], vec![], "none".into());
         assert!(project.save_to_file(&file, Some(&source)).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), b"original project");
         std::fs::write(&source, b"original audio").unwrap();
@@ -326,6 +330,7 @@ mod tests {
             vec![12.5, 45.0],
             vec!["Track 01".into(), "Track 02".into(), "Track 03".into()],
             vec![1],
+            vec![2],
             "track".into(),
         );
 
@@ -339,6 +344,7 @@ mod tests {
         assert_eq!(loaded.markers, vec![12.5, 45.0]);
         assert_eq!(loaded.custom_titles.len(), 3);
         assert_eq!(loaded.pause_indices, vec![1]);
+        assert_eq!(loaded.disabled_filter_indices, vec![2]);
         assert!(audio_path.unwrap().is_file());
 
         let _ = std::fs::remove_dir_all(&temp_dir);

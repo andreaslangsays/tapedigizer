@@ -2,5 +2,7 @@
 .DS_Store
 *.wav
 TapeDigizer.app
+*.component
+*.pkg
 
 

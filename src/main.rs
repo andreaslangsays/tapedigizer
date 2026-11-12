@@ -32,7 +32,7 @@ fn app_icon() -> egui::IconData {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("TapeDigizer")
+            .with_title(format!("TapeDigizer v{}", env!("CARGO_PKG_VERSION")))
             .with_icon(app_icon())
             .with_inner_size([1260.0, 820.0])
             .with_min_inner_size([1060.0, 700.0]),

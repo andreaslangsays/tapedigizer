@@ -4,11 +4,67 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
+use crate::audio::denoiser::{DenoiserParams, NoiseProfile, SpectralDenoiser, STFT_LATENCY_SAMPLES};
 
 pub struct DecodedAudio {
     pub left: Vec<f32>,
     pub right: Vec<f32>,
     pub sample_rate: u32,
+}
+
+pub(crate) struct PlayerDenoiserState {
+    pub params: DenoiserParams,
+    pub denoiser: Box<SpectralDenoiser>,
+    pub initialized: bool,
+    pub cur_idx: usize,
+    pub cur_out: (f32, f32),
+    pub next_out: (f32, f32),
+}
+
+impl PlayerDenoiserState {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            params: DenoiserParams::default(),
+            denoiser: Box::new(SpectralDenoiser::new(sample_rate)),
+            initialized: false,
+            cur_idx: 0,
+            cur_out: (0.0, 0.0),
+            next_out: (0.0, 0.0),
+        }
+    }
+
+    fn prime_at(&mut self, idx: usize, left: &[f32], right: &[f32], end: usize) {
+        self.denoiser.reset();
+        let last = end.saturating_sub(1);
+        for k in 0..STFT_LATENCY_SAMPLES {
+            let s = (idx + k).min(last);
+            let _ = self.denoiser.process_sample(left[s], right[s], &self.params);
+        }
+        let s0 = (idx + STFT_LATENCY_SAMPLES).min(last);
+        self.cur_out = self.denoiser.process_sample(left[s0], right[s0], &self.params);
+        let s1 = (idx + 1 + STFT_LATENCY_SAMPLES).min(last);
+        self.next_out = self.denoiser.process_sample(left[s1], right[s1], &self.params);
+        self.cur_idx = idx;
+        self.initialized = true;
+    }
+
+    #[inline]
+    fn sample_pair_at(&mut self, index: usize, fraction: f32, left: &[f32], right: &[f32], end: usize) -> (f32, f32) {
+        if !self.initialized || index < self.cur_idx || index > self.cur_idx + 16 {
+            self.prime_at(index, left, right, end);
+        } else {
+            let last = end.saturating_sub(1);
+            while self.cur_idx < index {
+                self.cur_idx += 1;
+                self.cur_out = self.next_out;
+                let s_next = (self.cur_idx + 1 + STFT_LATENCY_SAMPLES).min(last);
+                self.next_out = self.denoiser.process_sample(left[s_next], right[s_next], &self.params);
+            }
+        }
+        let l = self.cur_out.0 + (self.next_out.0 - self.cur_out.0) * fraction;
+        let r = self.cur_out.1 + (self.next_out.1 - self.cur_out.1) * fraction;
+        (l.clamp(-1.0, 1.0), r.clamp(-1.0, 1.0))
+    }
 }
 
 pub struct AudioPlayer {
@@ -19,6 +75,7 @@ pub struct AudioPlayer {
     stop_at_sample: Arc<AtomicUsize>,
     is_playing: Arc<AtomicBool>,
     audition: Arc<Mutex<Option<(f64, usize)>>>,
+    denoiser_state: Arc<Mutex<PlayerDenoiserState>>,
     stream: Option<Stream>,
     stream_error: Arc<Mutex<Option<String>>>,
 }
@@ -33,6 +90,7 @@ impl AudioPlayer {
             stop_at_sample: Arc::new(AtomicUsize::new(0)),
             is_playing: Arc::new(AtomicBool::new(false)),
             audition: Arc::new(Mutex::new(None)),
+            denoiser_state: Arc::new(Mutex::new(PlayerDenoiserState::new(44100))),
             stream: None,
             stream_error: Arc::new(Mutex::new(None)),
         }
@@ -76,16 +134,57 @@ impl AudioPlayer {
         self.sample_rate = audio.sample_rate;
         self.samples_l = Arc::new(audio.left);
         self.samples_r = Arc::new(audio.right);
+        let mut ds = self.denoiser_state.lock();
+        ds.denoiser.set_sample_rate(audio.sample_rate);
+        ds.initialized = false;
     }
 
     pub fn load_decoded(&mut self, audio: DecodedAudio) -> Result<(), String> {
+        let prev_params = self.denoiser_state.lock().params.clone();
+        let prev_profile = self.denoiser_state.lock().denoiser.noise_profile().cloned();
         let mut next = Self::new();
         next.sample_rate = audio.sample_rate;
         next.samples_l = Arc::new(audio.left);
         next.samples_r = Arc::new(audio.right);
+        {
+            let mut ds = next.denoiser_state.lock();
+            ds.denoiser.set_sample_rate(audio.sample_rate);
+            ds.denoiser.set_noise_profile(prev_profile);
+            ds.params = prev_params;
+        }
         next.init_output_stream()?;
         *self = next;
         Ok(())
+    }
+
+    pub fn replace_decoded(&mut self, audio: DecodedAudio) -> Result<(), String> {
+        if self.stream.is_some() {
+            self.load_decoded(audio)
+        } else {
+            self.sample_rate = audio.sample_rate;
+            self.samples_l = Arc::new(audio.left);
+            self.samples_r = Arc::new(audio.right);
+            let clamped = self.current_seconds().min(self.total_seconds());
+            self.seek_seconds(clamped);
+            let mut ds = self.denoiser_state.lock();
+            ds.denoiser.set_sample_rate(audio.sample_rate);
+            ds.initialized = false;
+            Ok(())
+        }
+    }
+
+    pub fn set_denoiser_params(&self, params: DenoiserParams) {
+        let mut ds = self.denoiser_state.lock();
+        let toggled = ds.params.enabled != params.enabled;
+        ds.params = params;
+        if toggled {
+            ds.initialized = false;
+        }
+    }
+
+    pub fn set_noise_profile(&self, profile: Option<NoiseProfile>) {
+        let mut ds = self.denoiser_state.lock();
+        ds.denoiser.set_noise_profile(profile);
     }
 
     pub fn reset(&mut self) {
@@ -103,6 +202,7 @@ impl AudioPlayer {
         let source_step = f64::from(self.sample_rate) / f64::from(config.sample_rate().0);
 
         let audition = self.audition.clone();
+        let denoiser_arc = self.denoiser_state.clone();
         let playhead_arc = self.playhead.clone();
         let stop_at_sample_arc = self.stop_at_sample.clone();
         let is_playing_arc = self.is_playing.clone();
@@ -123,11 +223,13 @@ impl AudioPlayer {
             .build_output_stream(
                 &config.into(),
                 move |data: &mut [f32], _| {
+                    let mut ds_guard = denoiser_arc.try_lock();
+                    let ds_opt = ds_guard.as_deref_mut().filter(|ds| ds.params.enabled);
                     if let Some(mut preview) = audition.try_lock() {
                         if let Some((start, end)) = *preview {
-                            let next = render_output(
+                            let next = render_output_filtered(
                                 data, output_channels, &samples_l, &samples_r,
-                                start, end, source_step,
+                                start, end, source_step, ds_opt,
                             );
                             *preview = (next < end as f64).then_some((next, end));
                             return;
@@ -143,9 +245,9 @@ impl AudioPlayer {
                     let start = playhead_arc.load(Ordering::Relaxed);
                     let stop = stop_at_sample_arc.load(Ordering::Relaxed);
                     let end = if stop == 0 { total_samples } else { stop.min(total_samples) };
-                    let position = render_output(
+                    let position = render_output_filtered(
                         data, output_channels, &samples_l, &samples_r,
-                        f64::from_bits(start), end, source_step,
+                        f64::from_bits(start), end, source_step, ds_opt,
                     );
                     let end_reached = position >= end as f64;
                     let next = position.min(end as f64).to_bits();
@@ -296,7 +398,20 @@ impl AudioPlayer {
     }
 }
 
+#[cfg(test)]
 fn render_output(
+    data: &mut [f32],
+    output_channels: usize,
+    left: &[f32],
+    right: &[f32],
+    position: f64,
+    end: usize,
+    source_step: f64,
+) -> f64 {
+    render_output_filtered(data, output_channels, left, right, position, end, source_step, None)
+}
+
+fn render_output_filtered(
     data: &mut [f32],
     output_channels: usize,
     left: &[f32],
@@ -304,6 +419,7 @@ fn render_output(
     mut position: f64,
     end: usize,
     source_step: f64,
+    mut denoiser: Option<&mut PlayerDenoiserState>,
 ) -> f64 {
     for frame in data.chunks_mut(output_channels) {
         frame.fill(0.0);
@@ -313,13 +429,18 @@ fn render_output(
         let index = position.floor() as usize;
         let next = (index + 1).min(end - 1);
         let fraction = (position - index as f64) as f32;
-        let left = left[index] + (left[next] - left[index]) * fraction;
-        let right = right[index] + (right[next] - right[index]) * fraction;
-        if frame.len() >= 2 {
-            frame[0] = left;
-            frame[1] = right;
+        let (out_l, out_r) = if let Some(ds) = denoiser.as_deref_mut() {
+            ds.sample_pair_at(index, fraction, left, right, end)
         } else {
-            frame[0] = (left + right) * 0.5;
+            let l = left[index] + (left[next] - left[index]) * fraction;
+            let r = right[index] + (right[next] - right[index]) * fraction;
+            (l, r)
+        };
+        if frame.len() >= 2 {
+            frame[0] = out_l;
+            frame[1] = out_r;
+        } else {
+            frame[0] = (out_l + out_r) * 0.5;
         }
         position += source_step;
     }
