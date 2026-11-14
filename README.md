@@ -23,7 +23,14 @@
 
 **TapeDigizer** ist eine hochpräzise, native macOS-Desktop-App (entwickelt in **Rust** mit hardwarebeschleunigter Benutzeroberfläche), die das Digitalisieren von **Schallplatten (Vinyl LP & Single 45)**, **Kassetten** und **Tonbändern** so einfach, präzise und professionell wie möglich macht.
 
-### ✨ Hauptfunktionen (Neu in v1.5.1)
+### Highlights in v1.6.0
+
+* **Rausch- & DC-Filter-Studio:** Im Menü **Filter** öffnen (`⌘F`), einen Abschnitt mit reinem Rauschen in der Wellenform markieren und daraus ein Rauschprofil lernen. Beim Vorhören lässt sich zwischen gefiltertem Signal (Wet), Original (A/B) und entferntem Rauschen (Δ) wechseln.
+* **Rauschfilter pro Track:** Über das Menü **Filter** lässt sich die Rauschfilterung beim Export für den gewählten Track umschalten oder für alle Tracks gemeinsam ein- oder ausschalten. Der Filter kann auch direkt in den gewählten Track oder die gesamte Aufnahme eingerechnet werden.
+* **Audio Unit für macOS:** Der TapeDigizer Denoiser lässt sich als Effekt in Logic Pro und anderen Audio-Unit-fähigen DAWs verwenden.
+* **macOS-Oberfläche:** Metal-Rendering über `wgpu`, eine Stereo-Wellenform mit stabiler Höhe beim Ein- und Ausblenden der Schnitt-Lupe und eine sichtbare Versionsnummer.
+
+### ✨ Hauptfunktionen
 
 1. **🎙️ Tab 1: Aufnahme & Einpegeln**
    * **Analoge Audioquellen-Profile:** Vorkonfigurierte Voreinstellungen für **Kassette (Compact Cassette)**, **Tonband (Reel-to-Reel)**, **Vinyl LP (33⅓ RPM)** und **Single (45 RPM)** mit optimierten Standard-Aufnahmezeiten und passenden Stille-Erkennungsparametern.
@@ -74,7 +81,14 @@
 
 **TapeDigizer** is a high-precision native macOS desktop application (built with **Rust** and hardware-accelerated GUI) designed to digitize **vinyl records (LP 33⅓ & Single 45)**, **cassettes**, and **reel-to-reel tapes** effortlessly with studio-grade fidelity.
 
-### ✨ Key Features (New in v1.5.1)
+### Highlights in v1.6.0
+
+* **Noise & DC Filter Studio:** Open it from the **Filter** menu (`⌘F`), select a noise-only section of the waveform, and learn a noise profile from it. Audition the filtered signal (Wet), the original (A/B), or the removed noise (Δ).
+* **Per-track noise filtering:** Use the **Filter** menu to toggle noise reduction at export for the selected track or enable or disable it for all tracks at once. You can also bake the filter into the selected track or the entire recording.
+* **Audio Unit for macOS:** Use TapeDigizer Denoiser as an effect in Logic Pro and other Audio Unit hosts.
+* **macOS interface:** Metal rendering via `wgpu`, a stereo waveform that keeps its height when toggling the cut magnifier, and a visible app version.
+
+### ✨ Key Features
 
 1. **🎙️ Tab 1: Recording & Calibration**
    * **Analog Media Profiles:** Presets for **Compact Cassette**, **Reel-to-Reel Tape**, **Vinyl LP (33⅓ RPM)**, and **Single (45 RPM)** with customized duration presets and silence detection thresholds.
@@ -115,6 +129,7 @@
 |---|---|---|
 | **⌘ + S** | Projekt speichern (.tapedigizer) | Save Project (.tapedigizer) |
 | **⌘ + O** | Projekt öffnen | Open Project |
+| **⌘ + F** | Rausch- & DC-Filter-Studio ein- oder ausblenden | Toggle Noise & DC Filter Studio |
 | **⌘ + Z** | Letzte Aktion rückgängig machen (Undo) | Undo last marker action |
 | **⇧ + ⌘ + Z** / **⌘ + Y** | Wiederherstellen (Redo) | Redo marker action |
 | **Tab** / **Enter** | Zum nächsten Tracktitel springen | Jump to next track title |
@@ -132,7 +147,7 @@
 ## 🚀 Installation & Start
 
 ### 🍏 macOS App Bundle
-Das kompilierte Bundle befindet sich unter:
+Nach dem lokalen Build befindet sich das App-Bundle im Projektordner unter:
 ```bash
 TapeDigizer.app
 ```
@@ -156,7 +171,7 @@ cargo test
 ./scripts/package_app.sh
 ```
 
-Das Skript erzeugt `TapeDigizer.app` im Projektordner. Für die separaten Hardwareprüfungen und das reproduzierbare Release-Profil:
+Das Skript erzeugt `TapeDigizer.app` und `TapeDigizerDenoiser-Installer.pkg` im Projektordner und installiert die Audio Unit unter `~/Library/Audio/Plug-Ins/Components/`. Für die separaten Hardwareprüfungen und das reproduzierbare Release-Profil:
 
 ```bash
 cargo test --locked test_list_devices -- --ignored --nocapture
