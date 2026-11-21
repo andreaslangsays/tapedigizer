@@ -30,12 +30,22 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(format!("TapeDigizer v{}", env!("CARGO_PKG_VERSION")))
+        .with_icon(app_icon())
+        .with_inner_size([1260.0, 820.0])
+        .with_min_inner_size([1060.0, 700.0]);
+
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(format!("TapeDigizer v{}", env!("CARGO_PKG_VERSION")))
-            .with_icon(app_icon())
-            .with_inner_size([1260.0, 820.0])
-            .with_min_inner_size([1060.0, 700.0]),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         vsync: true,
         ..Default::default()

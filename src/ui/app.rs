@@ -14,23 +14,32 @@ use crate::audio::recorder::{AudioRecorder, RecorderState, StereoWaveformPoint};
 use crate::splitter::{
     export_tracks_with_options, ExportOptions, MarkerSnapshot, NormalizationMode, TrackSplitter, TransientPoint,
 };
-use crate::ui::knob_widget::render_gain_knob_card;
-use crate::ui::meter_widget::render_stereo_meter;
+use crate::ui::meter_widget::{render_stereo_meter, render_vintage_vu_meter};
 use crate::ui::theme::{
-    draw_recessed_well, mode_button, panel_frame, panel_title, primary_button, record_button,
-    studio_panel, studio_wordmark, time_display, ACCENT, BG_INSET, BG_PANEL, BG_WINDOW,
-    BORDER_MID, LED_AMBER, LED_GREEN, LED_RED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    bay_header, bevel_button, bevel_button_sized, draw_recessed_well, draw_tape_transport_deck,
+    install_macos_fonts, mode_button, palette, panel_title, primary_button, rack_columns,
+    section_title, segmented_control, studio_panel, studio_style_for, studio_wordmark,
+    surface_bay, time_display, transport_button, BevelStyle, ThemeMode, ACCENT, BG_INSET,
+    CUT_ACCENT, FX_ACCENT, HEIGHT_COMPACT, HEIGHT_CONTROL, HEIGHT_PRIMARY, LED_AMBER, LED_GREEN,
+    LED_RED, RECORD_ACCENT, TEXT_MUTED, TEXT_SECONDARY,
 };
 use crate::i18n::Language;
+use crate::audio::processing::SongSettings;
+use crate::project::{ProjectSettings, SongEditorView};
+use super::song_editor::{SongEditor, SongEditorAction};
 use crate::project::{sanitize_filename, MediaSourceType, TapeDigizerProject, TapeSide};
 use crate::ui::waveform_widget::{render_stereo_waveform, EditTool};
 
-#[derive(PartialEq, Clone, Copy)]
-pub enum ActiveTab {
-    Recording,
-    Diagnosis,
-    SplitAndExport,
+#[derive(Clone, Copy, PartialEq)]
+enum ConsoleTab {
+    Input,
+    Edit,
+    Filter,
+    Tracks,
+    Export,
 }
+
+enum SongEffectAction { ToggleNoise, ToggleDc, LearnNoise }
 
 enum JobResult {
     Open(OpenedProject),
@@ -94,6 +103,8 @@ struct SavedEdits {
     side: TapeSide,
     markers: MarkerSnapshot,
     normalization: NormalizationMode,
+    settings: ProjectSettings,
+    editor_view: SongEditorView,
 }
 
 struct TransientCache {
@@ -104,8 +115,9 @@ struct TransientCache {
 }
 
 pub struct TapeDigizerApp {
-    // Internationalization
+    // Internationalization & Appearance
     pub language: Language,
+    theme_mode: ThemeMode,
 
     // Tape & Album Organization
     pub media_source: MediaSourceType,
@@ -115,11 +127,10 @@ pub struct TapeDigizerApp {
     pub current_project_path: Option<PathBuf>,
     pub current_audio_path: Option<PathBuf>,
 
-    // Marker Delete Confirmation
-    pub pending_delete_marker: Option<(usize, f64, String)>,
+    // Deferred marker removal
+    pending_delete_marker: Option<usize>,
 
-    // Current Navigation Tab
-    active_tab: ActiveTab,
+    console_tab: ConsoleTab,
 
     // Audio Devices & Configuration
     available_devices: Vec<AudioDeviceInfo>,
@@ -130,6 +141,7 @@ pub struct TapeDigizerApp {
     // Audio Engines
     recorder: AudioRecorder,
     player: AudioPlayer,
+    song_editor: SongEditor,
     splitter: TrackSplitter,
 
     // Timer & Auto-Stop Settings
@@ -159,7 +171,7 @@ pub struct TapeDigizerApp {
     waveform_vertical_zoom: f32,
     track_page: usize,
     export_page: usize,
-    magnifier_scope_active: bool,
+    export_song: Option<usize>,
     selected_region: Option<(f64, f64)>,
     scope_radius_sec: f64,
     scope_locked_center: Option<f64>,
@@ -190,7 +202,6 @@ pub struct TapeDigizerApp {
     export_outcome: Option<ExportOutcome>,
 
     // Spectral Denoiser, Presets & Original Recording Cut
-    denoiser_panel_active: bool,
     denoiser_params: DenoiserParams,
     active_noise_profile: Option<NoiseProfile>,
     active_noise_samples: Option<(Vec<f32>, Vec<f32>, u32)>,
@@ -206,19 +217,14 @@ pub struct TapeDigizerApp {
     job: Option<PendingJob>,
     saved_edits: Option<SavedEdits>,
     pause_preview: Option<MarkerSnapshot>,
-    show_tracks: bool,
-    show_export: bool,
     #[cfg(target_os = "macos")]
     mac_menu: Option<super::macos_menu::MacMenu>,
 }
 
 impl TapeDigizerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(crate::ui::theme::studio_visuals());
-        cc.egui_ctx.style_mut(|style| {
-            style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-            style.spacing.button_padding = Vec2::new(8.0, 4.0);
-        });
+        install_macos_fonts(&cc.egui_ctx);
+        cc.egui_ctx.set_style(studio_style_for(ThemeMode::Silverface));
 
         let cfg = crate::config::AppConfig::load();
         let devices = list_input_devices();
@@ -291,6 +297,7 @@ impl TapeDigizerApp {
 
         let app = Self {
             language: lang,
+            theme_mode: ThemeMode::Silverface,
             media_source,
             tape_name,
             artist_name,
@@ -298,13 +305,14 @@ impl TapeDigizerApp {
             current_project_path: None,
             current_audio_path: None,
             pending_delete_marker: None,
-            active_tab: ActiveTab::Recording,
+            console_tab: ConsoleTab::Input,
             available_devices: devices,
             selected_device_idx: selected_dev_idx,
             channel_pairs,
             selected_pair_idx,
             recorder,
             player: AudioPlayer::new(),
+            song_editor: SongEditor::default(),
             splitter: TrackSplitter::new(),
             selected_timer_minutes: timer_minutes,
             time_headroom_minutes,
@@ -326,7 +334,7 @@ impl TapeDigizerApp {
             waveform_vertical_zoom: 1.0,
             track_page: 0,
             export_page: 0,
-            magnifier_scope_active: false,
+            export_song: None,
             selected_region: None,
             scope_radius_sec: 1.5,
             scope_locked_center: None,
@@ -351,7 +359,6 @@ impl TapeDigizerApp {
             export_fade_ms,
             export_balance_db: 0.0,
             export_outcome: None,
-            denoiser_panel_active: false,
             denoiser_params: DenoiserParams::default(),
             active_noise_profile: None,
             active_noise_samples: None,
@@ -365,8 +372,6 @@ impl TapeDigizerApp {
             job: None,
             saved_edits: None,
             pause_preview: None,
-            show_tracks: true,
-            show_export: false,
             #[cfg(target_os = "macos")]
             mac_menu: None,
         };
@@ -427,11 +432,9 @@ impl TapeDigizerApp {
         self.selected_region = None;
         self.scope_locked_center = None;
         self.pause_preview = None;
-        self.show_export = false;
         self.batch_titles_open = false;
         self.export_outcome = None;
         self.transient_cache = None;
-        self.magnifier_scope_active = false;
         self.track_page = 0;
         self.waveform_zoom = 1.0;
         self.waveform_scroll = 0.0;
@@ -525,8 +528,18 @@ impl TapeDigizerApp {
         }
         let Some(menu) = &self.mac_menu else { return; };
         for command in menu.take_commands() {
-            if self.show_export && !matches!(command, Command::Quit) {
-                continue;
+            let editing_blocked = self.job.is_some() || self.recorder.is_busy();
+            if self.visible_tab() == ConsoleTab::Filter && !editing_blocked {
+                match command {
+                    Command::ToggleLiveFilter | Command::ToggleSelectedTrackFilter => { self.apply_song_effect_action(SongEffectAction::ToggleNoise); continue; }
+                    Command::ToggleSubsonicFilter => { self.apply_song_effect_action(SongEffectAction::ToggleDc); continue; }
+                    Command::LearnNoise => { self.apply_song_effect_action(SongEffectAction::LearnNoise); continue; }
+                    Command::BakeFilterTrack | Command::BakeFilterAll | Command::FilterAllTracks | Command::FilterNoTracks => {
+                        self.ui_error_message = Some(self.text("Im Song-Studio werden Effekte pro Song gespeichert und beim Export angewendet.", "Song studio saves effects per song and applies them on export.").into());
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             match command {
                 Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -535,7 +548,7 @@ impl TapeDigizerApp {
                 Command::Save => self.save_project_quick(ctx),
                 Command::SaveAs => self.save_project_dialog(ctx),
                 Command::Reveal => self.reveal_session_in_finder(),
-                Command::Undo | Command::Redo if self.job.is_none() => {
+                Command::Undo | Command::Redo if !editing_blocked => {
                     let redo = matches!(command, Command::Redo);
                     if ctx.wants_keyboard_input() {
                         let modifiers = egui::Modifiers { command: true, mac_cmd: true, shift: redo, ..Default::default() };
@@ -546,43 +559,26 @@ impl TapeDigizerApp {
                         self.undo_marker_edit(redo);
                     }
                 }
-                Command::Record => self.active_tab = ActiveTab::Recording,
-                Command::Levels if !self.recorder.is_busy() => self.active_tab = ActiveTab::Diagnosis,
-                Command::Edit if !self.recorder.is_busy() => self.active_tab = ActiveTab::SplitAndExport,
-                Command::Export if !self.recorder.is_busy() && self.job.is_none() && self.player.total_samples() > 0 => {
-                    self.active_tab = ActiveTab::SplitAndExport;
-                    self.export_page = 0;
-                    self.show_export = true;
+                Command::Record => self.console_tab = ConsoleTab::Input,
+                Command::Edit => self.console_tab = ConsoleTab::Edit,
+                Command::Export => {
+                    self.export_song = None;
+                    self.console_tab = ConsoleTab::Export;
                 }
-                Command::ToggleFilterStudio => {
-                    self.denoiser_panel_active = !self.denoiser_panel_active;
-                    if self.denoiser_panel_active {
-                        self.magnifier_scope_active = false;
-                        self.refresh_noise_presets();
-                        self.active_tab = ActiveTab::SplitAndExport;
-                    }
-                }
-                Command::ToggleScope => {
-                    self.magnifier_scope_active = !self.magnifier_scope_active;
-                    if self.magnifier_scope_active {
-                        self.denoiser_panel_active = false;
-                        self.active_tab = ActiveTab::SplitAndExport;
-                    }
-                }
-                Command::ToggleTracks => {
-                    self.show_tracks = !self.show_tracks;
-                }
-                Command::ToggleLiveFilter => {
+                Command::FocusFilter => self.console_tab = ConsoleTab::Filter,
+                Command::FocusScope => self.console_tab = ConsoleTab::Edit,
+                Command::FocusTracks => self.console_tab = ConsoleTab::Tracks,
+                Command::ToggleLiveFilter if !editing_blocked => {
                     self.denoiser_params.enabled = !self.denoiser_params.enabled;
                     self.player.set_denoiser_params(self.denoiser_params.clone());
                 }
-                Command::LearnNoise if self.player.total_samples() > 0 => {
+                Command::LearnNoise if !editing_blocked && self.player.total_samples() > 0 => {
                     let total_sec = self.player.total_seconds();
                     let cur_sec = self.player.current_seconds();
                     let (s0, s1) = self.active_selection_or_window(total_sec, cur_sec);
                     self.learn_noise_from_region(s0, s1);
                 }
-                Command::BakeFilterTrack if self.player.total_samples() > 0 => {
+                Command::BakeFilterTrack if !editing_blocked && self.player.total_samples() > 0 => {
                     let total_sec = self.player.total_seconds();
                     let cur_sec = self.player.current_seconds();
                     let tracks = self.splitter.get_tracks(total_sec);
@@ -592,20 +588,20 @@ impl TapeDigizerApp {
                     });
                     self.bake_denoiser_into_track(ctx, seg_idx);
                 }
-                Command::BakeFilterAll if self.player.total_samples() > 0 => {
+                Command::BakeFilterAll if !editing_blocked && self.player.total_samples() > 0 => {
                     self.bake_denoiser_into_recording(ctx);
                 }
-                Command::FilterAllTracks => {
+                Command::FilterAllTracks if !editing_blocked => {
                     let total_sec = self.player.total_seconds();
                     let count = self.splitter.get_tracks(total_sec).len();
                     self.splitter.set_all_tracks_filtered(count, true);
                 }
-                Command::FilterNoTracks => {
+                Command::FilterNoTracks if !editing_blocked => {
                     let total_sec = self.player.total_seconds();
                     let count = self.splitter.get_tracks(total_sec).len();
                     self.splitter.set_all_tracks_filtered(count, false);
                 }
-                Command::ToggleSelectedTrackFilter => {
+                Command::ToggleSelectedTrackFilter if !editing_blocked => {
                     let total_sec = self.player.total_seconds();
                     let cur_sec = self.player.current_seconds();
                     let tracks = self.splitter.get_tracks(total_sec);
@@ -615,7 +611,7 @@ impl TapeDigizerApp {
                     });
                     self.splitter.toggle_track_filter(seg_idx);
                 }
-                Command::ToggleSubsonicFilter => {
+                Command::ToggleSubsonicFilter if !editing_blocked => {
                     self.export_highpass_20hz = !self.export_highpass_20hz;
                     self.save_config();
                 }
@@ -626,6 +622,7 @@ impl TapeDigizerApp {
 
     fn undo_marker_edit(&mut self, redo: bool) {
         if self.job.is_some() || self.marker_drag.is_some() || self.recorder.is_busy() { return; }
+        self.song_editor.finish_edit(&mut self.splitter);
         let changed = if redo { self.splitter.redo() } else { self.splitter.undo() };
         if changed {
             self.selected_marker_idx = None;
@@ -657,13 +654,11 @@ impl TapeDigizerApp {
                     self.current_audio_path = Some(audio.path);
                     self.waveform_cache = audio.waveform;
                     self.analysis_report = Some(audio.report);
-                    self.active_tab = ActiveTab::SplitAndExport;
                 } else {
                     self.player.reset();
                     self.current_audio_path = None;
                     self.waveform_cache = WaveformCache::default();
                     self.analysis_report = None;
-                    self.active_tab = ActiveTab::Recording;
                 }
                 self.tape_name = project.tape_name;
                 self.tape_side = project.tape_side;
@@ -673,21 +668,56 @@ impl TapeDigizerApp {
                     custom_titles: project.custom_titles,
                     pause_indices: project.pause_indices,
                     disabled_filter_indices: project.disabled_filter_indices,
+                    song_settings: project.song_settings,
                 });
                 self.normalization_mode = match project.normalization_mode.as_str() {
                     "track" => NormalizationMode::PeakPerTrack,
                     "album" => NormalizationMode::PeakAlbum,
                     _ => NormalizationMode::None,
                 };
+                if let Some(settings) = project.settings {
+                    self.artist_name = settings.artist_name;
+                    self.media_source = settings.media_source;
+                    self.export_highpass_20hz = settings.export_highpass_20hz;
+                    self.export_fade_ms = settings.export_fade_ms;
+                    self.export_balance_db = settings.export_balance_db;
+                    self.export_apply_denoiser = settings.export_apply_denoiser;
+                    self.denoiser_params = settings.denoiser_params;
+                    self.active_noise_profile = settings.noise_profile;
+                } else {
+                    // Older documents never stored restoration state. Use the
+                    // legacy export defaults, never a previously opened song's profile.
+                    let config = crate::config::AppConfig::load();
+                    self.artist_name.clear();
+                    self.export_balance_db = 0.0;
+                    self.export_highpass_20hz = config.export_highpass_20hz.unwrap_or(true);
+                    self.export_fade_ms = config.export_fade_ms.unwrap_or(15);
+                    self.export_apply_denoiser = true;
+                    self.denoiser_params = DenoiserParams::default();
+                    self.active_noise_profile = None;
+                }
+                self.active_noise_samples = None;
+                self.player.set_denoiser_params(self.denoiser_params.clone());
+                self.player.set_noise_profile(self.active_noise_profile.clone());
                 self.current_project_path = opened.project_path;
+                self.export_song = None;
+                self.export_outcome = None;
                 self.reset_editor_selection();
+                self.song_editor = SongEditor::default();
+                self.song_editor.view = project.editor_view;
+                let tracks = self.splitter.get_tracks(self.player.total_seconds());
+                self.song_editor.view.selected_segment = tracks.iter()
+                    .find(|track| !track.is_pause && Some(track.segment_index) == self.song_editor.view.selected_segment)
+                    .or_else(|| tracks.iter().find(|track| !track.is_pause))
+                    .map(|track| track.segment_index);
+                self.selected_segment_idx = self.song_editor.view.selected_segment;
                 self.saved_edits = self.current_project_path.as_ref().map(|_| self.edits());
-
+                self.console_tab = ConsoleTab::Edit;
             }
             Ok(JobResult::Recording(audio, waveform, report)) => {
+                self.console_tab = ConsoleTab::Edit;
                 self.waveform_cache = waveform;
                 self.analysis_report = Some(report);
-                self.active_tab = ActiveTab::Diagnosis;
                 if let Err(e) = self.player.load_decoded(audio) {
                     self.ui_error_message = Some(e);
                 }
@@ -748,7 +778,60 @@ impl TapeDigizerApp {
         while markers.custom_titles.last().is_some_and(String::is_empty) {
             markers.custom_titles.pop();
         }
-        SavedEdits { name: self.tape_name.clone(), side: self.tape_side, markers, normalization: self.normalization_mode.clone() }
+        SavedEdits { name: self.tape_name.clone(), side: self.tape_side, markers,
+            normalization: self.normalization_mode.clone(), settings: self.project_settings(), editor_view: self.song_editor.view.clone() }
+    }
+
+    fn project_settings(&self) -> ProjectSettings {
+        ProjectSettings {
+            artist_name: self.artist_name.clone(), media_source: self.media_source,
+            export_highpass_20hz: self.export_highpass_20hz, export_fade_ms: self.export_fade_ms,
+            export_balance_db: self.export_balance_db, export_apply_denoiser: self.export_apply_denoiser,
+            denoiser_params: self.denoiser_params.clone(), noise_profile: self.active_noise_profile.clone(),
+        }
+    }
+
+    fn legacy_song_settings(&self) -> SongSettings {
+        let mut settings = SongSettings { balance_db: self.export_balance_db,
+            noise_profile: self.active_noise_profile.clone(), ..Default::default() };
+        for channel in &mut settings.channels {
+            channel.denoiser = self.denoiser_params.clone();
+            channel.denoiser.enabled = self.export_apply_denoiser && self.active_noise_profile.is_some();
+            channel.denoiser.dc_filter_enabled = channel.denoiser.enabled && self.denoiser_params.dc_filter_enabled;
+            channel.denoiser.audition_mode = AuditionMode::Wet;
+        }
+        settings.legacy_highpass_20hz = self.export_highpass_20hz && !settings.channels[0].denoiser.dc_filter_enabled;
+        settings
+    }
+
+    fn apply_song_effect_action(&mut self, action: SongEffectAction) {
+        let tracks = self.splitter.get_tracks(self.player.total_seconds());
+        let Some(track) = self.song_editor.view.selected_segment.or(self.selected_segment_idx)
+            .and_then(|idx| tracks.iter().find(|track| track.segment_index == idx && !track.is_pause)) else { return; };
+        let mut settings = self.splitter.song_settings.get(&track.segment_index).cloned().unwrap_or_else(|| {
+            let mut inherited = self.legacy_song_settings();
+            if !track.is_filtered {
+                inherited.legacy_highpass_20hz = self.export_highpass_20hz;
+                for channel in &mut inherited.channels { channel.denoiser.enabled = false; channel.denoiser.dc_filter_enabled = false; }
+            }
+            inherited
+        });
+        let previous = settings.clone();
+        match action {
+            SongEffectAction::ToggleNoise => {
+                let enabled = !settings.channels.iter().any(|channel| channel.denoiser.enabled);
+                for channel in &mut settings.channels { channel.denoiser.enabled = enabled; }
+            }
+            SongEffectAction::ToggleDc => {
+                let enabled = !settings.channels.iter().any(|channel| channel.denoiser.dc_filter_enabled);
+                for channel in &mut settings.channels { channel.denoiser.dc_filter_enabled = enabled; }
+            }
+            SongEffectAction::LearnNoise => self.song_editor.learn_noise(&mut settings, &self.player.get_samples_l(), &self.player.get_samples_r(), self.player.sample_rate(), track),
+        }
+        if settings != previous {
+            self.splitter.push_undo();
+            self.splitter.song_settings.insert(track.segment_index, settings);
+        }
     }
 
     fn can_leave_project(&mut self) -> bool {
@@ -786,7 +869,7 @@ impl TapeDigizerApp {
             NormalizationMode::PeakPerTrack => "track",
             NormalizationMode::PeakAlbum => "album",
         };
-        TapeDigizerProject::new(
+        let mut document = TapeDigizerProject::new(
             self.tape_name.clone(),
             self.tape_side,
             String::new(),
@@ -795,7 +878,11 @@ impl TapeDigizerApp {
             self.splitter.pause_indices.clone(),
             self.splitter.disabled_filter_indices.clone(),
             norm.into(),
-        )
+        );
+        document.song_settings = self.splitter.song_settings.clone();
+        document.settings = Some(self.project_settings());
+        document.editor_view = self.song_editor.view.clone();
+        document
     }
 
     fn apply_saved_project(&mut self, path: PathBuf, audio: Option<PathBuf>, edits: SavedEdits) {
@@ -839,9 +926,10 @@ impl TapeDigizerApp {
         self.analysis_report = None;
         self.waveform_cache = WaveformCache::default();
         self.splitter = TrackSplitter::new();
-        self.active_tab = ActiveTab::Recording;
+        self.song_editor = SongEditor::default();
+        self.export_song = None;
         self.ui_error_message = None;
-
+        self.console_tab = ConsoleTab::Input;
     }
 
     pub fn reveal_session_in_finder(&self) {
@@ -921,6 +1009,7 @@ impl TapeDigizerApp {
                     }
                     document.pause_indices.retain(|&index| index <= document.markers.len());
                     document.disabled_filter_indices.retain(|&index| index <= document.markers.len());
+                    document.song_settings.retain(|&index, _| index <= document.markers.len());
                     let waveform = WaveformCache::build(&decoded);
                     let report = analyze_samples(&decoded.left, &decoded.right, decoded.sample_rate)?;
                     Some(PreparedAudio { path, decoded, waveform, report })
@@ -1009,8 +1098,10 @@ impl TapeDigizerApp {
         let rate = self.player.sample_rate();
         let thresh_db = self.pause_threshold_db;
         let min_sec = f64::from(self.pause_min_seconds);
+        let snapshot = self.splitter.snapshot();
         self.start_job(ctx, self.text("Pausen werden gesucht …", "Finding pauses …"), move || {
             let mut proposal = TrackSplitter::new();
+            proposal.restore(snapshot);
             if gaps {
                 proposal.detect_silence_pauses_as_gaps(&left, &right, rate, thresh_db, min_sec);
             } else {
@@ -1033,15 +1124,7 @@ impl eframe::App for TapeDigizerApp {
         if ctx.input(|i| i.viewport().close_requested()) && !self.can_leave_project() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        let recorder_state = self.recorder.state();
-        let waiting_for_signal = recorder_state == RecorderState::WaitingForSignal;
-        let run_on = recorder_state == RecorderState::RunOn;
-        let is_recording = matches!(recorder_state, RecorderState::Recording | RecorderState::RunOn);
-        let finalizing = recorder_state == RecorderState::Finalizing;
-        let is_monitoring = self.recorder.state() == RecorderState::Monitoring;
-        let is_playing = self.player.is_playing();
-
-        if self.recorder.is_busy() || is_monitoring || is_playing {
+        if self.recorder.is_busy() || self.recorder.state() == RecorderState::Monitoring || self.player.is_playing() || self.song_editor.is_playing() {
             ctx.request_repaint();
         }
 
@@ -1051,12 +1134,15 @@ impl eframe::App for TapeDigizerApp {
         }
 
         // Global Command Shortcuts - read all keys in a single lock-free query
-        let (cmd, shift, key_n, key_s, key_o, key_z, key_y, key_space, key_m, key_h, key_l, key_c, key_v, key_r, key_esc, key_del, key_left, key_right, key_1, key_2, key_3) = ctx.input(|i| (
+        let (cmd, shift, key_n, key_s, key_o, key_e, key_f, key_t, key_z, key_y, key_space, key_m, key_h, key_l, key_c, key_v, key_r, key_esc, key_del, key_left, key_right, key_1, key_3) = ctx.input(|i| (
             i.modifiers.command,
             i.modifiers.shift,
             i.key_pressed(egui::Key::N),
             i.key_pressed(egui::Key::S),
             i.key_pressed(egui::Key::O),
+            i.key_pressed(egui::Key::E),
+            i.key_pressed(egui::Key::F),
+            i.key_pressed(egui::Key::T),
             i.key_pressed(egui::Key::Z),
             i.key_pressed(egui::Key::Y),
             i.key_pressed(egui::Key::Space),
@@ -1071,7 +1157,6 @@ impl eframe::App for TapeDigizerApp {
             i.key_pressed(egui::Key::ArrowLeft),
             i.key_pressed(egui::Key::ArrowRight),
             i.key_pressed(egui::Key::Num1),
-            i.key_pressed(egui::Key::Num2),
             i.key_pressed(egui::Key::Num3),
         ));
 
@@ -1090,442 +1175,118 @@ impl eframe::App for TapeDigizerApp {
             self.scope_locked_center = None;
         }
 
-        if !self.show_export {
-            if cmd && key_1 {
-                self.active_tab = ActiveTab::Recording;
-            }
-            if cmd && key_2 && !self.recorder.is_busy() {
-                self.active_tab = ActiveTab::Diagnosis;
-            }
-            if cmd && key_3 && !self.recorder.is_busy() {
-                self.active_tab = ActiveTab::SplitAndExport;
-            }
+        if cmd && key_1 {
+            self.console_tab = ConsoleTab::Input;
+        }
+        if cmd && key_3 {
+            self.console_tab = ConsoleTab::Edit;
+        }
+        if cmd && shift && key_e {
+            self.export_song = None;
+            self.console_tab = ConsoleTab::Export;
+        }
+        if cmd && key_f {
+            self.console_tab = ConsoleTab::Filter;
+        }
+        if cmd && key_t {
+            self.console_tab = ConsoleTab::Tracks;
+        }
+        if cmd && key_l {
+            self.console_tab = ConsoleTab::Edit;
+        }
 
-            if cmd && key_n {
-                self.new_project();
+        if cmd && key_n {
+            self.new_project();
+        }
+        if cmd && key_s {
+            if shift {
+                self.save_project_dialog(ctx);
+            } else {
+                self.save_project_quick(ctx);
             }
-            if cmd && key_s {
+        }
+        if cmd && key_o {
+            self.open_project_dialog(ctx);
+        }
+
+        if !ctx.wants_keyboard_input() && self.job.is_none() && !self.recorder.is_busy() {
+            if cmd && key_z {
                 if shift {
-                    self.save_project_dialog(ctx);
-                } else {
-                    self.save_project_quick(ctx);
-                }
-            }
-            if cmd && key_o {
-                self.open_project_dialog(ctx);
-            }
-
-            if !ctx.wants_keyboard_input() {
-                if cmd && key_z {
-                    if shift {
-                        self.undo_marker_edit(true);
-                    } else {
-                        self.undo_marker_edit(false);
-                    }
-                } else if cmd && key_y {
                     self.undo_marker_edit(true);
+                } else {
+                    self.undo_marker_edit(false);
                 }
+            } else if cmd && key_y {
+                self.undo_marker_edit(true);
+            }
+        }
+
+        let has_audio = self.player.total_seconds() > 0.1;
+        if !ctx.wants_keyboard_input() && self.job.is_none() && !self.recorder.is_busy() {
+            if self.pending_delete_marker.is_some() && key_esc {
+                self.pending_delete_marker = None;
             }
 
-            // Global Shortcuts in Tab 3 (Split & Export)
-            let has_audio = self.player.total_seconds() > 0.1;
-            if self.active_tab == ActiveTab::SplitAndExport && !ctx.wants_keyboard_input() && self.job.is_none() && !self.recorder.is_busy() {
-                if self.pending_delete_marker.is_some() && key_esc {
-                    self.pending_delete_marker = None;
+            if !cmd && has_audio && key_space {
+                if self.visible_tab() == ConsoleTab::Filter { self.song_editor.toggle_play(); }
+                else { self.player.toggle_play(); }
+            }
+            if !cmd && has_audio && key_m && self.visible_tab() != ConsoleTab::Filter {
+                let cur_sec = self.player.current_seconds();
+                self.add_marker(cur_sec);
+            }
+            if !cmd && key_h && self.visible_tab() != ConsoleTab::Filter {
+                self.hover_preview_enabled = !self.hover_preview_enabled;
+            }
+            if !cmd && key_l {
+                self.console_tab = ConsoleTab::Edit;
+            }
+            if !cmd && key_f {
+                self.console_tab = ConsoleTab::Filter;
+            }
+            if self.visible_tab() == ConsoleTab::Filter {
+                let step = if shift { 0.5 } else { 0.05 };
+                if key_left { self.song_editor.seek_by(-step); }
+                if key_right { self.song_editor.seek_by(step); }
+                if key_r { self.song_editor.use_range_tool(true); }
+                if key_v || key_esc { self.song_editor.use_range_tool(false); }
+            }
+            if let Some(m_idx) = self.selected_marker_idx.filter(|_| self.visible_tab() != ConsoleTab::Filter) {
+                let total_sec = self.player.total_seconds();
+                let delta = if shift { 0.5 } else { 0.05 };
+                if key_left {
+                    self.nudge_marker(m_idx, -delta, total_sec);
                 }
-
-                if has_audio && key_space {
-                    self.player.toggle_play();
+                if key_right {
+                    self.nudge_marker(m_idx, delta, total_sec);
                 }
-                if has_audio && key_m {
-                    let cur_sec = self.player.current_seconds();
-                    self.add_marker(cur_sec);
-                }
-                if key_h {
-                    self.hover_preview_enabled = !self.hover_preview_enabled;
-                }
-                if key_l {
-                    self.magnifier_scope_active = !self.magnifier_scope_active;
-                    if self.magnifier_scope_active {
-                        self.denoiser_panel_active = false;
-                    }
-                }
-                if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::F)) {
-                    self.denoiser_panel_active = !self.denoiser_panel_active;
-                    if self.denoiser_panel_active {
-                        self.magnifier_scope_active = false;
-                        self.refresh_noise_presets();
-                    }
-                }
-                if let Some(m_idx) = self.selected_marker_idx {
-                    let total_sec = self.player.total_seconds();
-                    let delta = if shift { 0.5 } else { 0.05 };
-                    if key_left {
-                        self.nudge_marker(m_idx, -delta, total_sec);
-                    }
-                    if key_right {
-                        self.nudge_marker(m_idx, delta, total_sec);
-                    }
-                }
-                if !cmd && (key_s || key_c) {
-                    self.active_edit_tool = EditTool::Scissor;
-                }
-                if !cmd && key_r {
-                    self.active_edit_tool = EditTool::Select;
-                }
-                if key_v || key_esc {
-                    self.active_edit_tool = EditTool::Pointer;
-                }
-                if key_del {
-                    if let Some(index) = self.selected_marker_idx {
-                        self.request_marker_delete(index);
-                    }
+            }
+            if !cmd && (key_s || key_c) {
+                self.active_edit_tool = EditTool::Scissor;
+            }
+            if !cmd && key_r {
+                self.active_edit_tool = EditTool::Select;
+            }
+            if (!cmd && key_v) || key_esc {
+                self.active_edit_tool = EditTool::Pointer;
+            }
+            if self.visible_tab() != ConsoleTab::Filter && key_del && !ctx.input(|input| input.events.iter().any(|event| matches!(
+                event, egui::Event::Key { key: egui::Key::Delete | egui::Key::Backspace, repeat: true, .. }
+            ))) {
+                if let Some(index) = self.selected_marker_idx {
+                    self.request_marker_delete(index);
                 }
             }
         }
 
-        #[cfg(target_os = "macos")]
-        let needs_menu = self.mac_menu.is_none();
-        #[cfg(not(target_os = "macos"))]
-        let needs_menu = true;
-        if needs_menu {
-        egui::TopBottomPanel::top("app_menu_bar")
-            .frame(egui::Frame::none().fill(Color32::from_rgb(20, 22, 26)).inner_margin(egui::Margin { left: 12.0, right: 12.0, top: 4.0, bottom: 4.0 }))
-            .show(ctx, |ui| {
-                if self.show_export { ui.disable(); }
-                egui::menu::bar(ui, |ui| {
-                    ui.menu_button(self.language.menu_file(), |ui| {
-                        if ui.button(format!("{} (⌘N)", self.language.menu_new_project())).clicked() {
-                            self.new_project();
-                            ui.close_menu();
-                        }
-                        if ui.button(format!("{} (⌘O)", self.language.menu_open_project())).clicked() {
-                            self.open_project_dialog(ctx);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(format!("{} (⌘S)", self.language.menu_save_project())).clicked() {
-                            self.save_project_quick(ctx);
-                            ui.close_menu();
-                        }
-                        if ui.button(format!("{} (⇧⌘S)", self.language.menu_save_project_as())).clicked() {
-                            self.save_project_dialog(ctx);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(self.language.menu_reveal_in_finder()).clicked() {
-                            self.reveal_session_in_finder();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        let export_lbl = self.text("Tracks exportieren … (⇧⌘E)", "Export tracks … (⇧⌘E)");
-                        if ui.add_enabled(self.player.total_samples() > 0 && !self.recorder.is_busy(), egui::Button::new(export_lbl)).clicked() {
-                            self.active_tab = ActiveTab::SplitAndExport;
-                            self.export_page = 0;
-                            self.show_export = true;
-                            ui.close_menu();
-                        }
-                    });
-
-                    ui.menu_button(self.language.menu_edit(), |ui| {
-                        if ui.button(format!("{} (⌘Z)", self.language.menu_undo())).clicked() {
-                            self.undo_marker_edit(false);
-                            ui.close_menu();
-                        }
-                        if ui.button(format!("{} (⇧⌘Z)", self.language.menu_redo())).clicked() {
-                            self.undo_marker_edit(true);
-                            ui.close_menu();
-                        }
-                    });
-
-                    ui.menu_button(self.language.menu_view(), |ui| {
-                        if ui.button(format!("{} (⌘1)", self.text("Aufnahme", "Record"))).clicked() {
-                            self.active_tab = ActiveTab::Recording;
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(!self.recorder.is_busy(), egui::Button::new(format!("{} (⌘2)", self.text("Pegel", "Levels")))).clicked() {
-                            self.active_tab = ActiveTab::Diagnosis;
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(!self.recorder.is_busy(), egui::Button::new(format!("{} (⌘3)", self.text("Schnitt", "Edit")))).clicked() {
-                            self.active_tab = ActiveTab::SplitAndExport;
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(format!("{} (F)", self.language.menu_toggle_filter_studio())).clicked() {
-                            self.denoiser_panel_active = !self.denoiser_panel_active;
-                            if self.denoiser_panel_active {
-                                self.magnifier_scope_active = false;
-                                self.refresh_noise_presets();
-                                self.active_tab = ActiveTab::SplitAndExport;
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.button(format!("{} (L)", self.language.menu_toggle_scope())).clicked() {
-                            self.magnifier_scope_active = !self.magnifier_scope_active;
-                            if self.magnifier_scope_active {
-                                self.denoiser_panel_active = false;
-                                self.active_tab = ActiveTab::SplitAndExport;
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.button(self.language.menu_toggle_tracks()).clicked() {
-                            self.show_tracks = !self.show_tracks;
-                            ui.close_menu();
-                        }
-                    });
-
-                    ui.menu_button(self.language.menu_filter(), |ui| {
-                        if ui.button(format!("{} (F)", self.language.menu_toggle_filter_studio())).clicked() {
-                            self.denoiser_panel_active = !self.denoiser_panel_active;
-                            if self.denoiser_panel_active {
-                                self.magnifier_scope_active = false;
-                                self.refresh_noise_presets();
-                                self.active_tab = ActiveTab::SplitAndExport;
-                            }
-                            ui.close_menu();
-                        }
-                        let live_lbl = if self.denoiser_params.enabled {
-                            self.text("Echtzeit-Filter: AUS schalten", "Turn Real-Time Filter OFF")
-                        } else {
-                            self.text("Echtzeit-Filter: AN schalten", "Turn Real-Time Filter ON")
-                        };
-                        if ui.button(live_lbl).clicked() {
-                            self.denoiser_params.enabled = !self.denoiser_params.enabled;
-                            self.player.set_denoiser_params(self.denoiser_params.clone());
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(self.player.total_samples() > 0, egui::Button::new(self.language.menu_learn_noise())).clicked() {
-                            let total_sec = self.player.total_seconds();
-                            let cur_sec = self.player.current_seconds();
-                            let (s0, s1) = self.active_selection_or_window(total_sec, cur_sec);
-                            self.learn_noise_from_region(s0, s1);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        let has_audio = self.player.total_samples() > 0;
-                        let can_bake = has_audio && (self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled);
-                        let total_sec = self.player.total_seconds();
-                        let cur_sec = self.player.current_seconds();
-                        let tracks = self.splitter.get_tracks(total_sec);
-                        let cur_track = self.selected_segment_idx.or_else(|| {
-                            tracks.iter().find(|t| cur_sec >= t.start_seconds && cur_sec <= t.end_seconds).map(|t| t.segment_index)
-                        }).and_then(|idx| tracks.iter().find(|t| t.segment_index == idx && !t.is_pause));
-
-                        let bake_track_lbl = if let Some(ref t) = cur_track {
-                            format!("{} (Track {:02})", self.language.menu_bake_selected_track(), t.index)
-                        } else {
-                            self.language.menu_bake_selected_track().to_string()
-                        };
-                        if ui.add_enabled(can_bake && cur_track.is_some(), egui::Button::new(bake_track_lbl)).clicked() {
-                            if let Some(t) = cur_track {
-                                self.bake_denoiser_into_track(ctx, t.segment_index);
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(can_bake, egui::Button::new(self.language.menu_bake_all())).clicked() {
-                            self.bake_denoiser_into_recording(ctx);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.add_enabled(!tracks.is_empty(), egui::Button::new(self.language.menu_filter_all_tracks())).clicked() {
-                            self.splitter.set_all_tracks_filtered(tracks.len(), true);
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(!tracks.is_empty(), egui::Button::new(self.language.menu_filter_no_tracks())).clicked() {
-                            self.splitter.set_all_tracks_filtered(tracks.len(), false);
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(!tracks.is_empty(), egui::Button::new(self.language.menu_toggle_track_filter())).clicked() {
-                            let seg_idx = self.selected_segment_idx.unwrap_or(0);
-                            self.splitter.toggle_track_filter(seg_idx);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        let hp_lbl = if self.export_highpass_20hz {
-                            self.text("20 Hz Subsonic-Filter: AUS schalten", "Turn 20 Hz Subsonic Filter OFF")
-                        } else {
-                            self.text("20 Hz Subsonic-Filter: AN schalten", "Turn 20 Hz Subsonic Filter ON")
-                        };
-                        if ui.button(hp_lbl).clicked() {
-                            self.export_highpass_20hz = !self.export_highpass_20hz;
-                            self.save_config();
-                            ui.close_menu();
-                        }
-                    });
-
-                    ui.menu_button(self.language.menu_help(), |ui| {
-                        if ui.button(self.language.menu_about()).clicked() {
-                            rfd::MessageDialog::new().set_title("TapeDigizer")
-                                .set_description(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                                .show();
-                            ui.close_menu();
-                        }
-                    });
-                });
-            });
-
-        }
-
-        egui::TopBottomPanel::top("workspace_toolbar")
-            .frame(egui::Frame::none().fill(BG_PANEL)
-                .stroke(Stroke::new(1.0, BORDER_MID)).inner_margin(10.0))
-            .show(ctx, |ui| {
-                if self.show_export { ui.disable(); }
-                ui.horizontal_wrapped(|ui| {
-                    studio_wordmark(ui);
-                    ui.separator();
-                    ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        for (tab, label) in [
-                            (ActiveTab::Recording, self.text("Aufnahme · ⌘1", "Record · ⌘1")),
-                            (ActiveTab::Diagnosis, self.text("Pegel · ⌘2", "Levels · ⌘2")),
-                            (ActiveTab::SplitAndExport, self.text("Schnitt · ⌘3", "Edit · ⌘3")),
-                        ] {
-                            if ui.add_enabled(!self.recorder.is_busy() || tab == ActiveTab::Recording, mode_button(label, self.active_tab == tab)).clicked() {
-                                self.active_tab = tab;
-                            }
-                        }
-                    });
-                    ui.separator();
-                    if waiting_for_signal {
-                        ui.spinner();
-                        ui.label(self.text("Warte auf Eingangssignal …", "Waiting for input signal …"));
-                    } else if run_on {
-                        let seconds = self.recorder.remaining_duration()
-                            .map_or(0, |remaining| remaining.as_secs_f64().ceil() as u64);
-                        let label = self.text("Nachlauf", "Recording tail");
-                        ui.colored_label(LED_AMBER, format!("● {label} {seconds} s"));
-                    } else if is_recording {
-                        let time = self.recorder.elapsed_duration().as_secs_f64();
-                        ui.colored_label(LED_RED,
-                            format!("● REC {}", timecode(time)));
-                    } else if finalizing {
-                        ui.spinner();
-                        ui.label(self.text("WAV wird abgeschlossen …", "Finalizing WAV …"));
-                    } else if is_monitoring {
-                        ui.colored_label(LED_GREEN, self.text("● Pegelcheck aktiv", "● Monitoring"));
-                    } else if self.current_audio_path.is_some() {
-                        ui.label(format!("{} · {}", self.tape_name, self.tape_side.label(self.language)));
-                        if self.saved_edits.as_ref() != Some(&self.edits()) {
-                            ui.label("•").on_hover_text(self.text("Ungespeicherte Änderungen", "Unsaved changes"));
-                        }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(self.language.code()).on_hover_text(self.language.display_name()).clicked() {
-                            self.language = if self.language == Language::De { Language::En } else { Language::De };
-                            self.save_config();
-                        }
-                        if self.current_audio_path.is_none() && !self.recorder.is_busy() && self.job.is_none() {
-                            if ui.button(self.text("WAV / Projekt öffnen · ⌘O", "Open WAV / project · ⌘O")).clicked() {
-                                self.open_project_dialog(ctx);
-                            }
-                        }
-                    });
-                });
-                if self.active_tab == ActiveTab::Recording {
-                    ui.add_space(5.0);
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        let stop_label = if self.run_on_seconds > 0 {
-                            if self.language == Language::De {
-                                format!("Stopp ({}s Nachlauf)", self.run_on_seconds)
-                            } else {
-                                format!("Stop ({}s tail)", self.run_on_seconds)
-                            }
-                        } else {
-                            self.text("Aufnahme stoppen", "Stop recording").to_string()
-                        };
-                        let label = match recorder_state {
-                            RecorderState::WaitingForSignal => self.text("Warten abbrechen", "Cancel waiting").to_string(),
-                            RecorderState::Recording => stop_label,
-                            RecorderState::RunOn => self.text("Nachlauf läuft …", "Recording tail …").to_string(),
-                            _ => self.text("Aufnahme starten", "Start recording").to_string(),
-                        };
-                        let record = record_button(&label);
-                        let ready = waiting_for_signal || recorder_state == RecorderState::Recording
-                            || (!self.recorder.is_busy() && self.job.is_none() && self.current_channel_pair().is_some());
-                        if ui.add_enabled(ready, record).clicked() {
-                            self.record_or_stop();
-                        }
-                        if matches!(recorder_state, RecorderState::Recording | RecorderState::RunOn)
-                            && (self.run_on_seconds > 0 || recorder_state == RecorderState::RunOn)
-                        {
-                            if ui.button(self.text("⏹ Sofort beenden", "⏹ Stop immediately")).clicked() {
-                                self.recorder.stop_immediately();
-                            }
-                        }
-                        ui.separator();
-                        ui.label(RichText::new(self.media_source.label(self.language)).color(ACCENT));
-                        if let Some(device) = self.current_device() {
-                            ui.label(&device.name);
-                        }
-                        if let Some(pair) = self.current_channel_pair() {
-                            ui.label(RichText::new(pair.label).color(TEXT_SECONDARY));
-                        }
-                    });
-                }
-                if self.active_tab == ActiveTab::SplitAndExport {
-                    ui.add_space(5.0);
-                    ui.separator();
-                    ui.add_enabled_ui(self.job.is_none() && !self.recorder.is_busy(), |ui| self.render_transport(ui));
-                }
-            });
-
-        // Main Studio Canvas
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG_WINDOW).inner_margin(16.0))
-            .show(ctx, |ui| {
-                if let Some(ref err) = self.ui_error_message {
-                    let err_frame = egui::Frame::none()
-                        .fill(Color32::from_rgb(50, 24, 26))
-                        .stroke(Stroke::new(1.0, LED_RED))
-                        .rounding(6.0)
-                        .inner_margin(10.0);
-                    err_frame.show(ui, |ui| {
-                        ui.colored_label(LED_RED, format!("⚠️ {}", err));
-                    });
-                    ui.add_space(8.0);
-                }
-
-                if let Some(job) = self.job.as_ref().filter(|job| job.export_progress.is_none()) {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(job.label);
-                    });
-                }
-                let enabled = !self.show_export && self.job.is_none() && !finalizing && (!self.recorder.is_busy() || self.active_tab == ActiveTab::Recording);
-                ui.add_enabled_ui(enabled, |ui| {
-                    match self.active_tab {
-                        ActiveTab::Recording => self.render_tab_recording(ui),
-                        ActiveTab::Diagnosis => self.render_tab_diagnosis(ui),
-                        ActiveTab::SplitAndExport => self.render_tab_split_export(ui),
-                    }
-                });
-            });
-        if let Some((index, seconds, title)) = self.pending_delete_marker.take() {
+        self.render_console_header(ctx);
+        self.render_console(ctx);
+        if let Some(index) = self.pending_delete_marker.take() {
             self.clear_hover_audition();
-            let confirmed = rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Warning)
-                .set_title(self.text("Schnittmarke entfernen?", "Remove cut marker?"))
-                .set_description(self.language.confirm_delete_question(
-                    (seconds / 60.0) as u64, (seconds % 60.0) as u64, &title,
-                ))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show() == rfd::MessageDialogResult::Yes;
+            self.splitter.remove_marker_at_index(index);
+            self.selected_marker_idx = None;
+            self.selected_segment_idx = None;
             ctx.request_repaint();
-            if confirmed && self.splitter.markers.get(index) == Some(&seconds) {
-                self.splitter.remove_marker_at_index(index);
-                self.selected_marker_idx = None;
-                self.selected_segment_idx = None;
-            }
-        }
-        if self.show_export {
-            self.clear_hover_audition();
-            self.render_export_dialog(ctx);
-        }
-        if self.active_tab != ActiveTab::SplitAndExport {
-            self.clear_hover_audition();
         }
     }
 }
@@ -1546,6 +1307,524 @@ fn parse_timecode(value: &str) -> Option<f64> {
 }
 
 impl TapeDigizerApp {
+    fn visible_tab(&self) -> ConsoleTab {
+        if self.recorder.is_busy() {
+            ConsoleTab::Input
+        } else {
+            self.console_tab
+        }
+    }
+
+    fn render_console_header(&mut self, ctx: &egui::Context) {
+        let p = palette();
+        let busy = self.recorder.is_busy() || self.job.is_some();
+        let in_editing = self.visible_tab() != ConsoleTab::Input;
+
+        egui::TopBottomPanel::top("console_header")
+            .exact_height(44.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(p.bg_toolbar)
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+            )
+            .show(ctx, |ui| {
+                // Natives Fenster-Verschieben über die freie Fläche der macOS Unified Titlebar
+                let bar_rect = ui.max_rect().expand2(Vec2::new(12.0, 8.0));
+                let drag_resp = ui.interact(bar_rect, ui.id().with("titlebar_drag"), egui::Sense::click_and_drag());
+                if drag_resp.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                ui.horizontal(|ui| {
+                    // Platz für native macOS Traffic Lights in Fullsize Content View
+                    #[cfg(target_os = "macos")]
+                    ui.add_space(68.0);
+
+                    studio_wordmark(ui);
+                    ui.add_space(10.0);
+
+                    let mut is_editing = in_editing;
+                    let can_switch = !self.recorder.is_busy();
+                    ui.add_enabled_ui(can_switch, |ui| {
+                        if segmented_control(
+                            ui,
+                            "main_workspace_segment",
+                            &mut is_editing,
+                            &[
+                                (false, self.text("Aufnahme", "Recording"), "⌘1"),
+                                (true, self.text("Schnitt", "Editing"), "⌘3"),
+                            ],
+                            HEIGHT_PRIMARY,
+                        ) {
+                            if !is_editing && self.console_tab == ConsoleTab::Filter {
+                                self.song_editor.suspend();
+                            }
+                            self.console_tab = if is_editing {
+                                ConsoleTab::Edit
+                            } else {
+                                ConsoleTab::Input
+                            };
+                        }
+                    });
+
+                    // Im Schnitt-Modus direkt die vollständige Workflow-Navigation inkl. Einzeltrack
+                    if in_editing {
+                        ui.add_space(8.0);
+                        let mut current = self.visible_tab();
+                        ui.add_enabled_ui(!busy, |ui| {
+                            if segmented_control(
+                                ui,
+                                "cut_subview_segment",
+                                &mut current,
+                                &[
+                                    (ConsoleTab::Edit, self.text("Marker", "Cut"), "⌘3"),
+                                    (ConsoleTab::Tracks, self.text("Tracks", "Tracks"), "⌘T"),
+                                    (ConsoleTab::Filter, self.text("Einzeltrack", "Track FX"), "⌘F"),
+                                    (ConsoleTab::Export, self.text("Export", "Export"), "⇧⌘E"),
+                                ],
+                                HEIGHT_PRIMARY,
+                            ) {
+                                if self.console_tab == ConsoleTab::Filter && current != ConsoleTab::Filter {
+                                    self.song_editor.suspend();
+                                }
+                                if current == ConsoleTab::Export && self.console_tab != ConsoleTab::Export {
+                                    self.export_song = None;
+                                }
+                                self.console_tab = current;
+                            }
+                        });
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if bevel_button_sized(ui, self.language.code(), 36.0, BevelStyle::Neutral)
+                            .on_hover_text(self.language.display_name())
+                            .clicked()
+                        {
+                            self.language = if self.language == Language::De { Language::En } else { Language::De };
+                            self.save_config();
+                        }
+                        let theme_label = match self.theme_mode {
+                            ThemeMode::Silverface => self.text("Dunkel", "Dark"),
+                            ThemeMode::Obsidian => self.text("Hell", "Light"),
+                        };
+                        if bevel_button_sized(ui, theme_label, 58.0, BevelStyle::Neutral)
+                            .on_hover_text(self.text(
+                                "Zwischen Silverface (Hell) und Obsidian (Dunkel) wechseln",
+                                "Switch between Silverface (Light) and Obsidian (Dark)",
+                            ))
+                            .clicked()
+                        {
+                            self.theme_mode = match self.theme_mode {
+                                ThemeMode::Silverface => ThemeMode::Obsidian,
+                                ThemeMode::Obsidian => ThemeMode::Silverface,
+                            };
+                            ctx.set_style(studio_style_for(self.theme_mode));
+                        }
+                    });
+                });
+
+                // Subtile Trennlinie unter der Unified Titlebar
+                ui.painter().line_segment(
+                    [Pos2::new(bar_rect.min.x, bar_rect.max.y), Pos2::new(bar_rect.max.x, bar_rect.max.y)],
+                    Stroke::new(1.0, p.border_subtle),
+                );
+            });
+    }
+
+    fn render_record_control(&mut self, ui: &mut Ui) {
+        let state = self.recorder.state();
+        let label = match state {
+            RecorderState::WaitingForSignal => self.text("Warten abbrechen", "Cancel waiting").to_string(),
+            RecorderState::Recording => {
+                if self.run_on_seconds > 0 {
+                    format!("{} · {} s", self.text("Stopp mit Nachlauf", "Stop with tail"), self.run_on_seconds)
+                } else {
+                    self.text("Aufnahme stoppen", "Stop recording").to_string()
+                }
+            }
+            RecorderState::RunOn => self.text("Sofort stoppen", "Stop immediately").to_string(),
+            RecorderState::Finalizing => self.text("WAV abschließen …", "Finalizing WAV …").to_string(),
+            _ => self.text("● Aufnahme starten", "● Record").to_string(),
+        };
+        let ready = self.job.is_none() && (state != RecorderState::Finalizing)
+            && (self.recorder.is_busy() || self.current_channel_pair().is_some());
+        if ui.add_enabled_ui(ready, |ui| bevel_button_sized(ui, &label, 148.0, BevelStyle::Record)).inner.clicked() {
+            if state == RecorderState::RunOn {
+                self.recorder.stop_immediately();
+            } else {
+                self.record_or_stop();
+            }
+        }
+        if state == RecorderState::Recording && self.run_on_seconds > 0
+            && bevel_button(ui, self.text("Sofort stoppen", "Stop immediately"), BevelStyle::Neutral).clicked()
+        {
+            self.recorder.stop_immediately();
+        }
+
+        match state {
+            RecorderState::WaitingForSignal => {
+                ui.spinner();
+                ui.label(self.text("Warte auf Signal", "Waiting for signal"));
+            }
+            RecorderState::Recording | RecorderState::RunOn => {
+                let elapsed = timecode(self.recorder.elapsed_duration().as_secs_f64());
+                if state == RecorderState::RunOn {
+                    let remaining = self.recorder.remaining_duration().map_or(0.0, |time| time.as_secs_f64());
+                    ui.colored_label(LED_AMBER, RichText::new(format!("{} {:.0} s", self.text("Nachlauf", "Tail"), remaining.ceil())).monospace());
+                } else {
+                    time_display(ui, format!("REC {elapsed}"));
+                }
+            }
+            RecorderState::Monitoring => {
+                ui.colored_label(LED_GREEN, self.text("● Pegelcheck aktiv", "● Monitoring active"));
+            }
+            _ => {}
+        }
+    }
+
+    fn render_console(&mut self, ctx: &egui::Context) {
+        let has_audio = self.player.total_seconds() > 0.1 && !self.waveform_cache.levels.is_empty();
+        let editable = !self.recorder.is_busy() && self.job.is_none() && has_audio;
+        let total = self.player.total_seconds();
+        let cursor = self.player.current_seconds();
+        if self.visible_tab() == ConsoleTab::Filter {
+            self.player.pause();
+            self.player.stop_audition();
+        } else {
+            self.song_editor.finish_edit(&mut self.splitter);
+            self.song_editor.suspend();
+        }
+
+        let p = palette();
+        let show_top_bridge = self.visible_tab() == ConsoleTab::Input
+            || (self.visible_tab() != ConsoleTab::Filter && has_audio)
+            || self.ui_error_message.is_some()
+            || self.job.as_ref().is_some_and(|job| job.export_progress.is_none());
+
+        if show_top_bridge {
+            egui::TopBottomPanel::top("console_meter_bridge")
+                .show_separator_line(false)
+                .frame(egui::Frame::none().fill(p.bg_window).inner_margin(egui::Margin::symmetric(10.0, 4.0)))
+                .show(ctx, |ui| {
+                    if self.visible_tab() == ConsoleTab::Input {
+                        surface_bay(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| self.render_record_control(ui));
+                            ui.add_space(6.0);
+                            rack_columns(ui, 2, |cols| {
+                                self.render_input_meter(&mut cols[0]);
+                                self.render_recording_report(&mut cols[1]);
+                            });
+                        });
+                    } else if self.visible_tab() != ConsoleTab::Filter {
+                        surface_bay(ui, |ui| {
+                            ui.add_enabled_ui(self.job.is_none(), |ui| self.render_transport(ui));
+                        });
+                    }
+                    if let Some(error) = &self.ui_error_message {
+                        let dismiss = self.text("Schließen", "Dismiss");
+                        let dismissed = ui.horizontal(|ui| {
+                            let dismissed = bevel_button(ui, dismiss, BevelStyle::Compact).clicked();
+                            ui.add(egui::Label::new(RichText::new(error).color(p.red)).truncate())
+                                .on_hover_text(error);
+                            dismissed
+                        }).inner;
+                        if dismissed {
+                            self.ui_error_message = None;
+                        }
+                    }
+                    if let Some(job) = self.job.as_ref().filter(|job| job.export_progress.is_none()) {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(job.label);
+                        });
+                    }
+                });
+        }
+
+        // Schlanke Footer-Statusleiste wie im Silverface-/Obsidian-Entwurf
+        egui::TopBottomPanel::bottom("console_status_footer")
+            .exact_height(24.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(p.bg_toolbar)
+                    .inner_margin(egui::Margin::symmetric(12.0, 3.0)),
+            )
+            .show(ctx, |ui| {
+                let rect = ui.max_rect().expand2(Vec2::new(12.0, 3.0));
+                ui.painter().line_segment(
+                    [Pos2::new(rect.min.x, rect.min.y), Pos2::new(rect.max.x, rect.min.y)],
+                    Stroke::new(1.0, p.border_subtle),
+                );
+                ui.horizontal(|ui| {
+                    let changed = (self.current_audio_path.is_some() || self.current_project_path.is_some())
+                        && self.saved_edits.as_ref() != Some(&self.edits());
+                    let project_lbl = format!(
+                        "● {} · {}{}",
+                        self.tape_name,
+                        self.tape_side.label(self.language),
+                        if changed { " •" } else { "" }
+                    );
+                    ui.label(RichText::new(project_lbl).size(10.5).color(p.text_secondary));
+                    ui.label(RichText::new("|").size(10.5).color(p.border_mid));
+                    ui.label(RichText::new(self.media_source.label(self.language)).size(10.5).color(p.text_muted));
+                    if let Some(dev) = self.current_device() {
+                        ui.label(RichText::new("|").size(10.5).color(p.border_mid));
+                        ui.add(
+                            egui::Label::new(RichText::new(&dev.name).size(10.5).color(p.teal))
+                                .truncate(),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let status_tc = if self.recorder.is_busy() {
+                            timecode(self.recorder.elapsed_duration().as_secs_f64())
+                        } else {
+                            timecode(total)
+                        };
+                        ui.label(RichText::new(status_tc).monospace().size(10.5).color(p.amber));
+                    });
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(p.bg_window).inner_margin(egui::Margin::symmetric(10.0, 6.0)))
+            .show(ctx, |ui| {
+                #[cfg(test)]
+                let bounds = ui.max_rect();
+                let available = ui.available_height();
+                let tab = self.visible_tab();
+                if tab != ConsoleTab::Edit || !editable {
+                    self.clear_hover_audition();
+                }
+
+                match tab {
+                    _ if tab != ConsoleTab::Input && !has_audio => self.render_edit_welcome(ui, ctx),
+                    ConsoleTab::Input => {
+                        let wave_height = (available - 296.0).clamp(70.0, 220.0);
+                        self.render_live_timeline(ui, wave_height);
+                        ui.add_space(6.0);
+                        self.render_input_setup(ui);
+                    }
+                    ConsoleTab::Edit => {
+                        ui.add_enabled_ui(editable, |ui| {
+                            let legacy_panel_id = egui::Id::new("whole_recording_processing");
+                            let mut whole_recording = ui.data(|data| data.get_temp::<bool>(legacy_panel_id)).unwrap_or(false);
+                            let wave_height = if whole_recording {
+                                (ui.available_height() * 0.22).clamp(84.0, 210.0)
+                            } else {
+                                (ui.available_height() * 0.27).clamp(108.0, 260.0)
+                            };
+                            self.render_timeline(ui, total, cursor, true, wave_height);
+                            ui.add_space(8.0);
+                            surface_bay(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    segmented_control(
+                                        ui,
+                                        "edit_detail_mode",
+                                        &mut whole_recording,
+                                        &[
+                                            (false, self.text("Schnitt-Lupe", "Cut magnifier"), ""),
+                                            (true, self.text("Aufnahme bearbeiten", "Process recording"), ""),
+                                        ],
+                                        HEIGHT_CONTROL,
+                                    );
+                                });
+                                ui.add_space(6.0);
+                                ui.data_mut(|data| data.insert_temp(legacy_panel_id, whole_recording));
+                                if whole_recording {
+                                    self.render_denoiser_and_cut_panel(ui, total, cursor);
+                                } else {
+                                    self.render_detail_panel(ui, total, cursor);
+                                }
+                            });
+                        });
+                    }
+                    ConsoleTab::Filter => {
+                        let tracks = self.splitter.get_tracks(total);
+                        let legacy = self.legacy_song_settings();
+                        let action = ui.add_enabled_ui(editable, |ui| {
+                            self.song_editor.show(ui, self.player.get_samples_l(), self.player.get_samples_r(), self.player.sample_rate(),
+                                &tracks, &mut self.selected_segment_idx, &mut self.splitter, &legacy, self.export_highpass_20hz, &self.saved_noise_presets, self.language)
+                        }).inner;
+                        if let Some(action) = action {
+                            match action {
+                                SongEditorAction::BackToCut => {
+                                    self.song_editor.suspend();
+                                    self.console_tab = ConsoleTab::Edit;
+                                    ctx.request_repaint();
+                                }
+                                SongEditorAction::Export(segment) => {
+                                    self.song_editor.suspend();
+                                    self.export_outcome = None;
+                                    self.export_song = Some(segment);
+                                    self.export_page = 0;
+                                    self.console_tab = ConsoleTab::Export;
+                                    ctx.request_repaint();
+                                }
+                            }
+                        }
+                    }
+                    ConsoleTab::Tracks => {
+                        let tracks = self.splitter.get_tracks(total);
+                        ui.add_enabled_ui(editable, |ui| {
+                            surface_bay(ui, |ui| self.render_track_list(ui, &tracks));
+                        });
+                    }
+                    ConsoleTab::Export => {
+                        let exporting = self.job.as_ref().is_some_and(|job| job.export_progress.is_some());
+                        ui.add_enabled_ui(exporting || self.job.is_none(), |ui| {
+                            surface_bay(ui, |ui| {
+                                self.render_export_panel(ui);
+                            });
+                        });
+                    }
+                }
+                #[cfg(test)]
+                assert!(
+                    bounds.expand(1.0).contains_rect(ui.min_rect()),
+                    "Console tab {} (lang={:?}, mod={}) overflows: {:?} vs {:?}", tab as u8, self.language, self.song_editor.layout_test_module(), ui.min_rect(), bounds
+                );
+            });
+    }
+
+    fn render_edit_welcome(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let p = palette();
+        ui.add_space(20.0);
+        surface_bay(ui, |ui| {
+            bay_header(
+                ui,
+                self.text("Schnitt & Track-Bearbeitung", "Editing & track processing"),
+                self.text("Noch kein Projekt oder Audio geladen", "No project or audio loaded yet"),
+            );
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(self.text("Aus Aufnahmen werden fertige Tracks", "Turn recordings into finished tracks"))
+                    .size(16.0)
+                    .strong()
+                    .color(p.text_primary),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(self.text(
+                    "Lade ein bestehendes TapeDigizer-Projekt oder eine WAV-Datei, um Schnittmarken zu setzen, einzelne Tracks klanglich aufzubereiten und zu exportieren.",
+                    "Load an existing TapeDigizer project or a WAV file to set cut markers, process individual tracks, and export.",
+                ))
+                .color(p.text_secondary),
+            );
+            ui.add_space(14.0);
+            ui.add_enabled_ui(self.job.is_none(), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if bevel_button_sized(
+                        ui,
+                        self.text("Projekt / WAV laden …", "Load project / WAV …"),
+                        186.0,
+                        BevelStyle::Primary,
+                    )
+                    .on_hover_text("⌘O")
+                    .clicked()
+                    {
+                        self.open_project_dialog(ctx);
+                    }
+                    ui.add_space(4.0);
+                    if bevel_button_sized(
+                        ui,
+                        self.text("Neue Aufnahme vorbereiten", "Prepare a new recording"),
+                        186.0,
+                        BevelStyle::Neutral,
+                    )
+                    .on_hover_text("⌘1")
+                    .clicked()
+                    {
+                        self.console_tab = ConsoleTab::Input;
+                    }
+                });
+            });
+            ui.add_space(18.0);
+            rack_columns(ui, 3, |cols| {
+                for (col, title, description) in [
+                    (0, self.text("1. Schnitt & Marker", "1. Cut & markers"), self.text("Schnittmarken, Stille-Erkennung und Trackgrenzen präzise festlegen.", "Set cut markers, silence detection and track boundaries.")),
+                    (1, self.text("2. Track-Bearbeitung", "2. Process track"), self.text("Einzelne Tracks fokussiert mit Rauschfilter, EQ, Dynamik & Routing aufbereiten.", "Process individual tracks with denoiser, EQ, dynamics & routing.")),
+                    (2, self.text("3. Export", "3. Export"), self.text("Tracks benennen, normalisieren und sauber als WAV-Dateien ausgeben.", "Name tracks, normalize and export clean WAV files.")),
+                ] {
+                    egui::Frame::none()
+                        .fill(p.bg_card)
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                        .show(&mut cols[col], |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(RichText::new(title).strong().color(p.text_primary));
+                            ui.add_space(3.0);
+                            ui.label(RichText::new(description).size(11.5).color(p.text_secondary));
+                        });
+                }
+            });
+        });
+    }
+
+    fn render_live_timeline(&mut self, ui: &mut Ui, waveform_height: f32) {
+        surface_bay(ui, |ui| {
+            ui.horizontal(|ui| {
+                section_title(ui, self.text("Band-Transport & Live-Wellenform", "Tape transport & live waveform"), RECORD_ACCENT);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak("PCM 24-bit · WAV · Stereo");
+                });
+            });
+            ui.add_space(6.0);
+            let state = self.recorder.state();
+            let recording = matches!(state, RecorderState::Recording | RecorderState::RunOn);
+            let running = recording || state == RecorderState::Monitoring;
+            let elapsed = self.recorder.elapsed_duration().as_secs_f64();
+            let limit = (self.selected_timer_minutes > 0)
+                .then(|| f64::from(self.selected_timer_minutes + self.time_headroom_minutes) * 60.0 + f64::from(self.run_on_seconds));
+            let status = match state {
+                RecorderState::WaitingForSignal => self.text("Warte auf Eingangssignal …", "Waiting for input signal …"),
+                RecorderState::Monitoring => self.language.live_waveform_monitoring(),
+                RecorderState::Finalizing => self.text("WAV wird abgeschlossen …", "Finalizing WAV …"),
+                _ => self.language.live_waveform_idle(),
+            };
+            let nominal_secs = f64::from(self.selected_timer_minutes.max(30)) * 60.0;
+            let deck_h = waveform_height.clamp(70.0, 180.0);
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(232.0, deck_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        draw_tape_transport_deck(
+                            ui,
+                            elapsed,
+                            nominal_secs,
+                            running,
+                            recording,
+                            self.media_source.label(self.language),
+                        );
+                    },
+                );
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    self.recorder.with_waveform_data(|points| {
+                        let points = if recording { points } else { &[] };
+                        crate::ui::waveform_widget::render_live_recording_waveform(ui, points, elapsed, limit, recording, status, deck_h);
+                    });
+                });
+            });
+            if recording {
+                ui.add_space(3.0);
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(remaining) = self.recorder.remaining_duration() {
+                        ui.monospace(format!("{} {}", self.text("Verbleibend", "Remaining"), timecode(remaining.as_secs_f64())));
+                    }
+                    if self.enable_silence_autostop {
+                        let silence = self.recorder.silence_seconds_detected();
+                        if silence > 0.5 {
+                            ui.colored_label(LED_AMBER, format!("{} {silence:.1} / {:.0} s", self.text("Stille", "Silence"), self.autostop_silence_secs));
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     fn record_or_stop(&mut self) {
         if self.recorder.is_busy() {
             self.recorder.request_stop();
@@ -1559,6 +1838,7 @@ impl TapeDigizerApp {
             return;
         }
         self.player.pause();
+        self.console_tab = ConsoleTab::Input;
         self.recorder.configure_autostop(
             self.autostop_threshold_db,
             self.autostop_silence_secs,
@@ -1580,33 +1860,29 @@ impl TapeDigizerApp {
         let total = self.player.total_seconds();
         let position = self.player.current_seconds();
         ui.horizontal_wrapped(|ui| {
-            let play = if self.player.is_playing() { self.language.btn_pause() } else { self.language.btn_play() };
-            if ui.add_enabled(total > 0.0, egui::Button::new(play)).clicked() {
+            let play = if self.player.is_playing() { self.text("Pause", "Pause") } else { self.text("Wiedergabe", "Play") };
+            if ui.add_enabled_ui(total > 0.0, |ui| {
+                bevel_button_sized(
+                    ui,
+                    play,
+                    92.0,
+                    if self.player.is_playing() { BevelStyle::Primary } else { BevelStyle::Neutral },
+                )
+            }).inner.on_hover_text(self.text("Leertaste", "Space")).clicked() {
                 self.player.toggle_play();
             }
-            if ui.add_enabled(total > 0.0, egui::Button::new(self.language.btn_stop())).clicked() {
+            if ui.add_enabled_ui(total > 0.0, |ui| {
+                bevel_button_sized(ui, self.language.btn_stop(), 68.0, BevelStyle::Neutral)
+            }).inner.clicked() {
                 self.player.stop();
             }
             time_display(ui, format!("{}  /  {}", timecode(position), timecode(total)));
-            ui.separator();
-            if ui.add_enabled(total > 0.0, egui::Button::new(self.text("│ Marker setzen · M", "│ Add marker · M"))).clicked()
+            ui.add_space(6.0);
+            if ui.add_enabled_ui(total > 0.0, |ui| {
+                bevel_button(ui, self.text("Marker setzen", "Add marker"), BevelStyle::Neutral)
+            }).inner.on_hover_text("M").clicked()
             {
                 self.add_marker(position);
-            }
-            let lupe = self.text("🔍 Schnitt-Lupe · L", "🔍 Cut Magnifier · L");
-            if ui.toggle_value(&mut self.magnifier_scope_active, lupe).clicked() && self.magnifier_scope_active {
-                self.denoiser_panel_active = false;
-            }
-            let denoise_lbl = self.text("🔇 Rausch- & DC-Filter · F", "🔇 Noise & DC Filter · F");
-            if ui.toggle_value(&mut self.denoiser_panel_active, denoise_lbl).clicked() && self.denoiser_panel_active {
-                self.magnifier_scope_active = false;
-                self.refresh_noise_presets();
-            }
-            let tracks = self.text("Trackliste", "Track list");
-            ui.toggle_value(&mut self.show_tracks, tracks);
-            if ui.add_enabled(total > 0.0, primary_button(self.text("Exportieren … · ⇧⌘E", "Export … · ⇧⌘E"))).clicked() {
-                self.export_page = 0;
-                self.show_export = true;
             }
         });
     }
@@ -1615,7 +1891,6 @@ impl TapeDigizerApp {
         let snapped = self.snap_time_if_enabled(position);
         if let Some(index) = self.splitter.add_marker(snapped, self.player.total_seconds(), self.player.sample_rate()) {
             self.select_marker(index);
-            self.magnifier_scope_active = true;
         }
     }
 
@@ -1633,37 +1908,35 @@ impl TapeDigizerApp {
     }
 
     fn request_marker_delete(&mut self, index: usize) {
-        if let Some(&time) = self.splitter.markers.get(index) {
-            let title = self.splitter.custom_titles.get(index + 1)
-                .filter(|title| !title.is_empty()).cloned()
-                .unwrap_or_else(|| format!("Track {:02}", index + 2));
-            self.pending_delete_marker = Some((index, time, title));
+        if index < self.splitter.markers.len() {
+            self.pending_delete_marker = Some(index);
         }
     }
 
-    // -------------------------------------------------------------
-    // TAB 1: Aufnahme & Einpegeln
-    // -------------------------------------------------------------
-    fn render_tab_recording(&mut self, ui: &mut Ui) {
-        ui.columns(2, |columns| {
-            let setup = &mut columns[0];
-            let editable = !self.recorder.is_busy();
-            setup.add_enabled_ui(editable, |ui| {
-                studio_panel(ui, self.text("Quelle & Projekt", "Source & project"), |ui| {
-                    // Media Source Presets (Kassette, Tonband, Vinyl LP, Single 45)
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(self.text("Quelle:", "Source:")).color(TEXT_SECONDARY));
-                        for src in [
-                            MediaSourceType::Cassette,
-                            MediaSourceType::ReelToReel,
-                            MediaSourceType::VinylLp,
-                            MediaSourceType::VinylSingle,
-                        ] {
-                            if ui.add(mode_button(src.label(self.language), self.media_source == src)).clicked() {
-                                self.apply_media_source_preset(src);
-                            }
-                        }
-                    });
+    fn render_input_setup(&mut self, ui: &mut Ui) {
+        ui.add_enabled_ui(!self.recorder.is_busy() && self.job.is_none(), |ui| {
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                rack_columns(ui, 2, |columns| {
+                surface_bay(&mut columns[0], |ui| {
+                    panel_title(ui, self.text("Quelle & Projekt", "Source & project"));
+                    ui.add_space(3.0);
+                    // Media Source Presets als einheitliches, symmetrisches Segmented Control
+                    let mut source = self.media_source;
+                    if segmented_control(
+                        ui,
+                        "media_source_segment",
+                        &mut source,
+                        &[
+                            (MediaSourceType::Cassette, MediaSourceType::Cassette.label(self.language), ""),
+                            (MediaSourceType::ReelToReel, MediaSourceType::ReelToReel.label(self.language), ""),
+                            (MediaSourceType::VinylLp, MediaSourceType::VinylLp.label(self.language), ""),
+                            (MediaSourceType::VinylSingle, MediaSourceType::VinylSingle.label(self.language), ""),
+                        ],
+                        HEIGHT_CONTROL,
+                    ) {
+                        self.apply_media_source_preset(source);
+                    }
                     ui.add_space(4.0);
 
                     // Album/Bandname + Interpret/Artist side-by-side
@@ -1694,79 +1967,53 @@ impl TapeDigizerApp {
 
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
-                        for side in [TapeSide::SideA, TapeSide::SideB] {
-                            if ui.add(mode_button(side.label(self.language), self.tape_side == side)).clicked() {
-                                self.tape_side = side;
-                            }
-                        }
-                        if ui.button(self.language.btn_change_folder()).clicked() {
+                        segmented_control(
+                            ui,
+                            "tape_side_segment",
+                            &mut self.tape_side,
+                            &[
+                                (TapeSide::SideA, TapeSide::SideA.label(self.language), ""),
+                                (TapeSide::SideB, TapeSide::SideB.label(self.language), ""),
+                            ],
+                            HEIGHT_CONTROL,
+                        );
+                        if bevel_button_sized(ui, self.language.btn_change_folder(), 104.0, BevelStyle::Neutral).clicked() {
                             if let Some(folder) = rfd::FileDialog::new().set_directory(&self.export_directory).pick_folder() {
                                 self.export_directory = folder;
                                 self.save_config();
                             }
                         }
-                        if ui.button(self.text("Im Finder", "Reveal")).clicked() {
+                        if bevel_button_sized(ui, self.text("Im Finder", "Reveal"), 84.0, BevelStyle::Neutral).clicked() {
                             self.reveal_session_in_finder();
                         }
                     });
                     let folder = self.session_project_dir().display().to_string();
-                    ui.add(egui::Label::new(RichText::new(&folder).color(TEXT_SECONDARY).small()).truncate())
+                    ui.add(egui::Label::new(RichText::new(&folder).color(TEXT_MUTED).small()).truncate())
                         .on_hover_text(folder);
+                    ui.add_space(4.0);
+                    panel_title(ui, self.text("Audioeingang", "Audio input"));
+                    self.render_input_routing(ui);
                 });
 
-                ui.add_space(7.0);
-                studio_panel(ui, self.text("Audioeingang", "Audio input"), |ui| {
-                    ui.horizontal(|ui| {
-                        let device = self.current_device().map(|device| format!("{}  ·  {} ch", device.name, device.channels))
-                            .unwrap_or_else(|| self.language.label_no_device().into());
-                        let selected = self.selected_device_idx;
-                        let combo_w = (ui.available_width() - 126.0).max(120.0);
-                        egui::ComboBox::from_id_salt("device_combo")
-                            .width(combo_w).truncate().selected_text(device)
-                            .show_ui(ui, |ui| {
-                                for (index, device) in self.available_devices.iter().enumerate() {
-                                    ui.selectable_value(&mut self.selected_device_idx, index, &device.name);
-                                }
-                            });
-                        if self.selected_device_idx != selected {
-                            if let Some(device) = self.current_device() {
-                                self.channel_pairs = get_channel_pairs_for_device(device);
-                                self.selected_pair_idx = 0;
-                                self.save_config();
-                            }
-                        }
-                        if ui.button(format!("↻ {}", self.language.btn_rescan())).clicked() {
-                            self.refresh_device_list();
-                        }
-                    });
-
-                    let channels = self.current_channel_pair().map(|pair| pair.label)
-                        .unwrap_or_else(|| self.language.label_select_channel().into());
-                    let selected = self.selected_pair_idx;
-                    egui::ComboBox::from_id_salt("channel_combo")
-                        .width(ui.available_width()).truncate().selected_text(channels)
-                        .show_ui(ui, |ui| {
-                            for (index, pair) in self.channel_pairs.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_pair_idx, index, &pair.label);
-                            }
-                        });
-                    if self.selected_pair_idx != selected {
-                        self.save_config();
-                    }
-                });
-
-                ui.add_space(7.0);
-                studio_panel(ui, self.text("Aufnahmedauer & Auto-Stopp", "Duration & auto-stop"), |ui| {
+                surface_bay(&mut columns[1], |ui| {
+                    panel_title(ui, self.text("Aufnahmedauer & Auto-Stopp", "Duration & auto-stop"));
+                    ui.add_space(3.0);
                     let before_timer = self.selected_timer_minutes;
                     let before_headroom = self.time_headroom_minutes;
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = 5.0;
                         ui.label(RichText::new(self.text("Dauer:", "Length:")).color(TEXT_SECONDARY).small());
-                        for (minutes, label) in [
-                            (10, "10m"), (25, "25m"), (30, "30m"), (45, "45m"), (60, "60m"), (90, "90m"),
-                            (0, self.language.preset_unlimited()),
+                        for (minutes, label, w) in [
+                            (10, "10m", 44.0), (25, "25m", 44.0), (30, "30m", 44.0),
+                            (45, "45m", 44.0), (60, "60m", 44.0), (90, "90m", 44.0),
+                            (0, self.language.preset_unlimited(), 78.0),
                         ] {
-                            if ui.add(mode_button(label, self.selected_timer_minutes == minutes)).clicked() {
+                            if bevel_button_sized(
+                                ui,
+                                label,
+                                w,
+                                if self.selected_timer_minutes == minutes { BevelStyle::Engaged } else { BevelStyle::Neutral },
+                            ).clicked() {
                                 self.selected_timer_minutes = minutes;
                             }
                         }
@@ -1789,20 +2036,6 @@ impl TapeDigizerApp {
                         ui.spacing_mut().slider_width = 55.0;
                         ui.add(egui::Slider::new(&mut self.time_headroom_minutes, 0..=30).suffix(" m"));
                     });
-
-                    let summary_text = if self.selected_timer_minutes > 0 {
-                        let total = self.selected_timer_minutes + self.time_headroom_minutes;
-                        format!(
-                            "⏱ {} min + {} min {} = {}:00 min max.",
-                            self.selected_timer_minutes,
-                            self.time_headroom_minutes,
-                            self.text("Headroom", "Headroom"),
-                            total
-                        )
-                    } else {
-                        self.text("⏱ Unbegrenzt (kein Zeitlimit)", "⏱ Unlimited (no time limit)").to_string()
-                    };
-                    ui.label(RichText::new(summary_text).color(LED_AMBER).small());
 
                     let mut cfg_changed = self.selected_timer_minutes != before_timer
                         || self.time_headroom_minutes != before_headroom;
@@ -1866,10 +2099,6 @@ impl TapeDigizerApp {
                             }
                         });
 
-                        ui.label(RichText::new(self.text(
-                            "💡 Tipp: -100 dBFS sucht nach fehlendem Signal und verhindert vorzeitiges Abbrechen bei Bandrauschen oder Pausen.",
-                            "💡 Tip: -100 dBFS searches for lost signal and prevents early cutoff during tape hiss or gaps.",
-                        )).color(TEXT_SECONDARY).small());
                     }
 
                     if cfg_changed {
@@ -1881,280 +2110,219 @@ impl TapeDigizerApp {
                         self.save_config();
                     }
                 });
-            });
-
-            let signal = &mut columns[1];
-            studio_panel(signal, self.text("Eingangspegel", "Input levels"), |ui| {
-                let monitoring = self.recorder.state() == RecorderState::Monitoring;
-                let meter_snap = self.recorder.get_meter();
-                ui.horizontal_wrapped(|ui| {
-                    let label = if monitoring {
-                        self.text("⏹ Pegelcheck beenden", "⏹ End level check")
-                    } else {
-                        self.text("▶ Pegel prüfen (Monitoring)", "▶ Check levels")
-                    };
-                    if ui.add_enabled(editable && (monitoring || self.current_channel_pair().is_some()),
-                        mode_button(label, monitoring)).clicked()
-                    {
-                        if monitoring {
-                            self.recorder.stop_monitoring();
-                        } else if let (Some(device), Some(pair)) = (self.current_device(), self.current_channel_pair()) {
-                            let name = device.name.clone();
-                            self.ui_error_message = self.recorder.start_monitoring(&name, pair).err();
-                        }
-                    }
-                    if ui.small_button(self.text("Peak/Clip Reset", "Reset peaks"))
-                        .on_hover_text(self.text("Gehaltene Spitzenwerte & Clip-Anzeige zurücksetzen", "Reset peak hold & clip indicator"))
-                        .clicked()
-                    {
-                        self.recorder.reset_meter_peaks();
-                    }
-                    if meter_snap.peak_hold_l_db > -60.0 || meter_snap.peak_hold_r_db > -60.0 {
-                        let diff = meter_snap.peak_hold_l_db - meter_snap.peak_hold_r_db;
-                        let bal_col = if diff.abs() > 3.0 { LED_AMBER } else { TEXT_SECONDARY };
-                        ui.label(RichText::new(format!("Δ L/R: {:+.1} dB", diff)).monospace().small().color(bal_col));
-                    }
-                });
-                if render_stereo_meter(ui, &meter_snap) {
-                    self.recorder.reset_meter_peaks();
-                }
-                ui.label(RichText::new(self.language.meter_instructions()).color(TEXT_SECONDARY).small());
-            });
-            signal.add_space(7.0);
-            studio_panel(signal, self.text("Live-Wellenform", "Live waveform"), |ui| {
-                let state = self.recorder.state();
-                let recording = matches!(state, RecorderState::Recording | RecorderState::RunOn);
-                let elapsed = self.recorder.elapsed_duration().as_secs_f64();
-                let limit = (self.selected_timer_minutes > 0)
-                    .then(|| f64::from(self.selected_timer_minutes + self.time_headroom_minutes) * 60.0 + self.run_on_seconds as f64);
-                let idle = match state {
-                    RecorderState::WaitingForSignal => self.text("Warte auf Eingangssignal …", "Waiting for input signal …"),
-                    RecorderState::Monitoring => self.language.live_waveform_monitoring(),
-                    _ => self.language.live_waveform_idle(),
-                };
-                self.recorder.with_waveform_data(|points| {
-                    crate::ui::waveform_widget::render_live_recording_waveform(ui, points, elapsed, limit, recording, idle);
-                });
-                ui.horizontal_wrapped(|ui| {
-                    time_display(ui, timecode(elapsed));
-                    if let Some(remaining) = self.recorder.remaining_duration() {
-                        let label = self.text("Verbleibend", "Remaining");
-                        ui.label(format!("{label}  {}", timecode(remaining.as_secs_f64())));
-                    }
-                    if recording && self.enable_silence_autostop {
-                        let sil = self.recorder.silence_seconds_detected();
-                        if sil > 0.5 {
-                            let sil_msg = format!("⏳ Stille: {:.1}s / {:.0}s ({:.0} dB)", sil, self.autostop_silence_secs, self.autostop_threshold_db);
-                            ui.label(RichText::new(sil_msg).color(LED_AMBER).small());
-                        }
-                    }
-                    ui.label(RichText::new(format!("PCM 24-bit · Stereo · {}", self.media_source.label(self.language))).color(TEXT_SECONDARY));
                 });
             });
         });
     }
 
-    // -------------------------------------------------------------
-    // TAB 2: Pegel-Diagnose & Regler-Empfehlung
-    // -------------------------------------------------------------
-    fn render_tab_diagnosis(&mut self, ui: &mut Ui) {
-        ui.add_space(2.0);
-
-        let Some(report) = self.analysis_report.clone() else {
-            ui.heading(if self.language == Language::De { "Noch keine Aufnahme analysiert." } else { "No recording analyzed yet." });
-            if let Some(ref err) = self.ui_error_message {
-                ui.add_space(8.0);
-                ui.colored_label(LED_RED, format!("⚠️ {}", err));
-            } else {
-                ui.label(if self.language == Language::De { "Starte zuerst eine Aufnahme in Tab 1 oder öffne eine WAV-Datei (⌘O)." } else { "Start a recording in Tab 1 first or open a WAV file (⌘O)." });
-            }
-            ui.add_space(12.0);
-            if ui.button(if self.language == Language::De { "Zurück zu Tab 1 (Aufnahme)" } else { "Back to Tab 1 (Recording)" }).clicked() {
-                self.active_tab = ActiveTab::Recording;
-            }
-            return;
-        };
-
-        // Top 2-column layout: Left = Analog Gain Knob Card, Right = Stereo Balance & Signal Health
-        let (adjustment_db, is_clip) = match report.diagnosis {
-            LevelDiagnosis::Clipped { recommended_cut_db, .. } => (-recommended_cut_db, true),
-            LevelDiagnosis::TooQuiet { recommended_boost_db, .. } => (recommended_boost_db, false),
-            LevelDiagnosis::Optimal { .. } => (0.0, false),
-        };
-
-        ui.columns(2, |cols| {
-            render_gain_knob_card(
-                &mut cols[0],
-                self.language.card_knob_title(),
-                report.max_peak_db,
-                adjustment_db,
-                is_clip,
-            );
-
-            studio_panel(&mut cols[1], self.text("Stereo-Balance & Analog-Diagnose", "Stereo balance & analog diagnostics"), |ui| {
-                let bal = report.stereo_balance_db;
-                let abs_bal = bal.abs();
-                let (bal_text, bal_col) = if abs_bal < 0.8 {
-                    (self.text("Ausgewogen (L ≈ R)", "Balanced (L ≈ R)").to_string(), LED_GREEN)
-                } else if bal > 0.0 {
-                    (format!("Links +{:.1} dB lauter", bal), if abs_bal > 2.5 { LED_AMBER } else { TEXT_PRIMARY })
-                } else {
-                    (format!("Rechts +{:.1} dB lauter", -bal), if abs_bal > 2.5 { LED_AMBER } else { TEXT_PRIMARY })
-                };
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(self.text("L/R Balance:", "L/R Balance:")).color(TEXT_SECONDARY));
-                    ui.label(RichText::new(bal_text).strong().monospace().color(bal_col));
-                    if abs_bal >= 0.5 {
-                        let active = (self.export_balance_db + bal).abs() < 0.2 && self.export_balance_db.abs() >= 0.2;
-                        let btn_lbl = if active {
-                            self.text("✓ L/R-Ausgleich aktiv", "✓ L/R trim active")
-                        } else {
-                            self.text("Beim Export ausgleichen", "Compensate on export")
-                        };
-                        if ui.add(mode_button(btn_lbl, active)).clicked() {
-                            self.export_balance_db = if active { 0.0 } else { (-bal).clamp(-12.0, 12.0) };
+    fn render_input_routing(&mut self, ui: &mut Ui) {
+        ui.add_enabled_ui(!self.recorder.is_busy() && self.job.is_none(), |ui| {
+            ui.horizontal(|ui| {
+                let device = self.current_device().map(|device| format!("{}  ·  {} ch", device.name, device.channels))
+                    .unwrap_or_else(|| self.language.label_no_device().into());
+                let selected = self.selected_device_idx;
+                let combo_w = (ui.available_width() - 126.0).max(120.0);
+                egui::ComboBox::from_id_salt("device_combo")
+                    .width(combo_w).truncate().selected_text(device)
+                    .show_ui(ui, |ui| {
+                        for (index, device) in self.available_devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_device_idx, index, &device.name);
                         }
-                    }
-                });
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(format!(
-                        "RMS L: {:.1} dB  ·  RMS R: {:.1} dB  ·  Dynamik (Crest): {:.1} dB  ·  DC-Offset: {:.2}%",
-                        report.rms_left_db, report.rms_right_db, report.crest_factor_db, report.dc_offset_percent
-                    )).monospace().small().color(TEXT_SECONDARY));
-                });
-
-                ui.horizontal_wrapped(|ui| {
-                    let hp_lbl = self.text("20 Hz Subsonic-/Rumpelfilter (ideal für Schallplatte & Tonband)", "20 Hz subsonic rumble & DC filter");
-                    if ui.checkbox(&mut self.export_highpass_20hz, hp_lbl).changed() {
+                    });
+                if self.selected_device_idx != selected {
+                    self.recorder.stop_monitoring();
+                    if let Some(device) = self.current_device() {
+                        self.channel_pairs = get_channel_pairs_for_device(device);
+                        self.selected_pair_idx = 0;
                         self.save_config();
                     }
-                });
+                }
+                if ui.button(format!("↻ {}", self.language.btn_rescan())).clicked() {
+                    self.recorder.stop_monitoring();
+                    self.refresh_device_list();
+                }
             });
-        });
 
-        ui.add_space(12.0);
-
-        // 4 Hardware Stat Cards
-        ui.horizontal(|ui| {
-            let card_w = (ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0;
-
-            let l_label = if self.language == Language::De { "PEAK KANAL 1 (L)" } else { "PEAK CHANNEL 1 (L)" };
-            render_hardware_metric(ui, card_w, l_label, &format!("{:.1} dBFS", report.peak_left_db), Color32::from_rgb(56, 189, 248));
-
-            let r_label = if self.language == Language::De { "PEAK KANAL 2 (R)" } else { "PEAK CHANNEL 2 (R)" };
-            render_hardware_metric(ui, card_w, r_label, &format!("{:.1} dBFS", report.peak_right_db), Color32::from_rgb(147, 130, 248));
-
-            let headroom = (-1.5 - report.max_peak_db).max(0.0);
-            let head_label = if self.language == Language::De { "HEADROOM (-1.5 dB Ziel)" } else { "HEADROOM (-1.5 dB Target)" };
-            render_hardware_metric(ui, card_w, head_label, &format!("{:.1} dB", headroom), LED_AMBER);
-
-            let (clip_str, clip_col) = if report.clipped_samples > 0 {
-                (format!("{} Samples", report.clipped_samples), LED_RED)
-            } else {
-                ((if self.language == Language::De { "0 (Sauber)" } else { "0 (Clean)" }).into(), LED_GREEN)
-            };
-            let clip_label = if self.language == Language::De { "CLIPPING (VERZERRUNG)" } else { "CLIPPING (DISTORTION)" };
-            render_hardware_metric(ui, card_w, clip_label, &clip_str, clip_col);
-        });
-
-        ui.add_space(14.0);
-
-        ui.horizontal_wrapped(|ui| {
-            if ui.button(self.language.btn_retry()).clicked() {
-                self.active_tab = ActiveTab::Recording;
-            }
-            if ui.add(primary_button(self.language.btn_proceed_to_split())).clicked() {
-                self.active_tab = ActiveTab::SplitAndExport;
+            let channels = self.current_channel_pair().map(|pair| pair.label)
+                .unwrap_or_else(|| self.language.label_select_channel().into());
+            let selected = self.selected_pair_idx;
+            egui::ComboBox::from_id_salt("channel_combo")
+                .width((ui.available_width() - 16.0).max(80.0)).truncate().selected_text(channels)
+                .show_ui(ui, |ui| {
+                    for (index, pair) in self.channel_pairs.iter().enumerate() {
+                        ui.selectable_value(&mut self.selected_pair_idx, index, &pair.label);
+                    }
+                });
+            if self.selected_pair_idx != selected {
+                self.recorder.stop_monitoring();
+                self.save_config();
             }
         });
     }
 
-    // -------------------------------------------------------------
-    // TAB 3: Schnitt & Export
-    // -------------------------------------------------------------
-    fn render_tab_split_export(&mut self, ui: &mut Ui) {
-        let total_sec = self.player.total_seconds();
-        let cur_sec = self.player.current_seconds();
-        let has_audio = total_sec > 0.1 && !self.waveform_cache.levels.is_empty();
+    fn render_input_meter(&mut self, ui: &mut Ui) {
+        let monitoring = self.recorder.state() == RecorderState::Monitoring;
+        let active = monitoring || self.recorder.is_busy();
+        let meter = if active { self.recorder.get_meter() } else { Default::default() };
+        let vu_mode_id = egui::Id::new("input_meter_vintage_vu");
+        let mut use_vu = ui.data(|d| d.get_temp::<bool>(vu_mode_id)).unwrap_or(true);
+        ui.horizontal(|ui| {
+            panel_title(ui, self.text("Eingangspegel", "Input levels"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                segmented_control(
+                    ui,
+                    "input_meter_style",
+                    &mut use_vu,
+                    &[(true, "VU", ""), (false, "LED", "")],
+                    HEIGHT_COMPACT,
+                );
+            });
+        });
+        ui.data_mut(|d| d.insert_temp(vu_mode_id, use_vu));
+        ui.scope(|ui| {
+            let reset_clicked = if use_vu {
+                render_vintage_vu_meter(
+                    ui,
+                    &meter,
+                    self.text("Eingangspegel", "Input levels"),
+                    self.text("Peak und CLIP zurücksetzen", "Reset peak and clip"),
+                    self.text("Übersteuerung erkannt", "Clipping detected"),
+                )
+            } else {
+                render_stereo_meter(
+                    ui,
+                    &meter,
+                    self.text("Eingangspegel", "Input levels"),
+                    self.text("Peak und CLIP zurücksetzen", "Reset peak and clip"),
+                    self.text("Übersteuerung erkannt", "Clipping detected"),
+                )
+            };
+            if reset_clicked {
+                self.recorder.reset_meter_peaks();
+            }
+            let peak = meter.peak_hold_l_db.max(meter.peak_hold_r_db);
+            let (hint, color) = if meter.is_clipping {
+                (self.text("Clipping · Gain am Interface senken", "Clipping · Lower interface gain").to_string(), LED_RED)
+            } else if peak > -60.0 {
+                let delta = meter.peak_hold_r_db - meter.peak_hold_l_db;
+                (format!("Peak {peak:.1} dBFS  ·  R−L {delta:+.1} dB"), TEXT_SECONDARY)
+            } else if active {
+                (self.text("Kein messbarer Eingangsspitzenpegel", "No measurable input peak").to_string(), TEXT_SECONDARY)
+            } else {
+                (self.text("Monitoring aus", "Monitoring off").to_string(), TEXT_MUTED)
+            };
 
-        if !has_audio {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(34, 36, 44))
-                .stroke(Stroke::new(1.0, BORDER_MID))
-                .rounding(5.0)
-                .inner_margin(Vec2::new(12.0, 6.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("ℹ").monospace().strong().color(LED_AMBER));
-                        let note = if self.language == Language::De {
-                            "Noch keine Audiodatei geladen. Starte eine Aufnahme in Tab 1 oder öffne ein gespeichertes Projekt / WAV (⌘O)."
-                        } else {
-                            "No audio recorded or loaded yet. Start recording in Tab 1 or open an existing project / WAV (⌘O)."
-                        };
-                        ui.label(RichText::new(note).color(TEXT_SECONDARY).small());
-                    });
-                });
             ui.add_space(4.0);
-        }
-
-        let show_scope = self.magnifier_scope_active && has_audio;
-        let show_denoiser = self.denoiser_panel_active && has_audio;
-        let wf_height = (ui.available_height() * 0.34).clamp(124.0, 240.0);
-
-        // Full-width main Stereo Waveform always at the top
-        self.render_timeline(ui, total_sec, cur_sec, has_audio, wf_height);
-        ui.add_space(4.0);
-
-        let tracks = self.splitter.get_tracks(total_sec);
-        if show_denoiser && self.show_tracks {
-            ui.columns(2, |columns| {
-                self.render_track_list(&mut columns[0], &tracks);
-                self.render_denoiser_and_cut_panel(&mut columns[1], total_sec, cur_sec);
+            ui.horizontal_wrapped(|ui| {
+                let label = if monitoring {
+                    self.text("Pegelcheck beenden", "End level check")
+                } else {
+                    self.text("Pegel prüfen", "Check levels")
+                };
+                let ready = !self.recorder.is_busy() && self.job.is_none()
+                    && (monitoring || self.current_channel_pair().is_some());
+                if ui.add_enabled_ui(ready, |ui| {
+                    bevel_button(ui, label, if monitoring { BevelStyle::Engaged } else { BevelStyle::Neutral })
+                }).inner.clicked() {
+                    if monitoring {
+                        self.recorder.stop_monitoring();
+                    } else if let (Some(device), Some(pair)) = (self.current_device(), self.current_channel_pair()) {
+                        let name = device.name.clone();
+                        self.ui_error_message = self.recorder.start_monitoring(&name, pair).err();
+                    }
+                }
+                if ui.add_enabled(active, egui::Button::new("Peak/Clip Reset").small()).clicked() {
+                    self.recorder.reset_meter_peaks();
+                }
+                ui.colored_label(color, RichText::new(hint).small().monospace());
             });
-        } else if show_denoiser {
-            self.render_denoiser_and_cut_panel(ui, total_sec, cur_sec);
-        } else if show_scope && self.show_tracks {
-            ui.columns(2, |columns| {
-                self.render_track_list(&mut columns[0], &tracks);
-                self.render_detail_panel(&mut columns[1], total_sec, cur_sec);
+
+        });
+    }
+
+    fn render_recording_report(&mut self, ui: &mut Ui) {
+        panel_title(ui, self.text("Aufnahmebefund", "Recording analysis"));
+        ui.scope(|ui| {
+            let report = self.analysis_report.as_ref();
+            let values = match report {
+                Some(report) => [
+                    format!("{:.1}", report.peak_left_db),
+                    format!("{:.1}", report.peak_right_db),
+                    format!("{:.1}", (-report.max_peak_db).max(0.0)),
+                    report.clipped_samples.to_string(),
+                ],
+                None => ["–".into(), "–".into(), "–".into(), "–".into()],
+            };
+            let clip_color = if report.is_some_and(|report| report.clipped_samples > 0) {
+                LED_RED
+            } else {
+                TEXT_SECONDARY
+            };
+            ui.columns(4, |cols| {
+                for ((column, (label, color)), value) in cols.iter_mut().zip([
+                    ("L · dBFS", super::theme::WAVE_LEFT),
+                    ("R · dBFS", super::theme::WAVE_RIGHT),
+                    ("HEADROOM · dB", ACCENT),
+                    ("CLIP", clip_color),
+                ]).zip(values) {
+                    super::theme::meter_readout(column, label, value, color);
+                }
             });
-        } else if show_scope {
-            self.render_detail_panel(ui, total_sec, cur_sec);
-        } else {
-            self.render_track_list(ui, &tracks);
-        }
+            let Some(report) = report else {
+                ui.weak(self.text("Verfügbar nach Aufnahme oder WAV-Import.", "Available after recording or importing WAV."));
+                return;
+            };
+
+            let (gain, color) = match report.diagnosis {
+                LevelDiagnosis::Clipped { recommended_cut_db, .. } => (
+                    format!("{} −{recommended_cut_db:.1} dB", self.text("Interface-Gain", "Interface gain")), LED_RED,
+                ),
+                LevelDiagnosis::TooQuiet { recommended_boost_db, .. } => (
+                    format!("{} +{recommended_boost_db:.1} dB", self.text("Interface-Gain", "Interface gain")), LED_AMBER,
+                ),
+                LevelDiagnosis::Optimal { .. } => (
+                    self.text("Pegel im Zielbereich", "Level in target range").into(), LED_GREEN,
+                ),
+            };
+            let balance = report.stereo_balance_db;
+            let dc_offset = report.dc_offset_percent;
+            let rms = format!("RMS L {:.1} / R {:.1} dBFS  ·  Crest {:.1} dB", report.rms_left_db, report.rms_right_db, report.crest_factor_db);
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(color, RichText::new(gain).small().strong());
+                ui.label(RichText::new(format!("R−L {balance:+.1} dB · DC {dc_offset:.2}%")).monospace().small())
+                    .on_hover_text(rms);
+                let correction = balance.clamp(-12.0, 12.0);
+                let applied = (self.export_balance_db - correction).abs() < 0.05;
+                if balance.abs() >= 0.5 && ui.add_enabled(
+                    self.job.is_none() && !self.recorder.is_busy(),
+                    mode_button(self.text("Export ausgleichen", "Balance export"), applied),
+                ).clicked() {
+                    self.export_balance_db = if applied { 0.0 } else { correction };
+                }
+            });
+        });
     }
 
     fn render_timeline(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64, has_audio: bool, waveform_height: f32) {
-        studio_panel(ui, self.text("Stereo-Wellenform (Gesamtübersicht)", "Stereo waveform (Overview)"), |ui| {
-            // Top compact bar: Edit tools + Hover Audition + Schnitt-Lupe + Zero-Crossing + Undo/Redo + Zoom
-            ui.horizontal(|ui| {
+        ui.scope(|ui| {
+            section_title(ui, self.text("Stereo-Wellenform", "Stereo waveform"), CUT_ACCENT);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for (tool, name, key) in [
-                    (EditTool::Pointer, self.text("↖ Zeiger", "↖ Pointer"), "V"),
-                    (EditTool::Scissor, self.text("│ Schnitt", "│ Split"), "S"),
+                    (EditTool::Pointer, self.text("Zeiger", "Pointer"), "V"),
+                    (EditTool::Scissor, self.text("Schnitt", "Split"), "S"),
                     (EditTool::Select, self.text("Bereich", "Range"), "R"),
                 ] {
-                    if ui.add(mode_button(format!("{name}·{key}"), self.active_edit_tool == tool)).clicked() {
+                    if ui.add(mode_button(format!("{name} · {key}"), self.active_edit_tool == tool)).clicked() {
                         self.active_edit_tool = tool;
                     }
                 }
                 ui.separator();
                 let preview = self.text("Vorhören", "Audition");
-                let detail = self.text("🔍 Lupe", "🔍 Scope");
-                let flt = self.text("🔇 Filter", "🔇 Filter");
                 let zc_lbl = self.text("0-Snap", "0-Snap");
                 let zc_tip = self.text("Schnittmarken automatisch auf Nulldurchgang einrasten (verhindert Knackser)", "Snap markers to zero crossings to prevent clicks");
-                ui.toggle_value(&mut self.hover_preview_enabled, format!("{preview}·H"));
-                if ui.toggle_value(&mut self.magnifier_scope_active, format!("{detail}·L")).clicked() && self.magnifier_scope_active {
-                    self.denoiser_panel_active = false;
-                }
-                if ui.toggle_value(&mut self.denoiser_panel_active, format!("{flt}·F")).clicked() && self.denoiser_panel_active {
-                    self.magnifier_scope_active = false;
-                    self.refresh_noise_presets();
-                }
+                ui.toggle_value(&mut self.hover_preview_enabled, format!("{preview} · H"));
                 if ui.checkbox(&mut self.zero_crossing_snap, zc_lbl)
                     .on_hover_text(zc_tip)
                     .changed()
@@ -2162,12 +2330,12 @@ impl TapeDigizerApp {
                     self.save_config();
                 }
                 ui.separator();
-                if ui.add_enabled(self.splitter.can_undo(), egui::Button::new("↶").small())
+                if ui.add_enabled(self.splitter.can_undo(), egui::Button::new(self.text("Rückgängig", "Undo")).small())
                     .on_hover_text(self.language.btn_undo()).clicked()
                 {
                     self.undo_marker_edit(false);
                 }
-                if ui.add_enabled(self.splitter.can_redo(), egui::Button::new("↷").small())
+                if ui.add_enabled(self.splitter.can_redo(), egui::Button::new(self.text("Wiederholen", "Redo")).small())
                     .on_hover_text(self.language.btn_redo()).clicked()
                 {
                     self.undo_marker_edit(true);
@@ -2205,6 +2373,7 @@ impl TapeDigizerApp {
                 self.active_edit_tool,
                 self.player.is_auditioning(),
                 self.hover_audition_time,
+                false,
             );
 
             if let Some(index) = selected_marker.filter(|&i| self.selected_marker_idx != Some(i)) {
@@ -2212,9 +2381,6 @@ impl TapeDigizerApp {
             }
             if let Some((r_start, r_end)) = interaction.new_selected_region {
                 self.set_scope_region((r_start, r_end));
-                if !self.denoiser_panel_active {
-                    self.magnifier_scope_active = true;
-                }
             }
             if let Some(target_sec) = interaction.seek_to_seconds {
                 if has_audio {
@@ -2315,16 +2481,6 @@ impl TapeDigizerApp {
     }
 
     fn render_detail_panel(&mut self, ui: &mut Ui, total_sec: f64, cur_sec: f64) {
-        // Auto-select closest marker if none is selected and markers exist
-        if self.selected_marker_idx.is_none() && !self.splitter.markers.is_empty() {
-            if let Some((closest_idx, _)) = self.splitter.markers.iter().enumerate().min_by(|(_, a), (_, b)| {
-                (*a - cur_sec).abs().total_cmp(&(*b - cur_sec).abs())
-            }) {
-                self.selected_marker_idx = Some(closest_idx);
-                self.selected_segment_idx = Some(closest_idx + 1);
-            }
-        }
-
         let marker_count = self.splitter.markers.len();
         let active_marker = self.selected_marker_idx
             .and_then(|idx| self.splitter.markers.get(idx).copied().map(|t| (idx, t)));
@@ -2379,26 +2535,28 @@ impl TapeDigizerApp {
             std::sync::Arc::from([])
         };
 
-        studio_panel(ui, self.text("Präzisions-Schnitt-Lupe", "Precision Cut Magnifier"), |ui| {
+        ui.scope(|ui| {
+            section_title(ui, self.text("Präzisions-Schnitt-Lupe", "Precision Cut Magnifier"), CUT_ACCENT);
+            ui.spacing_mut().item_spacing.y = 4.0;
             // Row 1: Marker selector + Timecode editor + Fine Nudge buttons + Delete (fits on 1 line in 480px)
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
                 if let Some((m_idx, m_time)) = active_marker {
-                    if ui.add_enabled(m_idx > 0, egui::Button::new("◀").small())
+                    if ui.add_enabled(m_idx > 0, transport_button("◀", false))
                         .on_hover_text(self.text("Vorherige Schnittmarke", "Previous marker"))
                         .clicked()
                     {
                         self.select_marker(m_idx - 1);
                     }
                     ui.label(
-                        RichText::new(format!("T{:02}({}/{})", m_idx + 2, m_idx + 1, marker_count))
+                        RichText::new(format!("T{:02} · {}/{}", m_idx + 2, m_idx + 1, marker_count))
                             .strong()
                             .monospace()
                             .small()
                             .color(LED_AMBER),
                     );
-                    if ui.add_enabled(m_idx + 1 < marker_count, egui::Button::new("▶").small())
+                    if ui.add_enabled(m_idx + 1 < marker_count, transport_button("▶", false))
                         .on_hover_text(self.text("Nächste Schnittmarke", "Next marker"))
                         .clicked()
                     {
@@ -2435,7 +2593,7 @@ impl TapeDigizerApp {
                         }
                     }
 
-                    if ui.small_button("🗑")
+                    if ui.small_button(self.text("Löschen", "Delete"))
                         .on_hover_text(self.text("Schnittmarke entfernen (⌫)", "Delete cut marker (⌫)"))
                         .clicked()
                     {
@@ -2443,14 +2601,14 @@ impl TapeDigizerApp {
                     }
                 } else {
                     ui.label(RichText::new(self.text("Klicke in die Lupe oder drücke M", "Click inside scope or press M")).color(TEXT_SECONDARY).small());
-                    if ui.small_button(self.text("│ Marke setzen", "│ Place marker")).clicked() {
+                    if ui.small_button(self.text("Marke setzen", "Place marker")).clicked() {
                         self.add_marker(cur_sec);
                     }
                 }
             });
 
             // Row 2: Window radius pills + Auto-Gain + Transients (max 3) & sensitivity (fits on 1 line in 480px)
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
                 for (rad, lbl) in [
@@ -2548,7 +2706,7 @@ impl TapeDigizerApp {
             }
 
             // Row 3: Pre-Roll / Post-Roll / Transition Audition + 1-click Transient Snap buttons
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
                 let ref_t = active_marker.map_or(cur_sec, |(_, t)| t);
@@ -2570,15 +2728,6 @@ impl TapeDigizerApp {
                 {
                     self.player.play_range((ref_t - 1.5).max(0.0), (ref_t + 1.5).min(total_sec));
                 }
-                if ui.small_button(self.text("🔇 Rauschfilter & Schnitt", "🔇 Denoise & Cut"))
-                    .on_hover_text(self.text("Wechselt zum Rauschfilter & Originalschnitt-Studio (Taste F)", "Switch to Denoise & Original Cut Studio (Key F)"))
-                    .clicked()
-                {
-                    self.denoiser_panel_active = true;
-                    self.magnifier_scope_active = false;
-                    self.refresh_noise_presets();
-                }
-
                 if self.show_transients && !transients.is_empty() {
                     ui.separator();
                     for (t_i, tp) in transients.iter().take(crate::splitter::MAX_MARKER_TRANSIENTS).enumerate() {
@@ -3022,19 +3171,14 @@ impl TapeDigizerApp {
         let (sel_start, sel_end) = self.active_selection_or_window(total_sec, cur_sec);
         let sel_dur = (sel_end - sel_start).max(0.0);
 
-        studio_panel(
-            ui,
-            self.text(
-                "Rausch- & DC-Filter-Studio",
-                "Noise & DC Filter Studio",
-            ),
-            |ui| {
+        ui.scope(|ui| {
+                section_title(ui, self.text("Effekte · Rausch- & DC-Filter", "Effects · Noise & DC filter"), FX_ACCENT);
                 ui.spacing_mut().item_spacing.y = 4.0;
 
                 // -------------------------------------------------------------
                 // ROW 1: ORIGINALE AUFNAHME SCHNEIDEN (OHNE BACKUP SPEICHERN)
                 // -------------------------------------------------------------
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
 
@@ -3131,20 +3275,12 @@ impl TapeDigizerApp {
                         }
                     }
 
-                    if ui
-                        .small_button("🔍")
-                        .on_hover_text(self.text("Zur Schnitt-Lupe wechseln (Taste L)", "Switch to Cut Magnifier (Key L)"))
-                        .clicked()
-                    {
-                        self.magnifier_scope_active = true;
-                        self.denoiser_panel_active = false;
-                    }
                 });
 
                 // -------------------------------------------------------------
                 // ROW 2: RAUSCH-SAMPLE LERNEN & PRESET-VERWALTUNG (WAV + JSON)
                 // -------------------------------------------------------------
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
 
@@ -3282,7 +3418,7 @@ impl TapeDigizerApp {
                 // ROW 3: ECHTZEIT-VORHÖREN, REGLER & IN AUFNAHME EINRECHNEN
                 // -------------------------------------------------------------
                 let mut params_changed = false;
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.spacing_mut().button_padding = Vec2::new(4.0, 2.0);
 
@@ -3410,32 +3546,27 @@ impl TapeDigizerApp {
                     let selected_track = target_seg.and_then(|idx| tracks.iter().find(|t| t.segment_index == idx && !t.is_pause));
                     let can_apply = self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled;
 
-                    let bake_btn_lbl = self.text("✨ Einrechnen ▼", "✨ Apply ▼");
-                    let bake_tip = self.text(
-                        "Filter permanent einrechnen: Klick für Optionen (nur gewählter Track oder ganze Aufnahme)",
-                        "Bake filter permanently: Click for options (selected track only or entire recording)",
+                    let apply_track = selected_track.map_or_else(
+                        || self.text("In Track einrechnen", "Apply to track").to_string(),
+                        |track| format!("{} {:02}", self.text("Anwenden auf Track", "Apply to Track"), track.index),
                     );
-                    ui.add_enabled_ui(can_apply, |ui| {
-                        ui.menu_button(RichText::new(bake_btn_lbl).color(LED_GREEN).strong().small(), |ui| {
-                            if let Some(ref track) = selected_track {
-                                let track_seg = track.segment_index;
-                                let track_txt = if self.language == Language::De {
-                                    format!("Track {:02} filtern („{}“)", track.index, track.title)
-                                } else {
-                                    format!("Filter Track {:02} (\"{}\")", track.index, track.title)
-                                };
-                                if ui.button(track_txt).clicked() {
-                                    self.bake_denoiser_into_track(ui.ctx(), track_seg);
-                                    ui.close_menu();
-                                }
-                            }
-                            let all_txt = self.text("Ganze Aufnahme filtern", "Filter entire recording");
-                            if ui.button(all_txt).clicked() {
-                                self.bake_denoiser_into_recording(ui.ctx());
-                                ui.close_menu();
-                            }
-                        }).response.on_hover_text(bake_tip);
-                    });
+                    let apply_hint = if self.auto_overwrite_original_wav {
+                        self.text("Schreibt die Änderung direkt in die Original-WAV.", "Writes the change directly to the source WAV.")
+                    } else {
+                        self.text("Wendet den Filter auf das geladene Audio an.", "Applies the filter to the loaded audio.")
+                    };
+                    if ui.add_enabled(can_apply && selected_track.is_some(), egui::Button::new(apply_track).small())
+                        .on_hover_text(apply_hint).clicked()
+                    {
+                        if let Some(track) = selected_track {
+                            self.bake_denoiser_into_track(ui.ctx(), track.segment_index);
+                        }
+                    }
+                    if ui.add_enabled(can_apply, egui::Button::new(self.text("In Aufnahme einrechnen", "Apply to recording")).small())
+                        .on_hover_text(apply_hint).clicked()
+                    {
+                        self.bake_denoiser_into_recording(ui.ctx());
+                    }
                 });
 
                 if params_changed {
@@ -3445,7 +3576,7 @@ impl TapeDigizerApp {
                 // -------------------------------------------------------------
                 // ROW 4: SPEKTRALES RAUSCHPROFIL-DISPLAY & STATUS
                 // -------------------------------------------------------------
-                let desired_h = (ui.available_height() - 4.0).clamp(24.0, 96.0);
+                let desired_h = (ui.available_height() - 16.0).clamp(28.0, 110.0);
                 let (spec_rect, _) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), desired_h), egui::Sense::hover());
                 let painter = ui.painter();
@@ -3523,76 +3654,46 @@ impl TapeDigizerApp {
                         if self.last_saved_bytes_info.is_some() { LED_GREEN } else { TEXT_SECONDARY },
                     );
                 }
-            },
-        );
+        });
     }
 
     fn render_track_list(&mut self, ui: &mut Ui, tracks: &[crate::splitter::TrackInfo]) {
-        if !self.show_tracks {
-            return;
-        }
         if self.splitter.custom_titles.len() < tracks.len() {
             self.splitter.custom_titles.resize(tracks.len(), String::new());
         }
 
-        let header_overhead = if self.batch_titles_open { 132.0 } else { 54.0 };
-        let row_pitch = 33.0;
-        let per_page = ((ui.available_height() - header_overhead) / row_pitch).floor().max(1.0) as usize;
+        let header = if self.batch_titles_open { 170.0 } else { 72.0 };
+        let per_page = ((ui.available_height() - header) / 36.0).floor().max(1.0) as usize;
         let pages = tracks.len().div_ceil(per_page).max(1);
         self.track_page = self.track_page.min(pages - 1);
 
-        panel_frame().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                panel_title(ui, self.text("Trackliste", "Track list"));
+        ui.scope(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                section_title(ui, self.text("Trackliste", "Track list"), CUT_ACCENT);
                 let active_tracks = tracks.iter().filter(|t| !t.is_pause).count();
                 let filtered_tracks = tracks.iter().filter(|t| !t.is_pause && t.is_filtered).count();
-                ui.label(RichText::new(format!("{active_tracks} Tracks")).color(TEXT_SECONDARY).small());
+                if active_tracks > 0 {
+                    ui.label(RichText::new(format!("{active_tracks}")).color(TEXT_SECONDARY).small());
+                }
 
-                let filter_menu_lbl = format!("🔇 Filter ({filtered_tracks}/{active_tracks})");
-                ui.menu_button(&filter_menu_lbl, |ui| {
-                    if ui.button(self.text("Alle Tracks filtern", "Filter all tracks")).clicked() {
-                        self.splitter.set_all_tracks_filtered(tracks.len(), true);
-                        ui.close_menu();
-                    }
-                    if ui.button(self.text("Keine Tracks filtern", "Filter no tracks")).clicked() {
-                        self.splitter.set_all_tracks_filtered(tracks.len(), false);
-                        ui.close_menu();
-                    }
-                    if let Some(seg_idx) = self.selected_segment_idx {
-                        if let Some(t) = tracks.iter().find(|t| t.segment_index == seg_idx && !t.is_pause) {
-                            ui.separator();
-                            let toggle_lbl = if self.language == Language::De {
-                                if t.is_filtered {
-                                    format!("Track {:02} nicht filtern", t.index)
-                                } else {
-                                    format!("Track {:02} filtern", t.index)
-                                }
-                            } else if t.is_filtered {
-                                format!("Don't filter Track {:02}", t.index)
-                            } else {
-                                format!("Filter Track {:02}", t.index)
-                            };
-                            if ui.button(toggle_lbl).clicked() {
-                                self.splitter.toggle_track_filter(t.segment_index);
-                                ui.close_menu();
-                            }
-                            if self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled {
-                                let bake_lbl = if self.language == Language::De {
-                                    format!("✨ Track {:02} jetzt filtern (einrechnen)", t.index)
-                                } else {
-                                    format!("✨ Bake filter into Track {:02}", t.index)
-                                };
-                                if ui.button(bake_lbl).clicked() {
-                                    self.bake_denoiser_into_track(ui.ctx(), t.segment_index);
-                                    ui.close_menu();
-                                }
-                            }
-                        }
-                    }
-                });
+                ui.label(RichText::new(format!("{filtered_tracks}/{active_tracks} {}", self.text("gefiltert", "filtered"))).small().color(TEXT_MUTED));
+                if ui.add_enabled_ui(active_tracks > 0, |ui| bevel_button(ui, self.text("Alle filtern", "Filter all"), BevelStyle::Compact)).inner.clicked() {
+                    self.splitter.set_all_tracks_filtered(tracks.len(), true);
+                }
+                if ui.add_enabled_ui(active_tracks > 0, |ui| bevel_button(ui, self.text("Keine", "None"), BevelStyle::Compact)).inner.clicked() {
+                    self.splitter.set_all_tracks_filtered(tracks.len(), false);
+                }
 
-                if ui.small_button(self.text("📋 Liste einfügen", "📋 Paste list"))
+                let selected_track = tracks.iter().find(|track| Some(track.segment_index) == self.selected_segment_idx && !track.is_pause);
+                if ui.add_enabled_ui(selected_track.is_some(), |ui| bevel_button(ui, self.text("Track bearbeiten →", "Process track →"), BevelStyle::Compact)).inner.clicked() {
+                    if let Some(track) = selected_track {
+                        self.selected_region = None;
+                        self.player.seek_seconds(track.start_seconds);
+                        self.console_tab = ConsoleTab::Filter;
+                    }
+                }
+
+                if bevel_button(ui, self.text("Liste einfügen", "Paste list"), BevelStyle::Compact)
                     .on_hover_text(self.text("Mehrere Tracknamen auf einmal einfügen (1 Zeile pro Track)", "Paste multiple track titles at once (1 line per track)"))
                     .clicked()
                 {
@@ -3649,43 +3750,46 @@ impl TapeDigizerApp {
                 });
             }
 
-            ui.add_space(4.0);
+            ui.add_space(6.0);
+            let p = palette();
             let start = self.track_page * per_page;
-            for (index, track) in tracks.iter().enumerate().skip(start).take(per_page) {
+            for (row_idx, (index, track)) in tracks.iter().enumerate().skip(start).take(per_page).enumerate() {
                 let selected = self.selected_segment_idx == Some(index);
-                let border = if selected { ACCENT } else { BORDER_MID };
                 let row_bg = if selected {
-                    Color32::from_rgb(28, 32, 42)
+                    p.accent_soft
+                } else if row_idx % 2 == 0 {
+                    p.bg_card
                 } else {
-                    BG_WINDOW
+                    p.bg_panel
                 };
 
                 egui::Frame::none()
                     .fill(row_bg)
-                    .stroke(Stroke::new(1.0, border))
                     .rounding(6.0)
-                    .inner_margin(egui::Margin::symmetric(5.0, 2.0))
+                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
-                            let badge_txt = if track.is_pause { "⏸".into() } else { format!("{:02}", track.index) };
-                            let badge = egui::Button::new(RichText::new(badge_txt).monospace().small()).selected(selected);
-                            if ui.add_sized([26.0, 20.0], badge).clicked() {
+                            let badge_txt = if track.is_pause { "||".into() } else { format!("{:02}", track.index) };
+                            if bevel_button_sized(
+                                ui,
+                                &badge_txt,
+                                26.0,
+                                if selected { BevelStyle::CompactEngaged } else { BevelStyle::Compact },
+                            ).clicked() {
                                 self.selected_segment_idx = Some(index);
                                 self.selected_marker_idx = index.checked_sub(1);
                                 self.player.seek_seconds(track.start_seconds);
                             }
 
                             // Reserve exact space for the compact right-hand controls so the Track Title field
-                            // is always >= 20 characters wide (>= 180 pt in split view, >= 520 pt in full view)
-                            // while never overflowing the row width.
-                            let right_controls_w = if index > 0 { 210.0 } else { 188.0 };
-                            let title_width = (ui.available_width() - right_controls_w).max(150.0);
+                            // stays >= 520 pt wide at 800 pt while never overflowing the row width.
+                            let right_controls_w = if index > 0 { 242.0 } else { 202.0 };
+                            let title_width = (ui.available_width() - right_controls_w).max(140.0);
 
                             if track.is_pause {
                                 ui.add_sized(
-                                    [title_width, 20.0],
+                                    [title_width, 22.0],
                                     egui::Label::new(RichText::new(self.language.badge_pause()).color(LED_AMBER).small()),
                                 );
                             } else {
@@ -3715,7 +3819,8 @@ impl TapeDigizerApp {
                                     .clicked()
                                 {
                                     self.select_marker(index - 1);
-                                    self.magnifier_scope_active = true;
+                                    self.console_tab = ConsoleTab::Edit;
+                                    ui.ctx().request_repaint();
                                 }
                             } else {
                                 ui.label(start_tc.color(TEXT_SECONDARY));
@@ -3723,7 +3828,7 @@ impl TapeDigizerApp {
 
                             ui.label(RichText::new(track.duration_formatted()).monospace().small().color(TEXT_SECONDARY));
 
-                            if ui.small_button("▶")
+                            if bevel_button(ui, "▶", BevelStyle::Compact)
                                 .on_hover_text(self.text("Track anhören", "Audition track"))
                                 .clicked()
                             {
@@ -3731,7 +3836,15 @@ impl TapeDigizerApp {
                             }
 
                             if !track.is_pause {
-                                let flt_color = if track.is_filtered { LED_GREEN } else { TEXT_MUTED };
+                                if bevel_button(ui, "FX", BevelStyle::Compact)
+                                    .on_hover_text(self.text("Diesen Track im Fokus-Bereich bearbeiten", "Process this track in focused view"))
+                                    .clicked()
+                                {
+                                    self.selected_segment_idx = Some(track.segment_index);
+                                    self.selected_region = None;
+                                    self.player.seek_seconds(track.start_seconds);
+                                    self.console_tab = ConsoleTab::Filter;
+                                }
                                 let flt_tip = if self.language == Language::De {
                                     if track.is_filtered {
                                         format!("Rauschfilter für Track {:02} AKTIV (Klick zum Deaktivieren)", track.index)
@@ -3743,11 +3856,22 @@ impl TapeDigizerApp {
                                 } else {
                                     format!("Noise filter OFF for Track {:02} (Click to enable)", track.index)
                                 };
-                                let btn_resp = ui.small_button(RichText::new("🔇").color(flt_color)).on_hover_text(flt_tip);
+                                let btn_resp = bevel_button(
+                                    ui,
+                                    if track.is_filtered { "NR" } else { "NR–" },
+                                    if track.is_filtered { BevelStyle::CompactEngaged } else { BevelStyle::Compact },
+                                ).on_hover_text(flt_tip);
                                 if btn_resp.clicked() {
                                     self.splitter.toggle_track_filter(track.segment_index);
                                 }
                                 btn_resp.context_menu(|ui| {
+                                    if ui.button(self.text("Track bearbeiten …", "Process track …")).clicked() {
+                                        self.selected_segment_idx = Some(track.segment_index);
+                                        self.selected_region = None;
+                                        self.player.seek_seconds(track.start_seconds);
+                                        self.console_tab = ConsoleTab::Filter;
+                                        ui.close_menu();
+                                    }
                                     let tog_txt = if track.is_filtered {
                                         self.text("Rauschfilter für diesen Track deaktivieren", "Disable noise filter for this track")
                                     } else {
@@ -3758,7 +3882,7 @@ impl TapeDigizerApp {
                                         ui.close_menu();
                                     }
                                     if self.active_noise_profile.is_some() || self.denoiser_params.dc_filter_enabled {
-                                        if ui.button(self.text("✨ Filter jetzt in diesen Track einrechnen", "✨ Bake filter into this track now")).clicked() {
+                                        if ui.button(self.text("Filter jetzt in diesen Track einrechnen", "Bake filter into this track now")).clicked() {
                                             self.bake_denoiser_into_track(ui.ctx(), track.segment_index);
                                             ui.close_menu();
                                         }
@@ -3766,17 +3890,17 @@ impl TapeDigizerApp {
                                 });
                             }
 
-                            let pause_icon = if track.is_pause { "↩" } else { "⏸" };
+                            let pause_icon = if track.is_pause { "↩" } else { "||" };
                             let pause_tip = if track.is_pause {
                                 self.language.btn_make_track()
                             } else {
                                 self.language.btn_make_pause()
                             };
-                            if ui.small_button(pause_icon).on_hover_text(pause_tip).clicked() {
+                            if bevel_button(ui, pause_icon, BevelStyle::Compact).on_hover_text(pause_tip).clicked() {
                                 self.splitter.toggle_pause(index);
                             }
 
-                            if index > 0 && ui.small_button("×")
+                            if index > 0 && bevel_button(ui, "×", BevelStyle::Compact)
                                 .on_hover_text(self.text("Schnittmarke am Trackanfang entfernen", "Remove marker at track start"))
                                 .clicked()
                             {
@@ -3834,269 +3958,251 @@ impl TapeDigizerApp {
         self.hover_stationary_since = None;
     }
 
-    fn render_export_dialog(&mut self, ctx: &egui::Context) {
+    fn render_export_panel(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
         let progress = self.job.as_ref().and_then(|job| job.export_progress.clone());
-        if progress.is_none() && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            self.show_export = false;
-            self.export_outcome = None;
-            return;
-        }
-
-        let screen = ctx.screen_rect();
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("export_backdrop")))
-            .rect_filled(screen, 0.0, Color32::from_black_alpha(144));
-        let width = (screen.width() - 48.0).min(640.0);
-        egui::Window::new("Track export")
-            .id(egui::Id::new("export_dialog"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .title_bar(false).resizable(false)
-            .default_width(width).default_height(0.0)
-            .frame(egui::Frame::window(&ctx.style()).inner_margin(18.0).rounding(14.0))
-            .show(ctx, |ui| {
-                ui.set_width(width);
-                ui.heading(self.text("Tracks exportieren", "Export tracks"));
-                ui.add_space(2.0);
-                let sub = if self.artist_name.trim().is_empty() {
-                    format!("{}  ·  {}", self.tape_name, self.tape_side.label(self.language))
+        studio_panel(ui, self.text("WAV-Export", "WAV export"), |ui| {
+            if let Some(progress) = progress {
+                let done = progress.finished.load(Ordering::Relaxed);
+                let total = progress.total.load(Ordering::Relaxed);
+                let cancelling = progress.cancelled.load(Ordering::Relaxed);
+                ui.label(if cancelling {
+                    self.text("Export wird abgebrochen …", "Cancelling export …")
                 } else {
-                    format!("{} – {}  ·  {}", self.artist_name.trim(), self.tape_name, self.tape_side.label(self.language))
-                };
-                ui.label(RichText::new(sub).color(TEXT_SECONDARY));
-                ui.add_space(8.0);
-
-                if let Some(progress) = progress {
-                    let done = progress.finished.load(Ordering::Relaxed);
-                    let total = progress.total.load(Ordering::Relaxed);
-                    let cancelling = progress.cancelled.load(Ordering::Relaxed);
-                    ui.label(if cancelling {
-                        self.text("Export wird abgebrochen …", "Cancelling export …")
-                    } else {
-                        self.text("WAV-Dateien werden geschrieben …", "Writing WAV files …")
-                    });
-                    ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                        .text(format!("{done} / {total}")).animate(true));
-                    ui.add_space(12.0);
-                    if ui.add_enabled(!cancelling, egui::Button::new(self.language.btn_cancel())).clicked() {
-                        progress.cancelled.store(true, Ordering::Relaxed);
-                    }
-                    ctx.request_repaint_after(Duration::from_millis(150));
-                    return;
+                    self.text("WAV-Dateien werden geschrieben …", "Writing WAV files …")
+                });
+                ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                    .text(format!("{done} / {total}")).animate(true));
+                ui.add_space(12.0);
+                if ui.add_enabled(!cancelling, egui::Button::new(self.language.btn_cancel())).clicked() {
+                    progress.cancelled.store(true, Ordering::Relaxed);
                 }
+                ctx.request_repaint_after(Duration::from_millis(150));
+                return;
+            }
 
-                if let Some(ExportOutcome::Done { count, folder }) = &self.export_outcome {
-                    ui.label(RichText::new(format!("✓  {} {count}", self.text("Exportierte Tracks", "Exported tracks")))
-                        .strong().color(LED_GREEN));
-                    let path = folder.display().to_string();
-                    ui.add(egui::Label::new(&path).truncate()).on_hover_text(path);
-                    ui.add_space(16.0);
-                    let done_label = self.text("Fertig", "Done");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(done_label).clicked() {
-                            self.show_export = false;
-                        }
-                        if ui.button(self.language.btn_show_in_finder()).clicked() {
-                            #[cfg(target_os = "macos")]
-                            let _ = std::process::Command::new("open").arg(folder).spawn();
-                        }
-                    });
-                    if !self.show_export {
+            if let Some(ExportOutcome::Done { count, folder }) = self.export_outcome.as_ref() {
+                ui.label(RichText::new(format!("✓  {} {count}", self.text("Exportierte WAV-Dateien", "Exported WAV files")))
+                    .strong().color(LED_GREEN));
+                let folder = folder.clone();
+                let path = folder.display().to_string();
+                ui.add(egui::Label::new(&path).truncate()).on_hover_text(path);
+                ui.add_space(16.0);
+                let done_label = self.text("Fertig", "Done");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(done_label).clicked() {
                         self.export_outcome = None;
                     }
-                    return;
-                }
+                    if ui.button(self.language.btn_show_in_finder()).clicked() {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(folder).spawn();
+                    }
+                });
+                return;
+            }
 
-                let tracks = self.splitter.get_tracks(self.player.total_seconds());
-                let target = self.effective_export_directory();
-                let artist_prefix = sanitize_filename(self.artist_name.trim());
-                let has_artist = !self.artist_name.trim().is_empty();
-                let mut files = Vec::new();
-                for track in tracks.iter().filter(|track| !track.is_pause) {
-                    let name = if has_artist {
-                        format!("{:02}_{}_{}.wav", track.index, artist_prefix, sanitize_filename(&track.title))
-                    } else {
-                        track.export_filename()
-                    };
+            let mut tracks = self.splitter.get_tracks(self.player.total_seconds());
+            if let Some(segment) = self.export_song {
+                let title = tracks.iter().find(|track| track.segment_index == segment)
+                    .map(|track| track.title.as_str()).unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(format!("{} · {title}", self.text("Nur dieser Song", "This song only")));
+                    if ui.small_button(self.text("Alle Tracks anzeigen", "Show all tracks")).clicked() {
+                        self.export_song = None;
+                        self.export_page = 0;
+                    }
+                });
+                if self.export_song.is_some() { tracks.retain(|track| track.segment_index == segment); }
+            }
+            let target = self.effective_export_directory();
+            let mut files = Vec::new();
+            let artist = (!self.artist_name.trim().is_empty()).then_some(self.artist_name.trim());
+            for track in tracks.iter().filter(|track| !track.is_pause) {
+                for name in track.export_filenames_with_artist(artist) {
                     let exists = target.join(&name).exists();
                     files.push((track, name, exists));
                 }
-                let count = files.len();
-                let conflicts = files.iter().filter(|(_, _, exists)| *exists).count();
-                let export_enabled = count > 0 && conflicts == 0 && self.current_audio_path.is_some()
-                    && self.job.is_none() && !self.recorder.is_busy();
+            }
+            let count = files.len();
+            let conflicts = files.iter().filter(|(_, _, exists)| *exists).count();
+            let export_enabled = count > 0 && conflicts == 0 && self.current_audio_path.is_some()
+                && self.job.is_none() && !self.recorder.is_busy();
 
-                ui.horizontal_wrapped(|ui| {
-                    panel_title(ui, self.text("Zielordner", "Destination"));
-                    if ui.button(self.text("Basisordner ändern …", "Change base folder …")).clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().set_directory(&self.export_directory).pick_folder() {
-                            self.export_directory = folder;
-                            self.export_outcome = None;
-                            self.save_config();
-                            ctx.request_repaint();
-                        }
+            ui.horizontal_wrapped(|ui| {
+                panel_title(ui, self.text("Zielordner", "Destination"));
+                if ui.button(self.text("Basisordner ändern …", "Change base folder …")).clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().set_directory(&self.export_directory).pick_folder() {
+                        self.export_directory = folder;
+                        self.export_outcome = None;
+                        self.save_config();
+                        ctx.request_repaint();
                     }
-                });
-                let target_label = self.effective_export_directory().display().to_string();
-                ui.add(egui::Label::new(RichText::new(&target_label).color(TEXT_SECONDARY)).truncate())
-                    .on_hover_text(target_label);
+                }
+            });
+            let target_label = self.effective_export_directory().display().to_string();
+            ui.add(egui::Label::new(RichText::new(&target_label).color(TEXT_SECONDARY)).truncate())
+                .on_hover_text(target_label);
 
-                ui.add_space(8.0);
-                panel_title(ui, self.text("Audio & Analog-Mastering", "Audio & Analog Mastering"));
-                ui.label(RichText::new(format!("WAV  ·  PCM 24-bit  ·  Stereo  ·  {} Hz", self.player.sample_rate()))
-                    .color(TEXT_SECONDARY).small());
-                let mode_label = |mode: &NormalizationMode| match mode {
-                    NormalizationMode::None => self.text("Originalpegel", "Original level"),
-                    NormalizationMode::PeakPerTrack => self.text("Peak pro Track · −0,3 dBFS", "Peak per track · −0.3 dBFS"),
-                    NormalizationMode::PeakAlbum => self.text("Einheitlicher Pegel für das Album", "Shared gain across the album"),
-                };
-                let previous = self.normalization_mode.clone();
-                let options = [NormalizationMode::None, NormalizationMode::PeakPerTrack, NormalizationMode::PeakAlbum];
-                let labels = options.each_ref().map(mode_label);
-                egui::ComboBox::from_label(self.text("Normalisierung", "Normalization"))
-                    .selected_text(mode_label(&previous))
-                    .show_ui(ui, |ui| {
-                        for (mode, label) in options.into_iter().zip(labels) {
-                            ui.selectable_value(&mut self.normalization_mode, mode, label);
-                        }
-                    });
-                if self.normalization_mode != previous {
+            ui.add_space(8.0);
+            panel_title(ui, self.text("Audio & Analog-Mastering", "Audio & Analog Mastering"));
+            let format = if self.player.total_samples() > 0 {
+                format!("WAV · PCM 24-bit · {} · {} Hz", self.text("Format je Song", "Per-song format"), self.player.sample_rate())
+            } else {
+                "WAV · PCM 24-bit".into()
+            };
+            ui.label(RichText::new(format).color(TEXT_SECONDARY).small());
+            let mode_label = |mode: &NormalizationMode| match mode {
+                NormalizationMode::None => self.text("Originalpegel", "Original level"),
+                NormalizationMode::PeakPerTrack => self.text("Peak pro Track · −0,3 dBFS", "Peak per track · −0.3 dBFS"),
+                NormalizationMode::PeakAlbum => self.text("Einheitlicher Pegel für das Album", "Shared gain across the album"),
+            };
+            let previous = self.normalization_mode.clone();
+            let options = [NormalizationMode::None, NormalizationMode::PeakPerTrack, NormalizationMode::PeakAlbum];
+            let labels = options.each_ref().map(mode_label);
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(self.text("Normalisierung", "Normalization"));
+                for (mode, label) in options.into_iter().zip(labels) {
+                    if ui.add(mode_button(label, self.normalization_mode == mode)).clicked() {
+                        self.normalization_mode = mode;
+                    }
+                }
+            });
+            if self.normalization_mode != previous {
+                self.save_config();
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                let hp_lbl = self.text("20 Hz Rumpel-/DC-Filter", "20 Hz subsonic filter");
+                if ui.checkbox(&mut self.export_highpass_20hz, hp_lbl).changed() {
                     self.save_config();
                 }
-
-                ui.horizontal_wrapped(|ui| {
-                    let hp_lbl = self.text("20 Hz Rumpel-/DC-Filter", "20 Hz subsonic filter");
-                    if ui.checkbox(&mut self.export_highpass_20hz, hp_lbl).changed() {
+                ui.separator();
+                ui.label(RichText::new(self.text("Schnitt-Fade:", "Cut fade:")).color(TEXT_SECONDARY).small());
+                for (ms, lbl) in [(0_u32, self.text("Aus", "Off")), (15, "15 ms"), (100, "100 ms"), (300, "300 ms")] {
+                    if ui.selectable_label(self.export_fade_ms == ms, lbl).clicked() {
+                        self.export_fade_ms = ms;
                         self.save_config();
                     }
-                    ui.separator();
-                    ui.label(RichText::new(self.text("Schnitt-Fade:", "Cut fade:")).color(TEXT_SECONDARY).small());
-                    for (ms, lbl) in [(0_u32, "Aus"), (15, "15 ms"), (100, "100 ms"), (300, "300 ms")] {
-                        if ui.selectable_label(self.export_fade_ms == ms, lbl).clicked() {
-                            self.export_fade_ms = ms;
-                            self.save_config();
-                        }
-                    }
-                    ui.separator();
-                    ui.label(RichText::new("L/R Trim:").color(TEXT_SECONDARY).small());
-                    ui.add(egui::DragValue::new(&mut self.export_balance_db).range(-12.0..=12.0).speed(0.1).suffix(" dB"));
-                    if self.active_noise_profile.is_some() {
-                        ui.separator();
-                        let nr_lbl = self.text("Rauschfilter anwenden", "Apply noise filter");
-                        ui.checkbox(&mut self.export_apply_denoiser, nr_lbl);
-                        if self.export_apply_denoiser {
-                            let filtered_tracks_count = tracks.iter().filter(|t| !t.is_pause && t.is_filtered).count();
-                            let total_active_tracks = tracks.iter().filter(|t| !t.is_pause).count();
-                            ui.label(RichText::new(format!("({filtered_tracks_count}/{total_active_tracks} Tracks)")).color(TEXT_SECONDARY).small());
-                            if ui.small_button(self.text("Alle", "All")).on_hover_text(self.text("Filter für alle Tracks aktivieren", "Enable filter for all tracks")).clicked() {
-                                self.splitter.set_all_tracks_filtered(tracks.len(), true);
-                            }
-                            if ui.small_button(self.text("Keine", "None")).on_hover_text(self.text("Filter für alle Tracks deaktivieren", "Disable filter for all tracks")).clicked() {
-                                self.splitter.set_all_tracks_filtered(tracks.len(), false);
-                            }
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
-                let per_page = ((screen.height() - 450.0) / 28.0).floor().clamp(2.0, 8.0) as usize;
-                let pages = count.div_ceil(per_page).max(1);
-                self.export_page = self.export_page.min(pages - 1);
-                ui.horizontal(|ui| {
-                    panel_title(ui, &format!("{} {count}", self.text("Dateien", "Files")));
-                    page_controls(ui, &mut self.export_page, pages, self.language);
-                });
-                let gaps = tracks.len() - count;
-                if gaps > 0 {
-                    ui.label(RichText::new(format!("{} {gaps}", self.text("Ausgelassene Pausen", "Excluded gaps")))
-                        .color(TEXT_SECONDARY).small());
                 }
-                if count == 0 {
-                    ui.label(self.text("Keine Tracks zum Exportieren.", "No tracks to export."));
-                }
-                for (track, name, exists) in files.iter().skip(self.export_page * per_page).take(per_page) {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.monospace(track.duration_formatted());
-                        if self.export_apply_denoiser && self.active_noise_profile.is_some() {
-                            let (flt_lbl, flt_col, flt_tip) = if track.is_filtered {
-                                (
-                                    self.text("🔇 Filter", "🔇 Filter"),
-                                    LED_GREEN,
-                                    self.text("Dieser Track wird entrauscht. Klick zum Deaktivieren.", "This track will be denoised. Click to disable."),
-                                )
-                            } else {
-                                (
-                                    self.text("🔈 Bypass", "🔈 Bypass"),
-                                    TEXT_MUTED,
-                                    self.text("Dieser Track wird ungefiltert exportiert. Klick zum Aktivieren.", "This track will be exported unfiltered. Click to enable."),
-                                )
-                            };
-                            if ui.small_button(RichText::new(flt_lbl).color(flt_col).small()).on_hover_text(flt_tip).clicked() {
-                                self.splitter.toggle_track_filter(track.segment_index);
-                            }
-                        }
-                        if *exists {
-                            ui.colored_label(LED_AMBER, self.text("Existiert bereits", "Already exists"));
-                        }
-                        ui.add(egui::Label::new(name).truncate()).on_hover_text(name);
-                    });
-                }
-                if conflicts > 0 {
-                    ui.colored_label(LED_AMBER, self.text(
-                        "Wähle einen anderen Basisordner oder räume den Zielordner frei.",
-                        "Choose a different base folder or clear the conflicting files.",
-                    ));
-                }
-                match &self.export_outcome {
-                    Some(ExportOutcome::Failed(error)) => { ui.add(egui::Label::new(RichText::new(error).color(LED_RED)).truncate()).on_hover_text(error); }
-                    Some(ExportOutcome::Cancelled) => {
-                        ui.label(self.text("Export abgebrochen.", "Export cancelled."));
-                    }
-                    _ => {}
-                }
-                ui.add_space(8.0);
                 ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = self.text("Exportieren", "Export");
-                    let export = primary_button(label);
-                    if ui.add_enabled(export_enabled, export).clicked() && self.effective_export_directory() == target {
-                        if let Some(source) = self.current_audio_path.clone() {
-                            self.export_outcome = None;
-                            let denoiser = if self.export_apply_denoiser && self.active_noise_profile.is_some() {
-                                let mut p = self.denoiser_params.clone();
-                                p.enabled = true;
-                                p.audition_mode = AuditionMode::Wet;
-                                Some((self.active_noise_profile.clone(), p))
-                            } else {
-                                None
-                            };
-                            let opts = ExportOptions {
-                                norm_mode: self.normalization_mode.clone(),
-                                highpass_20hz: self.export_highpass_20hz,
-                                fade_ms: self.export_fade_ms,
-                                stereo_balance_db: self.export_balance_db,
-                                artist: (!self.artist_name.trim().is_empty()).then(|| self.artist_name.trim().to_string()),
-                                denoiser,
-                            };
-                            let progress = Arc::new(ExportProgress::default());
-                            let worker_progress = progress.clone();
-                            self.start_job(ctx, self.text("Tracks werden exportiert …", "Exporting tracks …"), move || {
-                                let files = export_tracks_with_options(&source, &target, &tracks, &opts, |done, total| {
-                                    worker_progress.report(done, total)
-                                })?;
-                                Ok(JobResult::Export(files.len(), target))
-                            });
-                            if let Some(job) = &mut self.job {
-                                job.export_progress = Some(progress);
-                            }
+                ui.label(RichText::new("L/R Trim:").color(TEXT_SECONDARY).small());
+                ui.add(egui::DragValue::new(&mut self.export_balance_db).range(-12.0..=12.0).speed(0.1).suffix(" dB"));
+                if self.active_noise_profile.is_some() {
+                    ui.separator();
+                    let nr_lbl = self.text("Rauschfilter anwenden", "Apply noise filter");
+                    ui.checkbox(&mut self.export_apply_denoiser, nr_lbl);
+                    if self.export_apply_denoiser {
+                        let filtered_tracks_count = tracks.iter().filter(|t| !t.is_pause && t.is_filtered).count();
+                        let total_active_tracks = tracks.iter().filter(|t| !t.is_pause).count();
+                        ui.label(RichText::new(format!("({filtered_tracks_count}/{total_active_tracks} Tracks)")).color(TEXT_SECONDARY).small());
+                        if ui.small_button(self.text("Alle", "All")).on_hover_text(self.text("Filter für alle Tracks aktivieren", "Enable filter for all tracks")).clicked() {
+                            self.splitter.set_all_tracks_filtered(tracks.len(), true);
+                        }
+                        if ui.small_button(self.text("Keine", "None")).on_hover_text(self.text("Filter für alle Tracks deaktivieren", "Disable filter for all tracks")).clicked() {
+                            self.splitter.set_all_tracks_filtered(tracks.len(), false);
                         }
                     }
-                    if ui.button(self.language.btn_cancel()).clicked() {
-                        self.show_export = false;
-                        self.export_outcome = None;
-                    }
-                });
+                }
             });
+
+            ui.add_space(8.0);
+            let per_page = ((ui.available_height() - 152.0) / 33.0).floor().max(1.0) as usize;
+            let pages = count.div_ceil(per_page).max(1);
+            self.export_page = self.export_page.min(pages - 1);
+            ui.horizontal(|ui| {
+                panel_title(ui, &format!("{} {count}", self.text("Dateien", "Files")));
+                page_controls(ui, &mut self.export_page, pages, self.language);
+            });
+            let gaps = tracks.iter().filter(|track| track.is_pause).count();
+            if gaps > 0 {
+                ui.label(RichText::new(format!("{} {gaps}", self.text("Ausgelassene Pausen", "Excluded gaps")))
+                    .color(TEXT_SECONDARY).small());
+            }
+            if count == 0 {
+                ui.label(self.text("Keine Tracks zum Exportieren.", "No tracks to export."));
+            }
+            for (track, name, exists) in files.iter().skip(self.export_page * per_page).take(per_page) {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.monospace(track.duration_formatted());
+                    if track.processing.is_some() {
+                        ui.colored_label(ACCENT, self.text("Song-Bearbeitung", "Song processing"));
+                    } else if self.export_apply_denoiser && self.active_noise_profile.is_some() {
+                        let (flt_lbl, flt_col, flt_tip) = if track.is_filtered {
+                            (
+                                self.text("🔇 Filter", "🔇 Filter"),
+                                LED_GREEN,
+                                self.text("Dieser Track wird entrauscht. Klick zum Deaktivieren.", "This track will be denoised. Click to disable."),
+                            )
+                        } else {
+                            (
+                                self.text("🔈 Bypass", "🔈 Bypass"),
+                                TEXT_MUTED,
+                                self.text("Dieser Track wird ungefiltert exportiert. Klick zum Aktivieren.", "This track will be exported unfiltered. Click to enable."),
+                            )
+                        };
+                        if ui.small_button(RichText::new(flt_lbl).color(flt_col).small()).on_hover_text(flt_tip).clicked() {
+                            self.splitter.toggle_track_filter(track.segment_index);
+                        }
+                    }
+                    if *exists {
+                        ui.colored_label(LED_AMBER, self.text("Existiert bereits", "Already exists"));
+                    }
+                    ui.add(egui::Label::new(name).truncate()).on_hover_text(name);
+                });
+            }
+            if conflicts > 0 {
+                ui.colored_label(LED_AMBER, self.text(
+                    "Wähle einen anderen Basisordner oder räume den Zielordner frei.",
+                    "Choose a different base folder or clear the conflicting files.",
+                ));
+            }
+            match &self.export_outcome {
+                Some(ExportOutcome::Failed(error)) => { ui.add(egui::Label::new(RichText::new(error).color(LED_RED)).truncate()).on_hover_text(error); }
+                Some(ExportOutcome::Cancelled) => {
+                    ui.label(self.text("Export abgebrochen.", "Export cancelled."));
+                }
+                _ => {}
+            }
+            ui.add_space(8.0);
+            ui.separator();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = self.text("Exportieren", "Export");
+                let export = primary_button(label);
+                if ui.add_enabled(export_enabled, export).clicked() && self.effective_export_directory() == target {
+                    if let Some(source) = self.current_audio_path.clone() {
+                        self.export_outcome = None;
+                        let denoiser = if self.export_apply_denoiser && self.active_noise_profile.is_some() {
+                            let mut p = self.denoiser_params.clone();
+                            p.enabled = true;
+                            p.audition_mode = AuditionMode::Wet;
+                            Some((self.active_noise_profile.clone(), p))
+                        } else {
+                            None
+                        };
+                        let opts = ExportOptions {
+                            norm_mode: self.normalization_mode.clone(),
+                            highpass_20hz: self.export_highpass_20hz,
+                            fade_ms: self.export_fade_ms,
+                            stereo_balance_db: self.export_balance_db,
+                            artist: (!self.artist_name.trim().is_empty()).then(|| self.artist_name.trim().to_string()),
+                            denoiser,
+                        };
+                        let progress = Arc::new(ExportProgress::default());
+                        let worker_progress = progress.clone();
+                        self.start_job(&ctx, self.text("Tracks werden exportiert …", "Exporting tracks …"), move || {
+                            let files = export_tracks_with_options(&source, &target, &tracks, &opts, |done, total| {
+                                worker_progress.report(done, total)
+                            })?;
+                            Ok(JobResult::Export(files.len(), target))
+                        });
+                        if let Some(job) = &mut self.job {
+                            job.export_progress = Some(progress);
+                        }
+                    }
+                }
+            });
+        });
     }
 
 }
@@ -4118,30 +4224,6 @@ fn page_controls(ui: &mut Ui, page: &mut usize, pages: usize, language: Language
             *page -= 1;
         }
     });
-}
-
-fn render_hardware_metric(ui: &mut Ui, width: f32, label: &str, value: &str, val_col: Color32) {
-    let desired_size = Vec2::new(width, 60.0);
-    let (rect, _resp) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-    let painter = ui.painter();
-
-    draw_recessed_well(painter, rect, 4.0, BG_INSET);
-
-    painter.text(
-        Pos2::new(rect.min.x + 10.0, rect.min.y + 10.0),
-        egui::Align2::LEFT_TOP,
-        label,
-        egui::FontId::monospace(9.5),
-        TEXT_MUTED,
-    );
-
-    painter.text(
-        Pos2::new(rect.min.x + 10.0, rect.min.y + 28.0),
-        egui::Align2::LEFT_TOP,
-        value,
-        egui::FontId::monospace(16.0),
-        val_col,
-    );
 }
 
 fn dirs_default_music_dir() -> Option<PathBuf> {
@@ -4257,7 +4339,7 @@ mod tests {
                         render_stereo_waveform(
                             ui, waveform.for_view(f64::from(zoom)), duration, 0.0, false,
                             &[duration / 3.0, duration / 2.0], &[], &[], &mut None, None,
-                            &mut zoom, &mut vertical_zoom, 280.0, &mut scroll, EditTool::Pointer, false, None,
+                            &mut zoom, &mut vertical_zoom, 280.0, &mut scroll, EditTool::Pointer, false, None, false,
                         );
                     });
                 });
@@ -4282,10 +4364,12 @@ mod tests {
     }
 
     #[test]
-    fn test_render_tabs_without_recording() {
+    fn console_renders_before_and_after_recording() {
         let ctx = egui::Context::default();
+        ctx.set_style(super::super::theme::studio_style());
         let mut app = TapeDigizerApp {
             language: Language::De,
+            theme_mode: ThemeMode::Silverface,
             tape_name: "Test Tape".into(),
             artist_name: String::new(),
             media_source: MediaSourceType::Cassette,
@@ -4293,13 +4377,14 @@ mod tests {
             current_project_path: None,
             current_audio_path: None,
             pending_delete_marker: None,
-            active_tab: ActiveTab::Recording,
+            console_tab: ConsoleTab::Input,
             available_devices: Vec::new(),
             selected_device_idx: 0,
             channel_pairs: Vec::new(),
             selected_pair_idx: 0,
             recorder: AudioRecorder::new(),
             player: AudioPlayer::new(),
+            song_editor: SongEditor::default(),
             splitter: TrackSplitter::new(),
             selected_timer_minutes: 45,
             time_headroom_minutes: 5,
@@ -4322,7 +4407,7 @@ mod tests {
             waveform_vertical_zoom: 1.0,
             track_page: 0,
             export_page: 0,
-            magnifier_scope_active: false,
+            export_song: None,
             selected_region: None,
             scope_radius_sec: 1.5,
             scope_locked_center: None,
@@ -4344,7 +4429,6 @@ mod tests {
             export_fade_ms: 15,
             export_balance_db: 0.0,
             export_outcome: None,
-            denoiser_panel_active: false,
             denoiser_params: DenoiserParams::default(),
             active_noise_profile: None,
             active_noise_samples: None,
@@ -4358,36 +4442,20 @@ mod tests {
             job: None,
             saved_edits: None,
             pause_preview: None,
-            show_tracks: true,
             batch_titles_open: false,
             batch_titles_text: String::new(),
-            show_export: false,
             #[cfg(target_os = "macos")]
             mac_menu: None,
         };
 
-        // 1. Run in Tab 1
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                app.render_tab_recording(ui);
+        let screen = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1060.0, 700.0));
+        for tab in [ConsoleTab::Input, ConsoleTab::Edit, ConsoleTab::Tracks, ConsoleTab::Filter, ConsoleTab::Export] {
+            app.console_tab = tab;
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                app.render_console_header(ctx);
+                app.render_console(ctx);
             });
-        });
-
-        // 2. Switch to Tab 2 (Diagnosis) without recording
-        app.active_tab = ActiveTab::Diagnosis;
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                app.render_tab_diagnosis(ui);
-            });
-        });
-
-        // 3. Switch to Tab 3 (Split & Export) without recording
-        app.active_tab = ActiveTab::SplitAndExport;
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                app.render_tab_split_export(ui);
-            });
-        });
+        }
 
         // A one-track project with a short name in a compact single-line row must still get a wide input (>= 20 chars).
         app.splitter.custom_titles = vec!["cghcg".into()];
@@ -4402,7 +4470,7 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::none().inner_margin(16.0))
                         .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| app.render_track_list(ui, &tracks));
+                            app.render_track_list(ui, &tracks);
                         });
                 });
             }
@@ -4411,70 +4479,55 @@ mod tests {
                 "Track title is only {} pt wide at {window_width} pt", field.interact_rect.width());
         }
 
-        let audio = DecodedAudio { left: vec![0.1; 120_000], right: vec![0.2; 120_000], sample_rate: 1000 };
-        app.waveform_cache = WaveformCache::build(&audio);
-        app.analysis_report = Some(analyze_samples(&audio.left, &audio.right, audio.sample_rate).unwrap());
-        app.player.load_test_samples(audio);
-        app.splitter.markers = (1..10).map(|n| 10.0 * f64::from(n)).collect();
-        app.select_marker(1);
-        app.magnifier_scope_active = true;
-        app.pause_preview = Some(app.splitter.snapshot());
-        let workspace = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1060.0, 594.0));
-        ctx.set_visuals(crate::ui::theme::studio_visuals());
-        ctx.style_mut(|style| {
-            style.spacing.item_spacing = Vec2::new(8.0, 7.0);
-            style.spacing.button_padding = Vec2::new(9.0, 4.0);
+        let audio = DecodedAudio {
+            left: vec![0.1; 120_000],
+            right: vec![0.2; 120_000],
+            sample_rate: 1000,
+        };
+        let waveform = WaveformCache::build(&audio);
+        let report = analyze_samples(&audio.left, &audio.right, audio.sample_rate).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(JobResult::Recording(audio, waveform, report))).unwrap();
+        app.job = Some(PendingJob { result: rx, label: "Analyzing recording", export_progress: None });
+        app.poll_job();
+        // Playback device availability is independent of the console layout.
+        app.player.load_test_samples(DecodedAudio {
+            left: vec![0.1; 120_000],
+            right: vec![0.2; 120_000],
+            sample_rate: 1000,
         });
-        for tab in [ActiveTab::Recording, ActiveTab::Diagnosis, ActiveTab::SplitAndExport] {
-            for _ in 0..2 {
-                let _ = ctx.run(egui::RawInput { screen_rect: Some(workspace), ..Default::default() }, |ctx| {
-                    egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(16.0))
-                        .show(ctx, |ui| {
-                            let bounds = ui.max_rect();
-                            match tab {
-                                ActiveTab::Recording => app.render_tab_recording(ui),
-                                ActiveTab::Diagnosis => app.render_tab_diagnosis(ui),
-                                ActiveTab::SplitAndExport => app.render_tab_split_export(ui),
-                            }
-                            assert!(bounds.expand(1.0).contains_rect(ui.min_rect()),
-                                "{} extends outside its workspace: {:?} vs {bounds:?}",
-                                tab as usize, ui.min_rect());
-                        });
-                });
-            }
-        }
-
-        // Also verify the Denoiser & Original Cut Studio panel fits within the minimum workspace
-        app.active_tab = ActiveTab::SplitAndExport;
-        app.magnifier_scope_active = false;
-        app.denoiser_panel_active = true;
+        assert!(app.console_tab == ConsoleTab::Edit, "Recording completion must open the edit tab");
+        app.splitter.markers = (1..10).map(|n| 10.0 * f64::from(n)).collect();
+        app.selected_marker_idx = None;
+        app.selected_segment_idx = Some(0);
+        app.batch_titles_open = true;
+        app.scope_auto_gain = false;
+        app.pause_preview = Some(app.splitter.snapshot());
+        app.current_audio_path = Some(PathBuf::from("/tmp/recording.wav"));
         app.learn_noise_from_region(0.0, 2.0);
-        for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput { screen_rect: Some(workspace), ..Default::default() }, |ctx| {
-                egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(16.0))
-                    .show(ctx, |ui| {
-                        let bounds = ui.max_rect();
-                        app.render_tab_split_export(ui);
-                        assert!(bounds.expand(1.0).contains_rect(ui.min_rect()),
-                            "Denoiser panel extends outside its workspace: {:?} vs {bounds:?}",
-                            ui.min_rect());
-                    });
-            });
-        }
-
-        // Check the dialog at the minimum window size, including the completion state.
-        let screen = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 540.0));
-        app.show_export = true;
-        app.export_directory = PathBuf::from("/Music").join("Long folder name ".repeat(10));
-        for outcome in [None, Some(ExportOutcome::Done { count: 1, folder: app.export_directory.clone() })] {
-            app.export_outcome = outcome;
-            for _ in 0..2 {
-                let _ = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                    app.render_export_dialog(ctx);
-                });
+        for language in [Language::De, Language::En] {
+            app.language = language;
+            for tab in [ConsoleTab::Input, ConsoleTab::Edit, ConsoleTab::Tracks, ConsoleTab::Filter, ConsoleTab::Export] {
+                app.console_tab = tab;
+                for size in [screen, egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1260.0, 820.0))] {
+                    let variants = match tab { ConsoleTab::Filter => 6, ConsoleTab::Edit => 2, _ => 1 };
+                    for variant in 0..variants {
+                        if tab == ConsoleTab::Filter {
+                            app.song_editor.select_layout_test_module(variant);
+                        }
+                        let _ = ctx.run(egui::RawInput { screen_rect: Some(size), ..Default::default() }, |ctx| {
+                            if tab == ConsoleTab::Edit {
+                                ctx.data_mut(|data| data.insert_temp(egui::Id::new("whole_recording_processing"), variant == 1));
+                            }
+                            app.render_console_header(ctx);
+                            app.render_console(ctx);
+                        });
+                    }
+                }
             }
-            let dialog = ctx.memory(|memory| memory.area_rect(egui::Id::new("export_dialog"))).unwrap();
-            assert!(screen.contains_rect(dialog), "Export dialog exceeds the window: {dialog:?}");
         }
+        assert_eq!(app.selected_segment_idx, Some(0), "Rendering the scope must keep the selected first track");
+        assert!(app.selected_marker_idx.is_none());
+        assert!(ctx.memory(|memory| memory.area_rect(egui::Id::new("export_dialog"))).is_none());
     }
 }

@@ -885,25 +885,28 @@ pub fn cut_delete_audio_range(
     new_l.extend_from_slice(&left[e_idx..len]);
     new_r.extend_from_slice(&right[e_idx..len]);
 
-    // Track-Marker aktualisieren
-    let cut_start = s_idx as f64 / sr;
-    let cut_end = e_idx as f64 / sr;
-    let cut_dur = cut_end - cut_start;
-    let new_total_sec = new_l.len() as f64 / sr;
-
-    let mut updated_markers = Vec::new();
-    for &m in &markers.markers {
-        if m < cut_start - 0.001 {
-            updated_markers.push(m);
-        } else if m > cut_end + 0.001 {
-            let shifted = (m - cut_dur).clamp(0.001, new_total_sec - 0.001);
-            if updated_markers.last().is_none_or(|&prev: &f64| (shifted - prev).abs() > 0.01) {
-                updated_markers.push(shifted);
+    let marker_frame = |seconds: f64| (seconds * sr).round() as usize;
+    let owner_after_cut = markers.markers.partition_point(|&m| marker_frame(m) <= e_idx);
+    let mut owners = vec![if s_idx == 0 { owner_after_cut } else { 0 }];
+    let mut updated = Vec::new();
+    for (index, &m) in markers.markers.iter().enumerate() {
+        let frame = marker_frame(m);
+        if frame < s_idx {
+            updated.push(m);
+            owners.push(index + 1);
+        } else if frame > e_idx {
+            updated.push((frame - (e_idx - s_idx)) as f64 / sr);
+            owners.push(index + 1);
+        } else if (frame == s_idx || frame == e_idx) && s_idx > 0 && e_idx < len {
+            // Keep the surviving boundary at the splice only once.
+            let splice = s_idx as f64 / sr;
+            if updated.last() != Some(&splice) {
+                updated.push(splice);
+                owners.push(owner_after_cut);
             }
         }
     }
-    markers.markers = updated_markers;
-    markers.pause_indices.retain(|&idx| idx <= markers.markers.len());
+    markers.remap_segments(updated, &owners, None);
 
     Ok((new_l, new_r))
 }
@@ -946,19 +949,17 @@ pub fn crop_trim_audio_to_range(
         new_r[rev] *= gain;
     }
 
-    let trim_start = s_idx as f64 / sr;
-    let trim_end = e_idx as f64 / sr;
-    let new_total_sec = new_l.len() as f64 / sr;
-
-    let mut updated_markers = Vec::new();
-    for &m in &markers.markers {
-        if m > trim_start + 0.01 && m < trim_end - 0.01 {
-            let shifted = (m - trim_start).clamp(0.001, new_total_sec - 0.001);
-            updated_markers.push(shifted);
+    let marker_frame = |seconds: f64| (seconds * sr).round() as usize;
+    let mut owners = vec![markers.markers.partition_point(|&m| marker_frame(m) <= s_idx)];
+    let mut updated = Vec::new();
+    for (index, &m) in markers.markers.iter().enumerate() {
+        let frame = marker_frame(m);
+        if frame > s_idx && frame < e_idx {
+            updated.push((frame - s_idx) as f64 / sr);
+            owners.push(index + 1);
         }
     }
-    markers.markers = updated_markers;
-    markers.pause_indices.retain(|&idx| idx <= markers.markers.len());
+    markers.remap_segments(updated, &owners, None);
 
     Ok((new_l, new_r))
 }
@@ -1144,6 +1145,7 @@ mod tests {
         let mut snap = crate::splitter::MarkerSnapshot {
             markers: vec![1.5, 3.0, 7.0],
             custom_titles: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            song_settings: [(3, crate::audio::processing::SongSettings { gain_db: 3.5, ..Default::default() })].into(),
             pause_indices: vec![],
             disabled_filter_indices: vec![],
         };
@@ -1151,6 +1153,8 @@ mod tests {
         // Schneide Sekunde 2.0 bis 5.0 (3 Sekunden) heraus
         let (cut_l, _cut_r) = cut_delete_audio_range(&left, &right, sr, 2.0, 5.0, &mut snap).unwrap();
         assert_eq!(cut_l.len(), 7_000);
+        assert_eq!(snap.custom_titles, ["A", "B", "D"]);
+        assert_eq!(snap.song_settings[&2].gain_db, 3.5);
         assert_eq!(snap.markers.len(), 2);
         assert!((snap.markers[0] - 1.5).abs() < 0.02);
         assert!((snap.markers[1] - 4.0).abs() < 0.02); // 7.0 - 3.0s = 4.0s
@@ -1158,6 +1162,10 @@ mod tests {
         // Trimme auf Sekunde 1.0 bis 5.0 (4 Sekunden)
         let (crop_l, _crop_r) = crop_trim_audio_to_range(&cut_l, &cut_l, sr, 1.0, 5.0, &mut snap).unwrap();
         assert_eq!(crop_l.len(), 4_000);
+        let mut middle = snap.clone();
+        crop_trim_audio_to_range(&crop_l, &crop_l, sr, 1.0, 3.8, &mut middle).unwrap();
+        assert_eq!(middle.custom_titles, ["B", "D"]);
+        assert_eq!(middle.song_settings[&1].gain_db, 3.5);
         assert_eq!(snap.markers.len(), 2);
         assert!((snap.markers[0] - 0.5).abs() < 0.02);
         assert!((snap.markers[1] - 3.0).abs() < 0.02);

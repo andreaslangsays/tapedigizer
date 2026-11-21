@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use crate::audio::denoiser::{DenoiserParams, NoiseProfile};
+use crate::audio::processing::SongSettings;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
@@ -78,8 +81,45 @@ impl TapeSide {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectSettings {
+    pub artist_name: String,
+    pub media_source: MediaSourceType,
+    pub export_highpass_20hz: bool,
+    pub export_fade_ms: u32,
+    pub export_balance_db: f32,
+    pub export_apply_denoiser: bool,
+    pub denoiser_params: DenoiserParams,
+    pub noise_profile: Option<NoiseProfile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SongEditorView {
+    pub selected_segment: Option<usize>,
+    pub zoom: f32,
+    pub vertical_zoom: f32,
+    pub scroll: f32,
+    pub loop_playback: bool,
+}
+
+impl Default for SongEditorView {
+    fn default() -> Self {
+        Self { selected_segment: None, zoom: 1.0, vertical_zoom: 1.0, scroll: 0.0, loop_playback: false }
+    }
+}
+
+const CURRENT_FORMAT_VERSION: u32 = 2;
+
+fn legacy_format_version() -> u32 {
+    1
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TapeDigizerProject {
+    #[serde(default = "legacy_format_version")]
+    pub format_version: u32,
     pub app_version: String,
     pub tape_name: String,
     pub tape_side: TapeSide,
@@ -90,6 +130,12 @@ pub struct TapeDigizerProject {
     pub pause_indices: Vec<usize>,
     #[serde(default)]
     pub disabled_filter_indices: Vec<usize>,
+    #[serde(default)]
+    pub song_settings: BTreeMap<usize, SongSettings>,
+    #[serde(default)]
+    pub settings: Option<ProjectSettings>,
+    #[serde(default)]
+    pub editor_view: SongEditorView,
     pub normalization_mode: String,
     pub created_at: String,
 }
@@ -106,6 +152,7 @@ impl TapeDigizerProject {
         normalization_mode: String,
     ) -> Self {
         Self {
+            format_version: CURRENT_FORMAT_VERSION,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             tape_name,
             tape_side,
@@ -115,6 +162,9 @@ impl TapeDigizerProject {
             pause_indices,
             disabled_filter_indices,
             normalization_mode,
+            song_settings: BTreeMap::new(),
+            settings: None,
+            editor_view: SongEditorView::default(),
             created_at: chrono_like_now(),
         }
     }
@@ -132,6 +182,7 @@ impl TapeDigizerProject {
         std::fs::create_dir_all(parent_dir).map_err(|e| e.to_string())?;
 
         let mut proj = self.clone();
+        proj.format_version = CURRENT_FORMAT_VERSION;
         let mut new_audio = None;
         if let Some(source) = source_session_wav {
             let source = source.canonicalize().map_err(|e| e.to_string())?;
@@ -285,6 +336,122 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_project_format_without_pause_or_filter_indices_loads() {
+        let legacy = r#"{"app_version":"0.2.0","tape_name":"Archive","tape_side":"SideA",
+            "audio_file_path":"archive.wav","markers":[3.0],"custom_titles":["One","Two"],
+            "normalization_mode":"track","created_at":"then"}"#;
+        let project: TapeDigizerProject = serde_json::from_str(legacy).unwrap();
+        assert_eq!(project.format_version, 1);
+        assert_eq!(project.audio_file_path, "archive.wav");
+        assert_eq!(project.custom_titles, ["One", "Two"]);
+        assert_eq!(project.markers, [3.0]);
+        assert_eq!(project.normalization_mode, "track");
+        assert!(project.pause_indices.is_empty());
+        assert!(project.disabled_filter_indices.is_empty());
+        assert!(project.settings.is_none() && project.song_settings.is_empty());
+    }
+
+    #[test]
+    fn old_project_migrates_and_round_trips_complete_song_settings() {
+        use crate::audio::processing::{DynamicsSettings, EqSettings, Routing, SongSettings};
+        let (path, handle) = unique_file(&std::env::temp_dir(), "song-project", "tapedigizer").unwrap();
+        drop(handle);
+        std::fs::write(&path, r#"{"app_version":"1.6.0","tape_name":"Old","tape_side":"SideB",
+            "audio_file_path":"","markers":[1.5,3.0],"custom_titles":["One","Gap","Two"],
+            "pause_indices":[1],"disabled_filter_indices":[2],"normalization_mode":"album","created_at":"then"}"#).unwrap();
+        let (mut project, _) = TapeDigizerProject::load_from_file(&path).unwrap();
+        assert!(project.song_settings.is_empty());
+        assert!(project.settings.is_none());
+        assert_eq!(project.editor_view, SongEditorView::default());
+        let profile = crate::audio::denoiser::NoiseProfile::learn_from_samples(
+            &[0.125; 256],
+            &[-0.25; 256],
+            48_000,
+            "Song noise",
+            "Cassette",
+        )
+        .unwrap();
+        let mut song = SongSettings {
+            gain_db: -2.0,
+            balance_db: -3.0,
+            width: 0.78,
+            swap_channels: true,
+            export_mode: crate::audio::processing::SongExportMode::SeparateMono,
+            routing: Routing::MonoMix,
+            mix_left: 0.65,
+            mix_right: 0.15,
+            mono_gain_db: 1.5,
+            channels_linked: false,
+            stereo_dynamics_linked: false,
+            bypass: true,
+            legacy_highpass_20hz: true,
+            noise_profile: Some(profile.clone()),
+            ..SongSettings::default()
+        };
+        let channel = &mut song.channels[1];
+        channel.gain_db = 3.0;
+        channel.muted = true;
+        channel.invert = true;
+        channel.eq = EqSettings {
+            enabled: true,
+            low_db: -1.0,
+            mid_db: 2.0,
+            high_db: 3.0,
+            low_hz: 110.0,
+            mid_hz: 800.0,
+            high_hz: 8000.0,
+            mid_q: 0.9,
+        };
+        channel.denoiser = crate::audio::denoiser::DenoiserParams {
+            enabled: true,
+            dc_filter_enabled: true,
+            dc_cutoff_hz: 30.0,
+            reduction_db: 7.0,
+            sensitivity: 2.2,
+            smoothing: 0.8,
+            ..Default::default()
+        };
+        channel.compressor = DynamicsSettings {
+            enabled: true,
+            threshold_db: -23.0,
+            ratio: 3.0,
+            attack_ms: 7.0,
+            release_ms: 210.0,
+            knee_db: 2.0,
+            makeup_db: 1.0,
+            upward: false,
+        };
+        channel.expander =
+            DynamicsSettings { upward: true, threshold_db: -33.0, ..channel.compressor.clone() };
+        project.settings = Some(ProjectSettings {
+            artist_name: "Artist".into(),
+            media_source: MediaSourceType::ReelToReel,
+            export_highpass_20hz: true,
+            export_fade_ms: 22,
+            export_balance_db: 1.5,
+            export_apply_denoiser: true,
+            denoiser_params: channel.denoiser.clone(),
+            noise_profile: Some(profile),
+        });
+        project.song_settings.insert(0, song);
+        project.song_settings.insert(2, SongSettings::default());
+        project.editor_view = SongEditorView {
+            selected_segment: Some(2),
+            zoom: 2.5,
+            vertical_zoom: 1.5,
+            scroll: 0.25,
+            loop_playback: true,
+        };
+        project.save_to_file(&path, None).unwrap();
+        let (reopened, _) = TapeDigizerProject::load_from_file(&path).unwrap();
+        assert_eq!(project.format_version, 1);
+        assert_eq!(reopened.format_version, 2);
+        project.format_version = 2;
+        assert_eq!(reopened, project);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn test_sanitize_filename() {
         assert_eq!(sanitize_filename("Sommer/Hits: 1985?"), "Sommer_Hits_ 1985_");
         assert_eq!(sanitize_filename("   "), "Tape_Album");
@@ -334,6 +501,7 @@ mod tests {
             "track".into(),
         );
 
+        assert_eq!(proj.format_version, 2);
         let proj_path = temp_dir.join("test_tape_Side_A.tapedigizer");
         proj.save_to_file(&proj_path, Some(&test_wav)).unwrap();
 

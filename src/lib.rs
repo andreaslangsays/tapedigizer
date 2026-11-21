@@ -8,6 +8,7 @@ pub mod splitter;
 pub mod audio {
     pub mod denoiser;
     pub mod meter;
+    pub mod processing;
 }
 
 #[cfg(target_os = "macos")]

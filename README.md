@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.6.0-blue.svg" alt="Version 1.6.0" />
+  <img src="https://img.shields.io/badge/version-1.8.0-blue.svg" alt="Version 1.8.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -23,16 +23,25 @@
 
 **TapeDigizer** ist eine hochpräzise, native macOS-Desktop-App (entwickelt in **Rust** mit hardwarebeschleunigter Benutzeroberfläche), die das Digitalisieren von **Schallplatten (Vinyl LP & Single 45)**, **Kassetten** und **Tonbändern** so einfach, präzise und professionell wie möglich macht.
 
-### Highlights in v1.6.0
+### Highlights in v1.8.0
 
-* **Rausch- & DC-Filter-Studio:** Im Menü **Filter** öffnen (`⌘F`), einen Abschnitt mit reinem Rauschen in der Wellenform markieren und daraus ein Rauschprofil lernen. Beim Vorhören lässt sich zwischen gefiltertem Signal (Wet), Original (A/B) und entferntem Rauschen (Δ) wechseln.
-* **Rauschfilter pro Track:** Über das Menü **Filter** lässt sich die Rauschfilterung beim Export für den gewählten Track umschalten oder für alle Tracks gemeinsam ein- oder ausschalten. Der Filter kann auch direkt in den gewählten Track oder die gesamte Aufnahme eingerechnet werden.
+* **Modernes Dual-Theme Studio-Design (Silverface & Obsidian):** Neues, helles **Silverface**-Mastering-Design als Standard und umschaltbarer **Obsidian**-Dark-Mode direkt in der nativen macOS Unified Titlebar (`Hell` / `Dunkel`).
+* **Skalierende Konsole ohne vertikales Scrollen:** Alle Arbeitsbereiche (**Aufnahme**, **Schnitt**, **Einzeltrack**, **Tracks**, **Export**) skalieren dynamisch mit der Fensterhöhe — alle Regler, Kurven und Meter bleiben jederzeit ohne Scrollen im Blick.
+* **Integrierte Einzeltrack-Bearbeitung (Song-Studio):** Direkt im Hauptmenü unter **`[ Marker | Tracks | Einzeltrack | Export ]`** (`⌘F`) erreichbar. Pro Song eigene Wellenform, A/B-Vergleich (`Bearbeitet` / `Original`) sowie 5 moderne Effekt-Module:
+  * **Einzelkanäle:** Kanal-Trim, taktile `MUTE`- und `Ø Phase`-Schalter, L/R-Kopplung und Solo.
+  * **Restauration:** Dunkles OLED-Spektral-Display mit Hiss- und Zielkurve, Spectral-Denoiser (`Reduktion`, `Empfindlichkeit`, `Glättung`), Subsonic/DC-Filter und pro-Track Rauschprofil.
+  * **3-Band-Equalizer:** Interaktive Frequenzkurve (`20 Hz – 20 kHz`) mit verschiebbaren Band-Knoten, `Flat`-Reset und Baxandall-/Peak-Reglern.
+  * **Dynamik (Compressor, Expander & neuer Brickwall-Limiter):** 3-Wege-Umschaltung mit eigener Kennlinie; der neue **Brickwall-Limiter** bietet `Ceiling` (`-24..0 dB`), `Drive` (`0..+24 dB`), `Release` (`5..500 ms`), `0 ms` Attack und Stereo-Link.
+  * **Mix & Ausgabe:** Stereo-/Mono-Routing (`Stereo`, `L Mono`, `R Mono`, `Mono-Mix`), Balance, Stereobreite, vertikales OLED-Stereo-LED-Meter und Exportformat pro Song.
+* **Präzise Drehregler (Potis):** Glatte Aluminium-Potis mit 270°-Farbbogen, sofortigem vertikalem Drag ohne Sprung, logarithmischer Skalierung für Frequenzen & Zeiten (`Hz`/`ms`), Mausrad-/Trackpad-Steuerung, `Shift`-Feinmodus und Doppelklick-Reset auf `0`.
+* **Analog-Instrumentierung:** Umschaltbare Vintage-VU-Meter (`VU` / `LED`) und animiertes Band-Transport-Deck in der Aufnahme-Ansicht sowie direkter Projekt-/WAV-Laden-Button auf der leeren Schnitt-Startseite.
 * **Audio Unit für macOS:** Der TapeDigizer Denoiser lässt sich als Effekt in Logic Pro und anderen Audio-Unit-fähigen DAWs verwenden.
-* **macOS-Oberfläche:** Metal-Rendering über `wgpu`, eine Stereo-Wellenform mit stabiler Höhe beim Ein- und Ausblenden der Schnitt-Lupe und eine sichtbare Versionsnummer.
 
 ### ✨ Hauptfunktionen
 
-1. **🎙️ Tab 1: Aufnahme & Einpegeln**
+Die Studiokonsole hat zwei klar getrennte Hauptbereiche: **Aufnahme** für Quelle, Pegelcheck und Digitalisierung sowie **Schnitt** für bestehende Projekte und WAV-Dateien. Im Schnittbereich stehen **`Marker`**, **`Tracks`**, **`Einzeltrack`** und **`Export`** direkt in der Unified Titlebar zur Verfügung. Lange Track- und Dateilisten werden dynamisch seitenweise angepasst.
+
+1. **🎙️ Aufnahme & Einpegeln**
    * **Analoge Audioquellen-Profile:** Vorkonfigurierte Voreinstellungen für **Kassette (Compact Cassette)**, **Tonband (Reel-to-Reel)**, **Vinyl LP (33⅓ RPM)** und **Single (45 RPM)** mit optimierten Standard-Aufnahmezeiten und passenden Stille-Erkennungsparametern.
    * **⏱ Einstellbarer Zeit-Headroom (Aufnahme-Puffer):** Verhindert verfrühtes Abschneiden bei überlangen Kassetten (z. B. C-90 mit reellen 47–49 min). Einstellbar per Schnellwahltasten (`+0m`, `+2m`, `+5m`, `+10m`, `+15m`) oder stufenlosem Schieberegler (Standard: `+5 min` Headroom).
    * **🔇 Hochempfindliche Stille-Erkennung & Erkennung fehlenden Signals (-100 dBFS):** Erkennt echten Signalverlust (wenn das Kassettendeck stoppt oder abschaltet) und schützt vor vorzeitigem Aufnahmeabbruch bei leisen Passagen oder Bandrauschen. Schwellenwert bis **-100 dBFS** stufenlos justierbar inklusive Direktwahl-Button `-100 dB (Kein Signal)`.
@@ -44,21 +53,18 @@
    * **Responsive Studio LED-Stereokette:** 36 Segmente (-60 bis 0 dBFS) mit Spitzenwert-Ticks, separater numerischer dBFS-Anzeige und klickbarem CLIP-Reset.
    * **Vorab-Pegelcheck & Live-Wellenform:** Pegelkontrolle ohne Aufzeichnung sowie Echtzeit-Zweikanal-Wellenform während der Aufnahme.
 
-2. **📊 Tab 2: Pegel-Diagnose & Hardware-Poti-Empfehlung**
+2. **📊 Aufnahmebefund neben den Eingangspegeln**
    * **Analoge Signal-Diagnose:** Spitzenpegel L/R in dBFS, echter Headroom, DC-Offset (Gleichspannungsanteil) sowie Kanalbalance / Balance-Abweichung (L/R Δ dB).
    * **Zoom L-12 Gain-Ratgeber:** Exakte Angabe, wie weit das analoge Gain-Poti am Interface aufgedreht (+X dB) oder zurückgedreht (-X dB) werden muss für optimalen Headroom (-1.5 dBFS).
    * **Stereo-Balance-Hinweis:** Warnt vor ungleicher Tonabnehmer- oder Tonkopf-Justierung.
 
-3. **✂️ Tab 3: Track-Schnitt, Präzisions-Schnitt-Lupe & Mastering-Export**
-   * **Überarbeitetes 2-Zonen-Layout:**
-     * **Oben (Volle Breite):** Zweikanal-Stereo-Wellenform über die gesamte Fensterbreite für perfekte Übersicht über das gesamte Band / die Platte, mit Marker-Flaggen, Taktlineal und Bereichsauswahl.
-     * **Unten Links:** Kompakte, übersichtliche Songliste.
-     * **Unten Rechts:** Interaktive Präzisions-Schnitt-Lupe zur exakten Platzierung des Schnittmarkers.
+3. **✂️ Track-Schnitt, Präzisions-Schnitt-Lupe & Mastering-Export**
+   * **Konsolenlayout:** Stereo-Wellenform über die gesamte Fensterbreite mit Schnittmarken, Zeitlineal und Bereichsauswahl. Die Schnitt-Lupe liegt direkt unter der Wellenform. Rauschfilter, Trackliste und WAV-Export haben eigene Tabs.
    * **🔍 Neu gestaltete Präzisions-Schnitt-Lupe:**
      * **Zonen-Hervorhebung:** Farbliche Markierung des auslaufenden Tracks (◀ ENDE Txx) und des beginnenden Tracks (START Tyy ▶).
      * **Transienten-Fokussierung (Max. 3):** Die Transienten-Erkennung ist intelligent begrenzt – es werden maximal die **3 signifikantesten Transienten** (stärkste Song-Einsätze) im Umkreis des Markers angezeigt, um Überfrachtung zu vermeiden.
      * **Nulldurchgang-Snap (Zero-Crossing):** Automatisches oder manuelles Einrasten auf den nächsten Nulldurchgang (`∿ Nulldurchgang`), um Knackser und Klicks am Schnittpunkt physikalisch auszuschließen.
-     * **Stufenloser Zoom & Feinschnitt:** Schnelles Rein-/Rauszoomen per Mausrad direkt in der Lupe, Nudge-Tasten für Millisekunden- und Sample-Schritte (`±1 Smp`, `±10 ms`).
+     * **Stufenloser Zoom & Feinschnitt:** Schnelles Rein-/Rauszoomen per ⌥ + Mausrad direkt in der Lupe, Nudge-Tasten für Millisekunden- und Sample-Schritte (`±1 Smp`, `±10 ms`).
    * **📝 Kompakte & mächtige Trackliste:**
      * Kompakte Einzeilen-Einträge für maximale Übersicht auch bei über 20 Titeln pro Seite.
      * Großzügiges Titelfeld für mindestens 20–30 Zeichen ohne horizontales Drängeln.
@@ -81,16 +87,25 @@
 
 **TapeDigizer** is a high-precision native macOS desktop application (built with **Rust** and hardware-accelerated GUI) designed to digitize **vinyl records (LP 33⅓ & Single 45)**, **cassettes**, and **reel-to-reel tapes** effortlessly with studio-grade fidelity.
 
-### Highlights in v1.6.0
+### Highlights in v1.8.0
 
-* **Noise & DC Filter Studio:** Open it from the **Filter** menu (`⌘F`), select a noise-only section of the waveform, and learn a noise profile from it. Audition the filtered signal (Wet), the original (A/B), or the removed noise (Δ).
-* **Per-track noise filtering:** Use the **Filter** menu to toggle noise reduction at export for the selected track or enable or disable it for all tracks at once. You can also bake the filter into the selected track or the entire recording.
+* **Modern Dual-Theme Studio Console (Silverface & Obsidian):** Clean light **Silverface** mastering palette by default plus a live **Obsidian** dark mode toggle right in the native macOS Unified Titlebar (`Light` / `Dark`).
+* **Responsive Scroll-Free Layout:** All workspaces (**Recording**, **Cut**, **Track FX**, **Tracks**, **Export**) scale dynamically to fit the window height with zero vertical scrolling.
+* **Integrated Single-Track Processing (Song Studio):** Built directly into the Editing sub-navigation **`[ Cut | Tracks | Track FX | Export ]`** (`⌘F`). Local waveform, A/B audition (`Processed` / `Original`), and 5 modern effect modules saved per song:
+  * **Channels:** Input trim, tactile `MUTE` and `Ø Phase` switches, L/R link, and channel solo.
+  * **Restoration:** Dark OLED spectrum display with raw hiss & target curves, spectral denoiser (`Reduction`, `Sensitivity`, `Smoothing`), subsonic/DC filter, and per-track noise profile.
+  * **3-Band Equalizer:** Interactive frequency response curve (`20 Hz – 20 kHz`) with draggable band nodes, `Flat` reset, and low-shelf / parametric mid / high-shelf controls.
+  * **Dynamics (Compressor, Expander & new Brickwall Limiter):** 3-way unit switcher with live transfer curves; the new **Brickwall Limiter** adds `Ceiling` (`-24..0 dB`), `Drive` (`0..+24 dB`), `Release` (`5..500 ms`), `0 ms` attack, and stereo detector linking.
+  * **Mix & Export:** Stereo/mono routing (`Stereo`, `Left mono`, `Right mono`, `Mono mix`), balance, stereo width, vertical OLED stereo LED meter, and per-song export format.
+* **Precision Rotary Knobs:** Smooth silver-aluminum knobs with 270° colored arcs, instant vertical drag, logarithmic scaling for frequencies & times (`Hz`/`ms`), mouse-wheel / trackpad scrolling, `Shift` fine mode, and double-click reset to `0`.
+* **Analog Instrumentation:** Switchable vintage analog VU meters (`VU` / `LED`), animated tape transport deck in Recording, and a primary Load Project / WAV button on the empty Editing start screen.
 * **Audio Unit for macOS:** Use TapeDigizer Denoiser as an effect in Logic Pro and other Audio Unit hosts.
-* **macOS interface:** Metal rendering via `wgpu`, a stereo waveform that keeps its height when toggling the cut magnifier, and a visible app version.
 
 ### ✨ Key Features
 
-1. **🎙️ Tab 1: Recording & Calibration**
+The console has two distinct workspaces: **Recording** for source setup, level monitoring, and digitization, and **Editing** for existing projects and WAV files. Editing integrates **`Cut`**, **`Tracks`**, **`Track FX`**, and **`Export`** directly in the Unified Titlebar. Long track lists and export previews paginate dynamically to fit the window.
+
+1. **🎙️ Recording & Calibration**
    * **Analog Media Profiles:** Presets for **Compact Cassette**, **Reel-to-Reel Tape**, **Vinyl LP (33⅓ RPM)**, and **Single (45 RPM)** with customized duration presets and silence detection thresholds.
    * **⏱ Configurable Time Headroom (Buffer):** Prevents premature cutoffs on tapes running longer than nominal length (e.g. C-90 running 47–49 min). Adjustable via quick-preset chips (`+0m`, `+2m`, `+5m`, `+10m`, `+15m`) or free slider (default: `+5 min` safety buffer).
    * **🔇 Ultra-Sensitive Silence & Missing Signal Detection (-100 dBFS):** Detects complete signal loss (when tape deck stops or shuts off) down to **-100 dBFS** to prevent early stops during quiet music passages or tape hiss. Includes `-100 dB (No signal)` one-click preset.
@@ -101,11 +116,11 @@
    * **Immediate Persistence:** Audio and project files are safely flushed to disk before analysis begins.
    * **24-bit Studio Quality:** Pure uncompressed 24-bit PCM WAV.
 
-2. **📊 Tab 2: Level Diagnosis & Hardware Gain Advice**
+2. **📊 Recording Analysis beside the Input Meters**
    * **Signal Analysis:** Peak L/R (dBFS), headroom, DC-offset detection, and channel balance deviation (L/R Δ dB).
    * **Zoom L-12 Hardware Advice:** Recommends exact potentiometer adjustments (e.g. *"+4 dB"* or *"-2 dB"*).
 
-3. **✂️ Tab 3: Track Splicing, Precision Scope & Mastering Export**
+3. **✂️ Track Splicing, Precision Scope & Mastering Export**
    * **Full-Width Stereo Waveform:** High-resolution waveform occupying full window width for clear navigation and overview.
    * **Precision Splice Scope (Schnitt-Lupe):**
      * Distinct track zone shading (◀ END Txx vs START Tyy ▶).
@@ -129,18 +144,18 @@
 |---|---|---|
 | **⌘ + S** | Projekt speichern (.tapedigizer) | Save Project (.tapedigizer) |
 | **⌘ + O** | Projekt öffnen | Open Project |
-| **⌘ + F** | Rausch- & DC-Filter-Studio ein- oder ausblenden | Toggle Noise & DC Filter Studio |
+| **⌘ + F** | Song-Studio öffnen | Open Song Studio |
 | **⌘ + Z** | Letzte Aktion rückgängig machen (Undo) | Undo last marker action |
 | **⇧ + ⌘ + Z** / **⌘ + Y** | Wiederherstellen (Redo) | Redo marker action |
 | **Tab** / **Enter** | Zum nächsten Tracktitel springen | Jump to next track title |
 | **Leertaste / Space** | Wiedergabe starten / pausieren | Toggle Play / Pause |
 | **⌥ + Mausrad** | Hinein- / Herauszoomen (auf Cursor) | Zoom in / out (centered on mouse) |
-| **Mausrad / Scroll** | Horizontal nach links / rechts scrollen | Pan horizontally left / right |
+| **Horizontal** | Wellenform verschieben | Pan the waveform |
 | **H** | Hover-Vorhören an- / ausschalten | Toggle Hover Audition on / off |
 | **S** oder **C** | Schnitt-Werkzeug (✂️) umschalten | Toggle Split / Scissor Tool |
 | **V** oder **Esc** | Zurück zum Zeiger / Navigieren | Return to Pointer / Select Tool |
 | **M** | Marker an Abspielposition setzen | Drop marker at playhead |
-| **Delete / ⌫** | Ausgewählten Marker löschen (mit Bestätigung) | Delete selected marker (with prompt) |
+| **Delete / ⌫** | Ausgewählten Marker löschen (⌘Z macht rückgängig) | Delete selected marker (⌘Z to undo) |
 
 ---
 

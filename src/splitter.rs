@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use crate::audio::processing::{Routing, SongExportMode, SongProcessor, SongSettings};
 use std::path::{Path, PathBuf};
 use crate::audio::meter::linear_to_db;
 
@@ -17,9 +19,11 @@ pub struct TrackInfo {
     pub end_seconds: f64,
     pub is_pause: bool,
     pub is_filtered: bool,
+    pub processing: Option<SongSettings>,
 }
 
 impl TrackInfo {
+    #[allow(dead_code)]
     pub fn export_filename(&self) -> String {
         let title = crate::project::sanitize_track_title(&self.title, self.index);
         format!("{:02} - {title}.wav", self.index)
@@ -32,6 +36,16 @@ impl TrackInfo {
             format!("{:02} - {clean_artist} - {title}.wav", self.index)
         } else {
             format!("{:02} - {title}.wav", self.index)
+        }
+    }
+
+    pub fn export_filenames_with_artist(&self, artist: Option<&str>) -> Vec<String> {
+        let filename = self.export_filename_with_artist(artist);
+        if self.processing.as_ref().is_some_and(|s| s.export_mode == SongExportMode::SeparateMono) {
+            let stem = filename.strip_suffix(".wav").unwrap_or(&filename);
+            vec![format!("{stem} - L.wav"), format!("{stem} - R.wav")]
+        } else {
+            vec![filename]
         }
     }
 
@@ -52,13 +66,59 @@ pub struct MarkerSnapshot {
     pub markers: Vec<f64>,
     pub custom_titles: Vec<String>,
     pub pause_indices: Vec<usize>,
+    pub song_settings: BTreeMap<usize, SongSettings>,
     pub disabled_filter_indices: Vec<usize>,
+}
+
+impl MarkerSnapshot {
+    /// Reindex all segment metadata using the original segment which owns each new interval.
+    pub(crate) fn remap_segments(
+        &mut self,
+        markers: Vec<f64>,
+        owners: &[usize],
+        detected_pauses: Option<Vec<usize>>,
+    ) {
+        debug_assert_eq!(markers.len() + 1, owners.len());
+        let pauses = detected_pauses.unwrap_or_else(|| {
+            owners.iter().enumerate().filter_map(|(index, owner)| {
+                self.pause_indices.contains(owner).then_some(index)
+            }).collect()
+        });
+        let mut titles = Vec::new();
+        let mut start = 0;
+        for segments in owners.chunk_by(|a, b| a == b) {
+            let end = start + segments.len();
+            if let Some(title) = self.custom_titles.get(segments[0]).filter(|title| !title.is_empty()) {
+                // If detection splits off silence, keep the name on the first surviving song.
+                let destination = (start..end).find(|i| pauses.binary_search(i).is_err()).unwrap_or(start);
+                titles.resize(destination + 1, String::new());
+                titles[destination] = title.clone();
+            }
+            start = end;
+        }
+        let mut disabled = Vec::new();
+        let mut settings = BTreeMap::new();
+        for (index, &owner) in owners.iter().enumerate() {
+            if self.disabled_filter_indices.contains(&owner) {
+                disabled.push(index);
+            }
+            if let Some(song) = self.song_settings.get(&owner) {
+                settings.insert(index, song.clone());
+            }
+        }
+        self.markers = markers;
+        self.custom_titles = titles;
+        self.pause_indices = pauses;
+        self.disabled_filter_indices = disabled;
+        self.song_settings = settings;
+    }
 }
 
 pub struct TrackSplitter {
     pub markers: Vec<f64>, // Split points in seconds
     pub custom_titles: Vec<String>,
     pub pause_indices: Vec<usize>, // Segments marked as excluded pauses (wont be exported)
+    pub song_settings: BTreeMap<usize, SongSettings>,
     pub disabled_filter_indices: Vec<usize>, // Segments that will NOT have the filter applied
     pub undo_stack: Vec<MarkerSnapshot>,
     pub redo_stack: Vec<MarkerSnapshot>,
@@ -67,6 +127,7 @@ pub struct TrackSplitter {
 impl TrackSplitter {
     pub fn new() -> Self {
         Self {
+            song_settings: BTreeMap::new(),
             markers: Vec::new(),
             custom_titles: Vec::new(),
             pause_indices: Vec::new(),
@@ -78,6 +139,7 @@ impl TrackSplitter {
 
     pub fn snapshot(&self) -> MarkerSnapshot {
         MarkerSnapshot {
+            song_settings: self.song_settings.clone(),
             markers: self.markers.clone(),
             custom_titles: self.custom_titles.clone(),
             pause_indices: self.pause_indices.clone(),
@@ -103,10 +165,7 @@ impl TrackSplitter {
         if let Some(prev) = self.undo_stack.pop() {
             let current = self.snapshot();
             self.redo_stack.push(current);
-            self.markers = prev.markers;
-            self.custom_titles = prev.custom_titles;
-            self.pause_indices = prev.pause_indices;
-            self.disabled_filter_indices = prev.disabled_filter_indices;
+            self.restore(prev);
             true
         } else {
             false
@@ -117,10 +176,7 @@ impl TrackSplitter {
         if let Some(next) = self.redo_stack.pop() {
             let current = self.snapshot();
             self.undo_stack.push(current);
-            self.markers = next.markers;
-            self.custom_titles = next.custom_titles;
-            self.pause_indices = next.pause_indices;
-            self.disabled_filter_indices = next.disabled_filter_indices;
+            self.restore(next);
             true
         } else {
             false
@@ -150,6 +206,11 @@ impl TrackSplitter {
         }
         self.push_undo();
         self.markers.insert(index, time);
+        let following = self.song_settings.split_off(&(index + 1));
+        self.song_settings.extend(following.into_iter().map(|(i, settings)| (i + 1, settings)));
+        if let Some(inherited) = self.song_settings.get(&index).cloned() {
+            self.song_settings.insert(index + 1, inherited);
+        }
         if index < self.custom_titles.len() {
             self.custom_titles.insert(index + 1, String::new());
         }
@@ -182,6 +243,9 @@ impl TrackSplitter {
         }
         self.push_undo();
         self.markers.remove(index);
+        self.song_settings.remove(&(index + 1));
+        let following = self.song_settings.split_off(&(index + 2));
+        self.song_settings.extend(following.into_iter().map(|(i, settings)| (i - 1, settings)));
         if index + 1 < self.custom_titles.len() {
             self.custom_titles.remove(index + 1);
         }
@@ -238,6 +302,7 @@ impl TrackSplitter {
     }
 
     pub fn restore(&mut self, snapshot: MarkerSnapshot) {
+        self.song_settings = snapshot.song_settings;
         self.markers = snapshot.markers;
         self.custom_titles = snapshot.custom_titles;
         self.pause_indices = snapshot.pause_indices;
@@ -245,9 +310,10 @@ impl TrackSplitter {
     }
 
     pub fn clear_markers(&mut self) {
-        if !self.markers.is_empty() || !self.pause_indices.is_empty() || !self.disabled_filter_indices.is_empty() {
+        if !self.markers.is_empty() || !self.custom_titles.is_empty() || !self.pause_indices.is_empty() || !self.disabled_filter_indices.is_empty() {
             self.push_undo();
         }
+        self.song_settings.retain(|&i, _| i == 0);
         self.markers.clear();
         self.custom_titles.clear();
         self.pause_indices.clear();
@@ -343,13 +409,13 @@ impl TrackSplitter {
                 end_seconds: end,
                 is_pause: is_p,
                 is_filtered: is_f,
+                processing: self.song_settings.get(&i).cloned(),
             });
         }
 
         tracks
     }
 
-    /// Automatically scans samples to find silent pauses and places markers
     pub fn detect_silence_pauses(
         &mut self,
         samples_l: &[f32],
@@ -358,61 +424,9 @@ impl TrackSplitter {
         threshold_db: f32,
         min_silence_seconds: f64,
     ) {
-        if samples_l.is_empty() || sample_rate == 0 {
-            return;
-        }
-
-        self.clear_markers();
-
-        let window_size = (sample_rate as f64 * 0.1) as usize; // 100ms window
-        let min_windows = (min_silence_seconds / 0.1).ceil() as usize;
-
-        let total_samples = samples_l.len();
-        let total_duration = total_samples as f64 / sample_rate as f64;
-
-        let mut in_silence = false;
-        let mut silence_start_win = 0;
-        let mut current_silence_len = 0;
-
-        let total_windows = total_samples / window_size;
-
-        for w in 0..total_windows {
-            let start_idx = w * window_size;
-            let end_idx = (start_idx + window_size).min(total_samples);
-
-            let mut sum_sq = 0.0_f64;
-            for i in start_idx..end_idx {
-                let sl = samples_l[i] as f64;
-                let sr = samples_r[i] as f64;
-                sum_sq += sl * sl + sr * sr;
-            }
-
-            let rms = ((sum_sq / (2.0 * (end_idx - start_idx) as f64)).sqrt()) as f32;
-            let rms_db = linear_to_db(rms);
-
-            if rms_db < threshold_db {
-                if !in_silence {
-                    in_silence = true;
-                    silence_start_win = w;
-                    current_silence_len = 1;
-                } else {
-                    current_silence_len += 1;
-                }
-            } else {
-                if in_silence {
-                    if current_silence_len >= min_windows {
-                        let center_win = silence_start_win + current_silence_len / 2;
-                        let center_sec = (center_win * window_size) as f64 / sample_rate as f64;
-                        self.add_marker(center_sec, total_duration, sample_rate);
-                    }
-                    in_silence = false;
-                    current_silence_len = 0;
-                }
-            }
-        }
+        self.detect_pauses(samples_l, samples_r, sample_rate, threshold_db, min_silence_seconds, false);
     }
 
-    /// Automatically scans samples to find silent pauses and marks them as excluded gaps (pause segments)
     pub fn detect_silence_pauses_as_gaps(
         &mut self,
         samples_l: &[f32],
@@ -421,88 +435,97 @@ impl TrackSplitter {
         threshold_db: f32,
         min_silence_seconds: f64,
     ) {
-        if samples_l.is_empty() || sample_rate == 0 {
+        self.detect_pauses(samples_l, samples_r, sample_rate, threshold_db, min_silence_seconds, true);
+    }
+
+    fn detect_pauses(
+        &mut self,
+        left: &[f32],
+        right: &[f32],
+        sample_rate: u32,
+        threshold_db: f32,
+        min_silence_seconds: f64,
+        exclude_gaps: bool,
+    ) {
+        let length = left.len().min(right.len());
+        if length == 0 || sample_rate == 0 {
             return;
         }
-
-        self.clear_markers();
-
-        let window_size = (sample_rate as f64 * 0.1) as usize; // 100ms window
+        let rate = f64::from(sample_rate);
+        let window = (sample_rate as usize / 10).max(1);
         let min_windows = (min_silence_seconds / 0.1).ceil() as usize;
-
-        let total_samples = samples_l.len();
-        let total_duration = total_samples as f64 / sample_rate as f64;
-
-        let mut in_silence = false;
-        let mut silence_start_win = 0;
-        let mut current_silence_len = 0;
-
-        let total_windows = total_samples / window_size;
-        let mut silence_intervals: Vec<(f64, f64)> = Vec::new();
-
-        for w in 0..total_windows {
-            let start_idx = w * window_size;
-            let end_idx = (start_idx + window_size).min(total_samples);
-
-            let mut sum_sq = 0.0_f64;
-            for i in start_idx..end_idx {
-                let sl = samples_l[i] as f64;
-                let sr = samples_r[i] as f64;
-                sum_sq += sl * sl + sr * sr;
-            }
-
-            let rms = ((sum_sq / (2.0 * (end_idx - start_idx) as f64)).sqrt()) as f32;
-            let rms_db = linear_to_db(rms);
-
-            if rms_db < threshold_db {
-                if !in_silence {
-                    in_silence = true;
-                    silence_start_win = w;
-                    current_silence_len = 1;
-                } else {
-                    current_silence_len += 1;
-                }
+        let n_windows = length / window;
+        let duration = length as f64 / rate;
+        let mut silence = None;
+        let mut gaps = Vec::new();
+        let mut markers = Vec::new();
+        for w in 0..=n_windows {
+            let start = w * window;
+            let quiet = if w < n_windows {
+                let energy: f64 = (start..start + window)
+                    .map(|i| {
+                        let (l, r) = (f64::from(left[i]), f64::from(right[i]));
+                        l * l + r * r
+                    })
+                    .sum();
+                linear_to_db((energy / (2 * window) as f64).sqrt() as f32) < threshold_db
             } else {
-                if in_silence {
-                    if current_silence_len >= min_windows {
-                        let t_start = (silence_start_win * window_size) as f64 / sample_rate as f64;
-                        let t_end = ((silence_start_win + current_silence_len) * window_size) as f64 / sample_rate as f64;
-                        silence_intervals.push((t_start, t_end));
-                    }
-                    in_silence = false;
-                    current_silence_len = 0;
+                false
+            };
+            if quiet {
+                silence.get_or_insert(w);
+            } else if let Some(first) = silence.take() {
+                if w - first < min_windows {
+                    continue;
                 }
-            }
-        }
-
-        if in_silence && current_silence_len >= min_windows {
-            let t_start = (silence_start_win * window_size) as f64 / sample_rate as f64;
-            let t_end = total_duration;
-            silence_intervals.push((t_start, t_end));
-        }
-
-        // Place markers at starts and ends of silence intervals
-        for (t_start, t_end) in &silence_intervals {
-            if *t_start > 0.4 {
-                self.add_marker(*t_start, total_duration, sample_rate);
-            }
-            if *t_end < total_duration - 0.4 {
-                self.add_marker(*t_end, total_duration, sample_rate);
-            }
-        }
-
-        // Now identify which segments correspond to silence and mark them in pause_indices
-        let tracks = self.get_tracks(total_duration);
-        for track in tracks {
-            for (t_start, t_end) in &silence_intervals {
-                if track.start_seconds >= t_start - 0.25 && track.end_seconds <= t_end + 0.25 {
-                    if !self.pause_indices.contains(&track.segment_index) {
-                        self.pause_indices.push(track.segment_index);
+                if exclude_gaps {
+                    let a = (first * window) as f64 / rate;
+                    let b = if w == n_windows { duration } else { start as f64 / rate };
+                    if a > 0.4 {
+                        markers.push(a);
+                    }
+                    if b < duration - 0.4 {
+                        markers.push(b);
+                    }
+                    gaps.push((a, b));
+                } else if w < n_windows {
+                    let center = ((first + (w - first) / 2) * window) as f64 / rate;
+                    if center > 0.0 {
+                        markers.push(center);
                     }
                 }
             }
         }
-        self.pause_indices.sort_unstable();
+        let before = self.snapshot();
+        // A redetected boundary may move slightly. Match each new song to the old
+        // song with the most overlapping audio, preferring the left one on ties.
+        let mut owners = Vec::with_capacity(markers.len() + 1);
+        let mut pauses = Vec::new();
+        let mut start = 0.0;
+        for end in markers.iter().copied().chain(std::iter::once(duration)) {
+            let mut old = before.markers.partition_point(|&m| m <= start);
+            let mut owner = old;
+            let mut longest = 0.0;
+            let mut position = start;
+            while position < end {
+                let boundary = before.markers.get(old).copied().unwrap_or(duration).min(end);
+                if boundary - position > longest {
+                    longest = boundary - position;
+                    owner = old;
+                }
+                position = boundary;
+                old += 1;
+            }
+            if gaps.iter().any(|&(a, b)| start >= a - 0.25 && end <= b + 0.25) {
+                pauses.push(owners.len());
+            }
+            owners.push(owner);
+            start = end;
+        }
+        let mut snapshot = before.clone();
+        snapshot.remap_segments(markers, &owners, Some(pauses));
+        self.restore(snapshot);
+        self.commit_edit(before);
     }
 }
 
@@ -563,13 +586,13 @@ pub fn export_tracks_with_options(
     let source = std::fs::File::open(source_wav_path).map_err(|e| e.to_string())?;
     let mut reader = hound::WavReader::new(std::io::BufReader::new(source)).map_err(|e| e.to_string())?;
     let spec = reader.spec();
-    if !matches!(spec.channels, 1 | 2) || spec.sample_rate == 0
+    if !matches!(spec.channels, 1 | 2)
+        || spec.sample_rate == 0
         || spec.sample_format != hound::SampleFormat::Int
         || !matches!(spec.bits_per_sample, 16 | 24 | 32)
     {
         return Err("Unsupported WAV format".into());
     }
-    let channels = u32::from(spec.channels);
     let duration = reader.duration();
     let rate = f64::from(spec.sample_rate);
     let mut exports = Vec::new();
@@ -578,194 +601,140 @@ pub fn export_tracks_with_options(
     for track in tracks.iter().filter(|track| !track.is_pause) {
         let start = (track.start_seconds * rate).round() as u32;
         let end = (track.end_seconds * rate).round() as u32;
-        if !track.start_seconds.is_finite() || !track.end_seconds.is_finite()
-            || track.start_seconds < 0.0 || start >= end || end > duration
+        if !track.start_seconds.is_finite()
+            || !track.end_seconds.is_finite()
+            || track.start_seconds < 0.0
+            || start >= end
+            || end > duration
         {
             return Err(format!("Invalid export range for track {}", track.index));
         }
-        let path = out_dir.join(track.export_filename_with_artist(artist_ref));
-        if path.exists() || !names.insert(path.clone()) {
-            return Err(format!("Export destination already exists: {}", path.display()));
+        let mut paths = Vec::new();
+        for filename in track.export_filenames_with_artist(artist_ref) {
+            let path = out_dir.join(filename);
+            if path.exists() || !names.insert(path.clone()) {
+                return Err(format!("Export destination already exists: {}", path.display()));
+            }
+            paths.push(path);
         }
-        exports.push((start, end, path, track.is_filtered));
+        let mut processing = track.processing.clone();
+        if let Some(song) = &mut processing {
+            match song.export_mode {
+                SongExportMode::AsEdited => {}
+                SongExportMode::Stereo => song.routing = Routing::Stereo,
+                SongExportMode::SeparateMono => {
+                    song.routing = Routing::Stereo;
+                    song.width = 1.0;
+                    song.balance_db = 0.0;
+                    song.swap_channels = false;
+                }
+            }
+        }
+        exports.push(ExportTrack { start, end, paths, processing, legacy_filter: track.is_filtered });
     }
     if exports.is_empty() {
         return Err("No tracks to export".into());
     }
 
-    let peak_scale = |peak: i64| {
-        let full_scale = (1_i64 << (spec.bits_per_sample - 1)) as f64;
-        let target = 10.0_f64.powf(-0.3 / 20.0);
-        (target / (peak as f64 / full_scale).max(0.0001)).min(10.0)
-    };
     let track_count = exports.len();
     let report = |finished| {
-        if progress(finished, track_count) { Ok(()) } else { Err("Export cancelled".to_string()) }
+        if progress(finished, track_count) {
+            Ok(())
+        } else {
+            Err("Export cancelled".to_string())
+        }
     };
     report(0)?;
-    let album_gain = if options.norm_mode == NormalizationMode::PeakAlbum {
-        peak_scale(read_peak(&mut reader, 0, duration * channels, || report(0))?)
-    } else {
-        1.0
-    };
-    let output_spec = hound::WavSpec {
-        channels: 2,
-        sample_rate: spec.sample_rate,
-        bits_per_sample: 24,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let pcm_factor = 2.0_f64.powi(24 - i32::from(spec.bits_per_sample));
-
-    // Stereo balance gains (negative = boost L / cut R, positive = boost R / cut L)
-    let bal_db = options.stereo_balance_db.clamp(-12.0, 12.0);
-    let (bal_gain_l, bal_gain_r) = if bal_db.abs() < 0.05 {
-        (1.0_f64, 1.0_f64)
-    } else if bal_db > 0.0 {
-        // Right is louder by bal_db -> attenuate R or boost L slightly
-        (10.0_f64.powf(f64::from(bal_db * 0.5) / 20.0), 10.0_f64.powf(f64::from(-bal_db * 0.5) / 20.0))
-    } else {
-        // Left is louder by -bal_db -> attenuate L or boost R
-        (10.0_f64.powf(f64::from(bal_db * 0.5) / 20.0), 10.0_f64.powf(f64::from(-bal_db * 0.5) / 20.0))
-    };
+    let has_custom = exports.iter().any(|export| export.processing.is_some());
+    let full_scale = (1_i64 << (spec.bits_per_sample - 1)) as f64;
+    let gain_for = |peak: f64| (10.0_f64.powf(-0.3 / 20.0) / peak.max(0.0001)).min(10.0);
+    let mut gains = vec![1.0; track_count];
+    if options.norm_mode == NormalizationMode::PeakAlbum && !has_custom {
+        // Original projects normalize against the complete source, including pauses.
+        let peak = read_peak(&mut reader, 0, u64::from(duration) * u64::from(spec.channels), || report(0))?;
+        gains.fill(gain_for(peak as f64 / full_scale));
+    } else if options.norm_mode != NormalizationMode::None {
+        let mut album_peak = 0.0_f64;
+        for (index, export) in exports.iter().enumerate() {
+            let peak = if export.processing.is_some() || options.norm_mode == NormalizationMode::PeakAlbum {
+                // Measure the unclipped processed signal, before final fades/quantization.
+                let (bl, br) = export.balance(options);
+                let mut peak = 0.0_f64;
+                render_track(
+                    &mut reader,
+                    export,
+                    options,
+                    || report(0),
+                    |_, l, r| {
+                        peak = peak.max((l * bl).abs()).max((r * br).abs());
+                        Ok(())
+                    },
+                )?;
+                peak
+            } else {
+                let sample_count = u64::from(export.end - export.start) * u64::from(spec.channels);
+                read_peak(&mut reader, export.start, sample_count, || report(0))? as f64 / full_scale
+            };
+            gains[index] = gain_for(peak);
+            album_peak = album_peak.max(peak);
+        }
+        if options.norm_mode == NormalizationMode::PeakAlbum {
+            gains.fill(gain_for(album_peak));
+        }
+    }
 
     let fade_frames = ((f64::from(options.fade_ms) / 1000.0) * rate).round() as u32;
-    let hp_alpha = 1.0 / (1.0 + 2.0 * std::f64::consts::PI * 20.0 / rate);
-
     let mut staged = Vec::new();
     let mut published = Vec::new();
     let result = (|| {
-        for (index, (start, end, destination, is_track_filtered)) in exports.into_iter().enumerate() {
-            let count = end - start;
-            let gain = if options.norm_mode == NormalizationMode::PeakPerTrack {
-                peak_scale(read_peak(&mut reader, start, count * channels, || report(index))?)
-            } else {
-                album_gain
+        for (index, export) in exports.iter().enumerate() {
+            let count = export.end - export.start;
+            let mono = export.paths.len() == 2
+                || export.processing.as_ref().is_some_and(|s| s.routing != Routing::Stereo);
+            let output_spec = hound::WavSpec {
+                channels: if mono { 1 } else { 2 },
+                sample_rate: spec.sample_rate,
+                bits_per_sample: 24,
+                sample_format: hound::SampleFormat::Int,
             };
-            let (temporary, file) = crate::project::unique_file(out_dir, ".export", "partial")?;
-            staged.push((temporary, destination));
-            let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), output_spec)
-                .map_err(|e| e.to_string())?;
-            reader.seek(start).map_err(|e| e.to_string())?;
-            let mut samples = reader.samples::<i32>();
-
-            let mut hp_prev_in_l = 0.0_f64;
-            let mut hp_prev_out_l = 0.0_f64;
-            let mut hp_prev_in_r = 0.0_f64;
-            let mut hp_prev_out_r = 0.0_f64;
-
-            let full_scale_inv = 1.0 / ((1_i64 << (spec.bits_per_sample - 1)) as f32);
-            let full_scale_mul = (1_i64 << (spec.bits_per_sample - 1)) as f64;
-            let mut track_denoiser = options.denoiser.as_ref().and_then(|(prof, params)| {
-                if params.enabled && is_track_filtered {
-                    let mut d = crate::audio::denoiser::SpectralDenoiser::new(spec.sample_rate);
-                    d.set_noise_profile(prof.clone());
-                    let mut p = params.clone();
-                    p.audition_mode = crate::audio::denoiser::AuditionMode::Wet;
-                    Some((d, p))
-                } else {
-                    None
-                }
-            });
-
-            if let Some((ref mut denoiser, ref d_params)) = track_denoiser {
-                // Prime STFT latency window then stream track with 0 latency offset
-                let latency = crate::audio::denoiser::STFT_LATENCY_SAMPLES as u32;
-                let mut last_l = 0.0_f32;
-                let mut last_r = 0.0_f32;
-                let total_steps = count + latency;
-                for step in 0..total_steps {
-                    if step % 16_384 == 0 { report(index)?; }
-                    if step < count {
-                        last_l = (next_pcm(&mut samples)? as f32) * full_scale_inv;
-                        last_r = if channels == 2 {
-                            (next_pcm(&mut samples)? as f32) * full_scale_inv
-                        } else {
-                            last_l
-                        };
-                    }
-                    let (clean_l, clean_r) = denoiser.process_sample(last_l, last_r, d_params);
-                    if step >= latency {
-                        let frame = step - latency;
-                        let raw_l = f64::from(clean_l) * full_scale_mul;
-                        let raw_r = f64::from(clean_r) * full_scale_mul;
-
-                        let (filt_l, filt_r) = if options.highpass_20hz && !d_params.dc_filter_enabled {
-                            let out_l = hp_alpha * (hp_prev_out_l + raw_l - hp_prev_in_l);
-                            hp_prev_in_l = raw_l;
-                            hp_prev_out_l = out_l;
-                            let out_r = hp_alpha * (hp_prev_out_r + raw_r - hp_prev_in_r);
-                            hp_prev_in_r = raw_r;
-                            hp_prev_out_r = out_r;
-                            (out_l, out_r)
-                        } else {
-                            (raw_l, raw_r)
-                        };
-
-                        let fade_env = if fade_frames > 0 && count > fade_frames * 2 {
-                            if frame < fade_frames {
-                                f64::from(frame) / f64::from(fade_frames)
-                            } else if frame >= count - fade_frames {
-                                f64::from(count - 1 - frame) / f64::from(fade_frames)
-                            } else {
-                                1.0
-                            }
-                        } else {
-                            1.0
-                        };
-
-                        let enc_l = (filt_l * pcm_factor * gain * bal_gain_l * fade_env)
-                            .round()
-                            .clamp(-8_388_608.0, 8_388_607.0) as i32;
-                        let enc_r = (filt_r * pcm_factor * gain * bal_gain_r * fade_env)
-                            .round()
-                            .clamp(-8_388_608.0, 8_388_607.0) as i32;
-
-                        writer.write_sample(enc_l).map_err(|e| e.to_string())?;
-                        writer.write_sample(enc_r).map_err(|e| e.to_string())?;
-                    }
-                }
-            } else {
-                for frame in 0..count {
-                    if frame % 16_384 == 0 { report(index)?; }
-                    let raw_l = f64::from(next_pcm(&mut samples)?);
-                    let raw_r = if channels == 2 { f64::from(next_pcm(&mut samples)?) } else { raw_l };
-
-                    let (filt_l, filt_r) = if options.highpass_20hz {
-                        let out_l = hp_alpha * (hp_prev_out_l + raw_l - hp_prev_in_l);
-                        hp_prev_in_l = raw_l;
-                        hp_prev_out_l = out_l;
-                        let out_r = hp_alpha * (hp_prev_out_r + raw_r - hp_prev_in_r);
-                        hp_prev_in_r = raw_r;
-                        hp_prev_out_r = out_r;
-                        (out_l, out_r)
-                    } else {
-                        (raw_l, raw_r)
-                    };
-
-                    let fade_env = if fade_frames > 0 && count > fade_frames * 2 {
-                        if frame < fade_frames {
-                            f64::from(frame) / f64::from(fade_frames)
-                        } else if frame >= count - fade_frames {
-                            f64::from(count - 1 - frame) / f64::from(fade_frames)
-                        } else {
-                            1.0
-                        }
+            let mut writers = Vec::with_capacity(export.paths.len());
+            for path in &export.paths {
+                let (temporary, file) = crate::project::unique_file(out_dir, ".export", "partial")?;
+                staged.push((temporary, path.clone()));
+                writers.push(
+                    hound::WavWriter::new(std::io::BufWriter::new(file), output_spec)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            let (bl, br) = export.balance(options);
+            render_track(
+                &mut reader,
+                export,
+                options,
+                || report(index),
+                |frame, l, r| {
+                    let fade = if fade_frames > 0 && count > fade_frames.saturating_mul(2) {
+                        f64::from(frame.min(count - 1 - frame).min(fade_frames)) / f64::from(fade_frames)
                     } else {
                         1.0
                     };
-
-                    let enc_l = (filt_l * pcm_factor * gain * bal_gain_l * fade_env)
-                        .round()
-                        .clamp(-8_388_608.0, 8_388_607.0) as i32;
-                    let enc_r = (filt_r * pcm_factor * gain * bal_gain_r * fade_env)
-                        .round()
-                        .clamp(-8_388_608.0, 8_388_607.0) as i32;
-
-                    writer.write_sample(enc_l).map_err(|e| e.to_string())?;
-                    writer.write_sample(enc_r).map_err(|e| e.to_string())?;
-                }
+                    let encode = |sample: f64, balance: f64| {
+                        (sample * 8_388_608.0 * gains[index] * balance * fade)
+                            .round()
+                            .clamp(-8_388_608.0, 8_388_607.0) as i32
+                    };
+                    writers[0].write_sample(encode(l, bl)).map_err(|e| e.to_string())?;
+                    if let Some(right) = writers.get_mut(1) {
+                        right.write_sample(encode(r, br)).map_err(|e| e.to_string())?;
+                    } else if !mono {
+                        writers[0].write_sample(encode(r, br)).map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                },
+            )?;
+            for writer in writers {
+                writer.finalize().map_err(|e| e.to_string())?;
             }
-            writer.finalize().map_err(|e| e.to_string())?;
             report(index + 1)?;
         }
         for (temporary, destination) in &staged {
@@ -787,6 +756,105 @@ pub fn export_tracks_with_options(
     Ok(published)
 }
 
+struct ExportTrack {
+    start: u32,
+    end: u32,
+    paths: Vec<PathBuf>,
+    processing: Option<SongSettings>,
+    legacy_filter: bool,
+}
+
+impl ExportTrack {
+    fn balance(&self, options: &ExportOptions) -> (f64, f64) {
+        let db = options.stereo_balance_db.clamp(-12.0, 12.0);
+        if self.processing.is_some() || db.abs() < 0.05 {
+            (1.0, 1.0)
+        } else {
+            (10.0_f64.powf(f64::from(db * 0.5) / 20.0), 10.0_f64.powf(f64::from(-db * 0.5) / 20.0))
+        }
+    }
+}
+
+/// Stream precisely the selected source frames. Each pass starts with fresh DSP state.
+fn render_track(
+    reader: &mut hound::WavReader<impl std::io::Read + std::io::Seek>,
+    export: &ExportTrack,
+    options: &ExportOptions,
+    check: impl Fn() -> Result<(), String>,
+    mut emit: impl FnMut(u32, f64, f64) -> Result<(), String>,
+) -> Result<(), String> {
+    let spec = reader.spec();
+    let count = (export.end - export.start) as usize;
+    let full_scale = (1_i64 << (spec.bits_per_sample - 1)) as f64;
+    reader.seek(export.start).map_err(|e| e.to_string())?;
+    let mut samples = reader.samples::<i32>();
+    let mut input = || -> Result<(f64, f64), String> {
+        let l = f64::from(next_pcm(&mut samples)?) / full_scale;
+        let r = if spec.channels == 2 { f64::from(next_pcm(&mut samples)?) / full_scale } else { l };
+        Ok((l, r))
+    };
+    if let Some(settings) = &export.processing {
+        let mut dsp = SongProcessor::new(spec.sample_rate, settings);
+        let latency = dsp.latency();
+        for step in 0..count + latency {
+            if step % 16_384 == 0 {
+                check()?;
+            }
+            let (l, r) = if step < count { input()? } else { (0.0, 0.0) };
+            let (l, r) = dsp.process_frame(l as f32, r as f32);
+            if step >= latency {
+                emit((step - latency) as u32, f64::from(l), f64::from(r))?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Reproduce legacy global processing, including its held last sample during the STFT flush.
+    let mut denoiser = options.denoiser.as_ref().filter(|(_, p)| p.enabled && export.legacy_filter).map(
+        |(profile, params)| {
+            let mut effect = crate::audio::denoiser::SpectralDenoiser::new(spec.sample_rate);
+            effect.set_noise_profile(profile.clone());
+            let mut params = params.clone();
+            params.audition_mode = crate::audio::denoiser::AuditionMode::Wet;
+            (effect, params)
+        },
+    );
+    let use_hp = options.highpass_20hz && denoiser.as_ref().is_none_or(|(_, p)| !p.dc_filter_enabled);
+    let alpha = 1.0 / (1.0 + 2.0 * std::f64::consts::PI * 20.0 / f64::from(spec.sample_rate));
+    let latency = if denoiser.is_some() { crate::audio::denoiser::STFT_LATENCY_SAMPLES } else { 0 };
+    let mut last = (0.0, 0.0);
+    let mut previous_input = (0.0, 0.0);
+    let mut previous_output = (0.0, 0.0);
+    for step in 0..count + latency {
+        if step % 16_384 == 0 {
+            check()?;
+        }
+        if step < count {
+            last = input()?;
+        }
+        let (mut l, mut r) = if let Some((effect, params)) = &mut denoiser {
+            let (l, r) = effect.process_sample(last.0 as f32, last.1 as f32, params);
+            (f64::from(l), f64::from(r))
+        } else {
+            last
+        };
+        if step < latency {
+            continue;
+        }
+        if use_hp {
+            let filtered = (
+                alpha * (previous_output.0 + l - previous_input.0),
+                alpha * (previous_output.1 + r - previous_input.1),
+            );
+            previous_input = (l, r);
+            previous_output = filtered;
+            (l, r) = filtered;
+        }
+        emit((step - latency) as u32, l, r)?;
+    }
+    Ok(())
+}
+
 fn next_pcm(samples: &mut impl Iterator<Item = Result<i32, hound::Error>>) -> Result<i32, String> {
     samples.next().ok_or("Incomplete WAV data")?.map_err(|e| e.to_string())
 }
@@ -794,19 +862,20 @@ fn next_pcm(samples: &mut impl Iterator<Item = Result<i32, hound::Error>>) -> Re
 fn read_peak(
     reader: &mut hound::WavReader<impl std::io::Read + std::io::Seek>,
     start: u32,
-    sample_count: u32,
+    sample_count: u64,
     check: impl Fn() -> Result<(), String>,
 ) -> Result<i64, String> {
     reader.seek(start).map_err(|e| e.to_string())?;
     let mut samples = reader.samples::<i32>();
     let mut peak = 0;
     for index in 0..sample_count {
-        if index % 16_384 == 0 { check()?; }
+        if index % 16_384 == 0 {
+            check()?;
+        }
         peak = peak.max(i64::from(next_pcm(&mut samples)?).abs());
     }
     Ok(peak)
 }
-
 
 pub const MAX_MARKER_TRANSIENTS: usize = 3;
 
@@ -1022,6 +1091,324 @@ pub fn detect_transients_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_detected_pause_keeps_title_on_music() {
+        let mut editor = TrackSplitter::new();
+        editor.custom_titles.push("My Song".into());
+        editor.song_settings.insert(0, SongSettings { gain_db: -2.0, ..Default::default() });
+        let before = editor.snapshot();
+        let mut audio = vec![0.25; 3000];
+        audio[..1000].fill(0.0);
+        editor.detect_silence_pauses_as_gaps(&audio, &audio, 1000, -30.0, 0.4);
+        let tracks = editor.get_tracks(3.0);
+        assert_eq!(tracks.len(), 2);
+        assert!(tracks[0].is_pause);
+        assert_eq!(tracks[1].title, "My Song");
+        assert_ne!(tracks[0].title, "My Song");
+        assert_eq!(tracks[1].processing, before.song_settings.get(&0).cloned());
+        assert!(editor.undo());
+        assert_eq!(editor.snapshot(), before);
+    }
+
+    #[test]
+    fn adopting_other_song_keeps_legacy_per_track_normalization_identical() {
+        use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+        let (source, file) =
+            crate::project::unique_file(&std::env::temp_dir(), "legacy-per-track", "wav").unwrap();
+        let output = source.with_extension("output");
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 8_000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::new(file, spec).unwrap();
+        for _ in 0..3200 {
+            writer.write_sample(8192_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let options = ExportOptions {
+            norm_mode: NormalizationMode::PeakPerTrack,
+            stereo_balance_db: 12.0,
+            ..ExportOptions::default()
+        };
+        let mut editor = TrackSplitter::new();
+        editor.add_marker(0.1, 0.2, 8000);
+        let first_frame = |directory: &str, tracks: &[TrackInfo]| {
+            let files =
+                export_tracks_with_options(&source, output.join(directory), tracks, &options, |_, _| true)
+                    .unwrap();
+            WavReader::open(&files[0])
+                .unwrap()
+                .samples::<i32>()
+                .take(2)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let legacy = first_frame("legacy", &editor.get_tracks(0.2));
+        assert_eq!(legacy[0], 8_388_607);
+        editor.song_settings.insert(1, SongSettings::default());
+        assert_eq!(first_frame("mixed", &editor.get_tracks(0.2)), legacy);
+        std::fs::remove_dir_all(output).unwrap();
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn mixed_album_uses_one_gain_from_exported_processed_peaks() {
+        use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+        let (path, file) = crate::project::unique_file(&std::env::temp_dir(), "mixed-album", "wav").unwrap();
+        let output = path.with_extension("output");
+        let mut writer = WavWriter::new(
+            file,
+            WavSpec {
+                channels: 1,
+                sample_rate: 8_000,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for level in [4096_i16, 32767_i16, 8192_i16] {
+            for _ in 0..800 {
+                writer.write_sample(level).unwrap();
+            }
+        }
+        writer.finalize().unwrap();
+        let mut editor = TrackSplitter::new();
+        editor.markers = vec![0.1, 0.2];
+        editor.pause_indices = vec![1];
+        editor
+            .song_settings
+            .insert(2, SongSettings { gain_db: 6.0206, routing: Routing::LeftMono, ..Default::default() });
+        let paths =
+            export_tracks(&path, &output, &editor.get_tracks(0.3), NormalizationMode::PeakAlbum, |_, _| true)
+                .unwrap();
+        let first_sample = |p: &Path| WavReader::open(p).unwrap().samples::<i32>().next().unwrap().unwrap();
+        let target = (8_388_608.0 * 10.0_f64.powf(-0.3 / 20.0)).round() as i32;
+        assert!((first_sample(&paths[0]) - target / 4).abs() <= 2);
+        assert!((first_sample(&paths[1]) - target).abs() <= 2);
+        std::fs::remove_dir_all(output).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stereo_override_and_two_mono_exports_preserve_channels_and_publish_atomically() {
+        use crate::audio::processing::SongExportMode;
+        use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+        let (path, file) = crate::project::unique_file(&std::env::temp_dir(), "split-stems", "wav").unwrap();
+        let output = path.with_extension("output");
+        let mut writer = WavWriter::new(
+            file,
+            WavSpec {
+                channels: 2,
+                sample_rate: 8_000,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..1600 {
+            writer.write_sample(4096_i16).unwrap();
+            writer.write_sample(16384_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let mut editor = TrackSplitter::new();
+        let mut settings = SongSettings {
+            routing: Routing::LeftMono,
+            export_mode: SongExportMode::Stereo,
+            swap_channels: true,
+            gain_db: -6.0,
+            ..Default::default()
+        };
+        settings.channels[1].invert = true;
+        editor.song_settings.insert(0, settings.clone());
+        let export = |dir: &Path, tracks: &[TrackInfo]| {
+            export_tracks(&path, dir, tracks, NormalizationMode::PeakPerTrack, |_, _| true)
+        };
+        let target = (8_388_608.0 * 10.0_f64.powf(-0.3 / 20.0)).round() as i32;
+        let songs = editor.get_tracks(0.2);
+        let stereo = export(&output.join("stereo"), &songs).unwrap();
+        assert_eq!(stereo.len(), 1);
+        let mut reader = WavReader::open(&stereo[0]).unwrap();
+        assert_eq!(reader.spec().channels, 2);
+        assert_eq!(reader.duration(), 1600);
+        let samples: Vec<i32> = reader.samples().take(2).collect::<Result<_, _>>().unwrap();
+        assert_eq!(samples, [-target, (f64::from(target) / 4.0).round() as i32]);
+
+        settings.export_mode = SongExportMode::SeparateMono;
+        settings.width = 0.0;
+        settings.balance_db = 12.0;
+        editor.song_settings.insert(0, settings);
+        let songs = editor.get_tracks(0.2);
+        let names = songs[0].export_filenames_with_artist(None);
+        assert_eq!(names, ["01 - Track 01 - L.wav", "01 - Track 01 - R.wav"]);
+        let stems = export(&output.join("stems"), &songs).unwrap();
+        assert_eq!(stems.len(), 2);
+        for (index, expected) in [(0, (f64::from(target) / 4.0).round() as i32), (1, -target)] {
+            let mut reader = WavReader::open(&stems[index]).unwrap();
+            assert_eq!(reader.spec().channels, 1);
+            assert_eq!(reader.duration(), 1600);
+            assert!(reader.samples::<i32>().all(|x| (x.unwrap() - expected).abs() <= 1));
+        }
+        let conflict = output.join("conflict");
+        std::fs::create_dir_all(&conflict).unwrap();
+        std::fs::write(conflict.join(&names[1]), b"keep").unwrap();
+        assert!(export(&conflict, &songs).is_err());
+        assert!(!conflict.join(&names[0]).exists());
+        assert_eq!(std::fs::read(conflict.join(&names[1])).unwrap(), b"keep");
+        // A destination can also appear after preflight, between staging and publication.
+        let raced = output.join("raced");
+        assert!(export_tracks(&path, &raced, &songs, NormalizationMode::None, |n, _| {
+            if n == 1 {
+                std::fs::write(raced.join(&names[1]), b"arrived").unwrap();
+            }
+            true
+        })
+        .is_err());
+        assert!(!raced.join(&names[0]).exists());
+        assert_eq!(std::fs::read(raced.join(&names[1])).unwrap(), b"arrived");
+        assert_eq!(std::fs::read_dir(raced).unwrap().count(), 1);
+        let cancelled = output.join("cancel");
+        assert!(export_tracks(&path, &cancelled, &songs, NormalizationMode::None, |n, _| n == 0).is_err());
+        assert_eq!(std::fs::read_dir(cancelled).unwrap().count(), 0);
+        std::fs::remove_dir_all(output).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn silence_redetection_matches_existing_songs_and_undoes_as_one_edit() {
+        let mut editor = TrackSplitter::new();
+        editor.add_marker(1.49, 3.0, 1_000);
+        let left = SongSettings { gain_db: -1.0, ..Default::default() };
+        let right = SongSettings { gain_db: 2.0, ..Default::default() };
+        editor.song_settings = [(0, left.clone()), (1, right.clone())].into();
+        let before = editor.snapshot();
+        let mut audio = vec![0.25; 3000];
+        audio[1000..2000].fill(0.0);
+        editor.detect_silence_pauses_as_gaps(&audio, &audio, 1000, -30.0, 0.4);
+        assert_eq!(editor.markers, [1.0, 2.0]);
+        assert_eq!(editor.pause_indices, [1]);
+        assert_eq!(editor.song_settings[&0], left);
+        assert_eq!(editor.song_settings[&2], right);
+        assert!(editor.undo());
+        assert_eq!(editor.snapshot(), before);
+    }
+
+    #[test]
+    fn song_settings_follow_splits_merges_and_history() {
+        let mut editor = TrackSplitter::new();
+        editor.add_marker(4.0, 12.0, 48_000);
+        let a = SongSettings { gain_db: 2.0, ..Default::default() };
+        let b = SongSettings { gain_db: -3.0, ..Default::default() };
+        editor.song_settings = [(0, a.clone()), (1, b.clone())].into();
+        let before = editor.snapshot();
+        editor.add_marker(2.0, 12.0, 48_000);
+        let tracks = editor.get_tracks(12.0);
+        assert_eq!(tracks[1].processing, Some(a.clone()));
+        assert_eq!(tracks[2].processing, Some(b));
+        let divided = editor.snapshot();
+        editor.remove_marker_at_index(1);
+        assert_eq!(editor.song_settings.len(), 2);
+        assert_eq!(editor.song_settings[&1], a);
+        assert!(editor.undo());
+        assert_eq!(editor.snapshot(), divided);
+        assert!(editor.undo());
+        assert_eq!(editor.snapshot(), before);
+        assert!(editor.redo());
+        assert_eq!(editor.snapshot(), divided);
+        editor.clear_markers();
+        assert_eq!(editor.song_settings, [(0, a)].into());
+        assert!(editor.undo());
+        assert_eq!(editor.snapshot(), divided);
+    }
+
+    #[test]
+    fn processed_mono_export_only_uses_song_samples_and_settings() {
+        use crate::audio::processing::{Routing, SongProcessor};
+        use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+        let rate = 48_000;
+        let (path, file) =
+            crate::project::unique_file(&std::env::temp_dir(), "mono-song-export", "wav").unwrap();
+        let output = path.with_extension("output");
+        let mut writer = WavWriter::new(
+            file,
+            WavSpec { channels: 2, sample_rate: rate, bits_per_sample: 16, sample_format: SampleFormat::Int },
+        )
+        .unwrap();
+        let clip: Vec<(i16, i16)> =
+            (0..5400).map(|i| ((i % 145 * 15 - 1000) as i16, (i % 99 * 61 - 3000) as i16)).collect();
+        for (l, r) in
+            [(30000_i16, -30000_i16)].into_iter().chain(clip.iter().copied()).chain([(32000, 32000)])
+        {
+            writer.write_sample(l).unwrap();
+            writer.write_sample(r).unwrap();
+        }
+        writer.finalize().unwrap();
+        let mut editor = TrackSplitter::new();
+        editor.markers = vec![1.0 / f64::from(rate), (1 + clip.len()) as f64 / f64::from(rate)];
+        editor.pause_indices = vec![0, 2];
+        let tracks_duration = (clip.len() + 2) as f64 / f64::from(rate);
+        let mut song = SongSettings {
+            routing: Routing::MonoMix,
+            mix_left: 0.25,
+            mix_right: 0.875,
+            mono_gain_db: -1.5,
+            ..Default::default()
+        };
+        let options = ExportOptions {
+            highpass_20hz: true,
+            stereo_balance_db: 10.0,
+            denoiser: Some((
+                None,
+                crate::audio::denoiser::DenoiserParams { enabled: true, ..Default::default() },
+            )),
+            ..Default::default()
+        };
+        for spectral in [false, true] {
+            song.channels[1].denoiser.enabled = spectral;
+            song.noise_profile = Some(
+                crate::audio::denoiser::NoiseProfile::learn_from_samples(
+                    &[0.001; 256],
+                    &[0.002; 256],
+                    rate,
+                    "test",
+                    "cassette",
+                )
+                .unwrap(),
+            );
+            editor.song_settings.insert(1, song.clone());
+            let tracks = editor.get_tracks(tracks_duration);
+            let paths = export_tracks_with_options(
+                &path,
+                output.join(spectral.to_string()),
+                &tracks,
+                &options,
+                |_, _| true,
+            )
+            .unwrap();
+            let mut reader = WavReader::open(&paths[0]).unwrap();
+            assert_eq!(reader.spec().channels, 1);
+            let actual: Vec<i32> = reader.samples::<i32>().collect::<Result<_, _>>().unwrap();
+            let mut dsp = SongProcessor::new(rate, &song);
+            let latency = dsp.latency();
+            if spectral {
+                assert!(latency > 0);
+            }
+            let expected: Vec<i32> = clip
+                .iter()
+                .copied()
+                .chain(std::iter::repeat((0, 0)).take(latency))
+                .map(|(l, r)| dsp.process_frame(f32::from(l) / 32768.0, f32::from(r) / 32768.0).0)
+                .skip(latency)
+                .map(|x| (f64::from(x) * 8_388_608.0).round() as i32)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        std::fs::remove_dir_all(output).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn moving_marker_previews_commit_as_one_edit_and_respect_neighbors() {

@@ -1,7 +1,7 @@
 use egui::{Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use crate::audio::recorder::StereoWaveformPoint;
 use crate::ui::theme::{
-    draw_recessed_well, BG_CARD, BG_INSET, BORDER_DARK, BORDER_LIGHT, LED_AMBER,
+    draw_recessed_well, ACCENT, BG_CARD, BG_INSET, BG_WINDOW, BORDER_LIGHT, CUT_ACCENT, EDIT_HIGHLIGHT, LED_AMBER, LED_RED,
     LED_GREEN, TEXT_MUTED, TEXT_SECONDARY, WAVE_LEFT, WAVE_RIGHT,
 };
 
@@ -58,6 +58,7 @@ pub fn render_stereo_waveform(
     active_tool: EditTool,
     hover_audition_active: bool,
     hover_audition_time: Option<f64>,
+    mono: bool,
 ) -> WaveformInteraction {
     let mut interaction = WaveformInteraction {
         seek_to_seconds: None,
@@ -76,10 +77,10 @@ pub fn render_stereo_waveform(
 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter();
+    let p = crate::ui::theme::palette();
 
     // Studio Rack Plate Housing
-    painter.rect_filled(rect, 8.0, BG_CARD);
-    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER_DARK));
+    draw_recessed_well(painter, rect, 8.0, p.bg_inset);
 
     let header_width = 54.0;
     let wf_left = rect.min.x + header_width + 8.0;
@@ -104,7 +105,7 @@ pub fn render_stereo_waveform(
 
     // Two Stereo Lanes
     let lane_gap = 6.0;
-    let lane_h = (wf_rect.height() - lane_gap) * 0.5;
+    let lane_h = if mono { wf_rect.height() } else { (wf_rect.height() - lane_gap) * 0.5 };
 
     let lane_l_top = wf_rect.min.y;
     let lane_l_bot = lane_l_top + lane_h;
@@ -117,25 +118,27 @@ pub fn render_stereo_waveform(
     let lane_r_rect = Rect::from_min_max(Pos2::new(wf_rect.min.x, lane_r_top), Pos2::new(wf_rect.max.x, lane_r_bot));
 
     // Recessed track wells
-    draw_recessed_well(painter, lane_l_rect, 4.0, BG_INSET);
-    draw_recessed_well(painter, lane_r_rect, 4.0, BG_INSET);
+    painter.rect_filled(lane_l_rect, 4.0, p.bg_inset);
+    if !mono { painter.rect_filled(lane_r_rect, 4.0, p.bg_inset); }
 
     // Track Header Badges on Left
     let header_l = Rect::from_min_max(Pos2::new(rect.min.x + 8.0, lane_l_top), Pos2::new(rect.min.x + header_width, lane_l_bot));
-    draw_track_header(painter, header_l, "L", "Track 1", WAVE_LEFT);
+    draw_track_badge(painter, header_l, if mono { "M" } else { "L" }, p.wave_left);
 
     let header_r = Rect::from_min_max(Pos2::new(rect.min.x + 8.0, lane_r_top), Pos2::new(rect.min.x + header_width, lane_r_bot));
-    draw_track_header(painter, header_r, "R", "Track 2", WAVE_RIGHT);
+    if !mono { draw_track_badge(painter, header_r, "R", p.wave_right); }
 
     // Center baselines
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_l_center), Pos2::new(wf_rect.max.x, lane_l_center)],
-        Stroke::new(1.0, Color32::from_rgb(38, 42, 52)),
+        Stroke::new(1.0, p.border_subtle),
     );
+    if !mono {
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_r_center), Pos2::new(wf_rect.max.x, lane_r_center)],
-        Stroke::new(1.0, Color32::from_rgb(38, 42, 52)),
+        Stroke::new(1.0, p.border_subtle),
     );
+    }
 
     // -------------------------------------------------------------
     // Zoom & Horizontal Scrolling via Mouse Wheel & Gestures
@@ -152,8 +155,10 @@ pub fn render_stereo_waveform(
     let is_hovered = response.hovered();
     let mouse_pos_opt = ui.input(|i| i.pointer.hover_pos()).or_else(|| response.interact_pointer_pos());
 
-    if is_hovered && (alt_pressed || scroll_delta.x.abs() > 0.1 || *zoom_factor > 1.0) {
+    if is_hovered && alt_pressed {
         ui.input_mut(|input| input.smooth_scroll_delta = Vec2::ZERO);
+    } else if is_hovered && scroll_delta.x.abs() > 0.1 {
+        ui.input_mut(|input| input.smooth_scroll_delta.x = 0.0);
     }
 
     // 1. Mouse Wheel Zoom (Option / Alt + Wheel)
@@ -183,9 +188,9 @@ pub fn render_stereo_waveform(
             }
         }
     }
-    // 2. Mouse Wheel Horizontal Scroll (Normal Scroll without Option)
-    else if is_hovered && !alt_pressed && (scroll_delta.x.abs() > 0.1 || (*zoom_factor > 1.0 && scroll_delta.y.abs() > 0.1)) {
-        let delta = if scroll_delta.x.abs() > 0.1 { scroll_delta.x } else { scroll_delta.y };
+    // 2. Horizontal scroll pans the timeline. Vertical scroll moves the console.
+    else if is_hovered && !alt_pressed && scroll_delta.x.abs() > 0.1 {
+        let delta = scroll_delta.x;
         let view_width_frac = 1.0 / *zoom_factor;
         let max_scroll = (1.0 - view_width_frac).max(0.0);
         let scroll_step = (delta / wf_width) * view_width_frac;
@@ -275,18 +280,20 @@ pub fn render_stereo_waveform(
                             Vec2::new(140.0, 18.0),
                         );
                         painter.rect_filled(badge, 3.0, Color32::from_rgba_unmultiplied(35, 18, 14, 210));
-                        painter.rect_stroke(badge, 3.0, Stroke::new(1.0, LED_AMBER));
+
                         painter.text(badge.center(), egui::Align2::CENTER_CENTER, "⏸ PAUSE (WEGGELASSEN)", egui::FontId::monospace(9.0), LED_AMBER);
                     }
                 } else {
                     seg_active_count += 1;
                     let tint = if seg_active_count % 2 == 1 {
-                        Color32::from_rgba_unmultiplied(37, 99, 235, 14)
+                        Color32::from_rgb(12, 25, 28)
                     } else {
-                        Color32::from_rgba_unmultiplied(16, 149, 193, 14)
+                        Color32::from_rgb(15, 23, 36)
                     };
-                    painter.rect_filled(seg_r, 0.0, tint);
-                    if x2 - x1 > 50.0 {
+                    if !markers.is_empty() {
+                        painter.rect_filled(seg_r, 0.0, tint);
+                    }
+                    if x2 - x1 > 50.0 && !markers.is_empty() {
                         painter.text(
                             Pos2::new(x1 + 6.0, wf_rect.min.y + 12.0),
                             egui::Align2::LEFT_CENTER,
@@ -307,9 +314,9 @@ pub fn render_stereo_waveform(
             let rx2 = time_to_screen_x(r_end).clamp(wf_rect.min.x, wf_rect.max.x);
             if rx2 > rx1 + 1.0 {
                 let reg_r = Rect::from_min_max(Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y));
-                painter.rect_filled(reg_r, 0.0, Color32::from_rgba_unmultiplied(229, 194, 137, 24));
-                painter.line_segment([Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx1, ruler_rect.max.y)], Stroke::new(1.5, Color32::from_rgba_unmultiplied(229, 194, 137, 180)));
-                painter.line_segment([Pos2::new(rx2, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y)], Stroke::new(1.5, Color32::from_rgba_unmultiplied(229, 194, 137, 180)));
+                painter.rect_filled(reg_r, 0.0, LED_AMBER.gamma_multiply(0.12));
+                painter.line_segment([Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx1, ruler_rect.max.y)], Stroke::new(1.5, LED_AMBER));
+                painter.line_segment([Pos2::new(rx2, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y)], Stroke::new(1.5, LED_AMBER));
             }
         }
     }
@@ -322,10 +329,12 @@ pub fn render_stereo_waveform(
         [Pos2::new(wf_rect.min.x, lane_l_center), Pos2::new(wf_rect.max.x, lane_l_center)],
         Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
     );
+    if !mono {
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_r_center), Pos2::new(wf_rect.max.x, lane_r_center)],
         Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
     );
+    }
 
     let n_points = waveform_data.len();
     if n_points > 0 {
@@ -370,10 +379,10 @@ pub fn render_stereo_waveform(
             let top_r = lane_r_center - ((max_r * amp_scale).clamp(0.0, 1.0) * (lane_h * 0.46));
             let bot_r = lane_r_center - ((min_r * amp_scale).clamp(-1.0, 0.0) * (lane_h * 0.46));
             let h_r = (bot_r - top_r).max(1.0);
-            painter.line_segment(
+            if !mono { painter.line_segment(
                 [Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)],
                 Stroke::new(bar_w, WAVE_RIGHT),
-            );
+            ); }
         }
     } else {
         painter.text(
@@ -388,7 +397,7 @@ pub fn render_stereo_waveform(
     // -------------------------------------------------------------
     // Timeline Ruler Bar (Dedicated Playhead scrub zone)
     // -------------------------------------------------------------
-    draw_recessed_well(painter, ruler_rect, 3.0, Color32::from_rgb(26, 27, 32));
+    draw_recessed_well(painter, ruler_rect, 3.0, BG_CARD);
     let ruler_y = ruler_rect.min.y + 11.0;
 
     if total_duration_sec > 1.0 {
@@ -448,7 +457,7 @@ pub fn render_stereo_waveform(
     // -------------------------------------------------------------
     // Minimap / Overview Scrollbar (Shows whole tape & drag window)
     // -------------------------------------------------------------
-    draw_recessed_well(painter, overview_rect, 3.0, Color32::from_rgb(20, 20, 23));
+    draw_recessed_well(painter, overview_rect, 3.0, BG_WINDOW);
     painter.text(
         Pos2::new(rect.min.x + 10.0, overview_rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -476,24 +485,23 @@ pub fn render_stereo_waveform(
 
             if x2 > x1 + 1.0 {
                 let block_r = Rect::from_min_max(Pos2::new(x1, overview_rect.min.y + 1.0), Pos2::new(x2, overview_rect.max.y - 1.0));
-                let (fill, stroke_col, label) = if is_p {
+                let (fill, label) = if is_p {
                     (
                         Color32::from_rgba_unmultiplied(160, 40, 20, 90),
-                        Color32::from_rgb(200, 70, 40),
                         "⏸".to_string(),
                     )
                 } else {
                     active_idx += 1;
                     let bg = if active_idx % 2 == 1 {
-                        Color32::from_rgba_unmultiplied(37, 99, 235, 75)
+                        Color32::from_rgb(23, 47, 46)
                     } else {
-                        Color32::from_rgba_unmultiplied(16, 149, 193, 75)
+                        Color32::from_rgb(28, 42, 62)
                     };
-                    (bg, Color32::from_rgb(96, 165, 250), format!("#{}", active_idx))
+                    (bg, if markers.is_empty() { String::new() } else { format!("{:02}", active_idx) })
                 };
 
                 painter.rect_filled(block_r, 2.0, fill);
-                painter.rect_stroke(block_r, 2.0, Stroke::new(1.0, stroke_col.gamma_multiply(0.4)));
+
 
                 if block_r.width() > 16.0 {
                     painter.text(
@@ -514,8 +522,8 @@ pub fn render_stereo_waveform(
                 let orx2 = overview_rect.min.x + (r_end / total_duration_sec) as f32 * ov_w;
                 if orx2 > orx1 + 1.0 {
                     let ob_r = Rect::from_min_max(Pos2::new(orx1, overview_rect.min.y), Pos2::new(orx2, overview_rect.max.y));
-                    painter.rect_filled(ob_r, 2.0, Color32::from_rgba_unmultiplied(255, 215, 0, 90));
-                    painter.rect_stroke(ob_r, 2.0, Stroke::new(1.0, Color32::from_rgb(255, 215, 0)));
+                    painter.rect_filled(ob_r, 2.0, LED_AMBER.gamma_multiply(0.27));
+
                 }
             }
         }
@@ -529,14 +537,13 @@ pub fn render_stereo_waveform(
         Pos2::new(thumb_right.max(thumb_left + 12.0), overview_rect.max.y - 1.0),
     );
 
-    let is_thumb_hovered = mouse_pos_opt.map(|p| thumb_rect.contains(p)).unwrap_or(false);
-    let thumb_fill = if is_thumb_hovered {
-        Color32::from_rgba_unmultiplied(56, 189, 248, 60)
-    } else {
-        Color32::from_rgba_unmultiplied(56, 189, 248, 35)
-    };
-    painter.rect_filled(thumb_rect, 3.0, thumb_fill);
-    painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0, Color32::from_rgb(56, 189, 248)));
+    let is_thumb_hovered = mouse_pos_opt.is_some_and(|p| thumb_rect.contains(p));
+    if view_width_frac < 0.999 {
+        let thumb_edge = if is_thumb_hovered { ACCENT } else { BORDER_LIGHT };
+        painter.hline(thumb_rect.x_range(), thumb_rect.bottom() - 1.0, Stroke::new(2.0, thumb_edge));
+        painter.vline(thumb_rect.left(), thumb_rect.y_range(), Stroke::new(1.0, thumb_edge));
+        painter.vline(thumb_rect.right(), thumb_rect.y_range(), Stroke::new(1.0, thumb_edge));
+    }
 
     // Handle Overview bar clicking and dragging
     if let Some(pos) = mouse_pos_opt {
@@ -594,7 +601,7 @@ pub fn render_stereo_waveform(
         if mx >= wf_rect.min.x - 2.0 && mx <= wf_rect.max.x + 2.0 {
             let is_selected = *selected_marker_idx == Some(idx);
             let marker_color = if is_selected {
-                Color32::from_rgb(255, 215, 0) // Bright Gold
+                EDIT_HIGHLIGHT
             } else {
                 LED_AMBER
             };
@@ -625,13 +632,13 @@ pub fn render_stereo_waveform(
             }
 
             let flag_bg = if is_selected {
-                Color32::from_rgb(255, 230, 80)
+                EDIT_HIGHLIGHT
             } else {
                 marker_color
             };
 
             painter.rect_filled(flag_rect, 4.0, flag_bg);
-            painter.rect_stroke(flag_rect, 4.0, Stroke::new(1.0, BORDER_DARK));
+
 
             // Scissor symbol and Track number
             painter.text(
@@ -702,7 +709,7 @@ pub fn render_stereo_waveform(
                     Vec2::new(100.0, 20.0),
                 );
                 painter.rect_filled(badge_rect, 4.0, Color32::from_rgb(16, 50, 30));
-                painter.rect_stroke(badge_rect, 4.0, Stroke::new(1.0, LED_GREEN));
+
                 painter.text(
                     badge_rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -751,7 +758,7 @@ pub fn render_stereo_waveform(
                 let mins = (mouse_t / 60.0).floor() as u64;
                 let secs = (mouse_t % 60.0).floor() as u64;
                 painter.rect_filled(guide_tag, 4.0, Color32::from_rgb(45, 35, 10));
-                painter.rect_stroke(guide_tag, 4.0, Stroke::new(1.0, LED_AMBER));
+
                 painter.text(
                     guide_tag.center(),
                     egui::Align2::CENTER_CENTER,
@@ -830,47 +837,9 @@ pub fn render_stereo_waveform(
     interaction
 }
 
-fn draw_track_header(painter: &egui::Painter, rect: Rect, ch_badge: &str, title: &str, accent_col: Color32) {
-    draw_recessed_well(painter, rect, 4.0, BG_INSET);
-
-    let badge_rect = Rect::from_center_size(
-        Pos2::new(rect.center().x, rect.min.y + 20.0),
-        Vec2::new(28.0, 20.0),
-    );
-    painter.rect_filled(badge_rect, 4.0, accent_col.gamma_multiply(0.2));
-    painter.rect_stroke(badge_rect, 4.0, Stroke::new(1.0, accent_col));
-    painter.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        ch_badge,
-        egui::FontId::proportional(12.0),
-        accent_col,
-    );
-
-    painter.text(
-        Pos2::new(rect.center().x, rect.min.y + 44.0),
-        egui::Align2::CENTER_CENTER,
-        title,
-        egui::FontId::monospace(9.0),
-        TEXT_MUTED,
-    );
-}
-
-fn draw_track_badge(painter: &egui::Painter, rect: Rect, ch_badge: &str, accent_col: Color32) {
-    draw_recessed_well(painter, rect, 4.0, BG_INSET);
-    let badge_rect = Rect::from_center_size(
-        rect.center(),
-        Vec2::new(26.0, 22.0),
-    );
-    painter.rect_filled(badge_rect, 4.0, accent_col.gamma_multiply(0.2));
-    painter.rect_stroke(badge_rect, 4.0, Stroke::new(1.0, accent_col));
-    painter.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        ch_badge,
-        egui::FontId::proportional(12.0),
-        accent_col,
-    );
+fn draw_track_badge(painter: &egui::Painter, rect: Rect, channel: &str, accent: Color32) {
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, channel,
+        egui::FontId::monospace(15.0), accent);
 }
 
 pub fn render_live_recording_waveform(
@@ -880,17 +849,17 @@ pub fn render_live_recording_waveform(
     timer_limit_sec: Option<f64>,
     is_recording: bool,
     idle_text: &str,
+    desired_height: f32,
 ) {
-    let desired_height = 140.0;
     let available_width = ui.available_width().max(380.0);
     let size = Vec2::new(available_width, desired_height);
 
     let (rect, _response) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter();
+    let p = crate::ui::theme::palette();
 
     // Studio Rack Plate Housing
-    painter.rect_filled(rect, 8.0, BG_CARD);
-    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER_DARK));
+    draw_recessed_well(painter, rect, 8.0, p.bg_inset);
 
     let header_width = 46.0;
     let wf_left = rect.min.x + header_width + 8.0;
@@ -898,7 +867,7 @@ pub fn render_live_recording_waveform(
     let wf_width = (wf_right - wf_left).max(10.0);
 
     let wf_top = rect.min.y + 10.0;
-    let wf_bottom = wf_top + 92.0;
+    let wf_bottom = rect.max.y - 34.0;
     let wf_rect = Rect::from_min_max(Pos2::new(wf_left, wf_top), Pos2::new(wf_right, wf_bottom));
 
     let ruler_top = wf_bottom + 4.0;
@@ -912,35 +881,32 @@ pub fn render_live_recording_waveform(
     let lane_l_top = wf_rect.min.y;
     let lane_l_bot = lane_l_top + lane_h;
     let lane_l_center = lane_l_top + lane_h * 0.5;
-    let lane_l_rect = Rect::from_min_max(Pos2::new(wf_rect.min.x, lane_l_top), Pos2::new(wf_rect.max.x, lane_l_bot));
 
     let lane_r_top = lane_l_bot + lane_gap;
     let lane_r_bot = lane_r_top + lane_h;
     let lane_r_center = lane_r_top + lane_h * 0.5;
-    let lane_r_rect = Rect::from_min_max(Pos2::new(wf_rect.min.x, lane_r_top), Pos2::new(wf_rect.max.x, lane_r_bot));
 
     // Recessed track wells
-    draw_recessed_well(painter, lane_l_rect, 4.0, BG_INSET);
-    draw_recessed_well(painter, lane_r_rect, 4.0, BG_INSET);
+
 
     // Track Header Badges on Left
     let header_l = Rect::from_min_max(Pos2::new(rect.min.x + 8.0, lane_l_top), Pos2::new(rect.min.x + header_width, lane_l_bot));
-    draw_track_badge(painter, header_l, "L", WAVE_LEFT);
+    draw_track_badge(painter, header_l, "L", p.wave_left);
     let header_r = Rect::from_min_max(Pos2::new(rect.min.x + 8.0, lane_r_top), Pos2::new(rect.min.x + header_width, lane_r_bot));
-    draw_track_badge(painter, header_r, "R", WAVE_RIGHT);
+    draw_track_badge(painter, header_r, "R", p.wave_right);
 
     // Center baselines
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_l_center), Pos2::new(wf_rect.max.x, lane_l_center)],
-        Stroke::new(1.0, Color32::from_rgb(38, 42, 52)),
+        Stroke::new(1.0, p.border_subtle),
     );
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_r_center), Pos2::new(wf_rect.max.x, lane_r_center)],
-        Stroke::new(1.0, Color32::from_rgb(38, 42, 52)),
+        Stroke::new(1.0, p.border_subtle),
     );
 
     // Timeline Ruler well
-    draw_recessed_well(painter, ruler_rect, 3.0, Color32::from_rgb(26, 27, 32));
+    draw_recessed_well(painter, ruler_rect, 4.0, p.bg_card);
 
     let n_points = waveform_data.len();
 
@@ -949,8 +915,8 @@ pub fn render_live_recording_waveform(
             wf_rect.center(),
             egui::Align2::CENTER_CENTER,
             idle_text,
-            egui::FontId::proportional(13.0),
-            TEXT_MUTED,
+            egui::FontId::proportional(12.5),
+            p.text_muted,
         );
         return;
     }
@@ -987,7 +953,7 @@ pub fn render_live_recording_waveform(
             let bot_l = lane_l_center - (pt.min_l.clamp(-1.0, 0.0) * (lane_h * 0.46));
             painter.line_segment(
                 [Pos2::new(x, top_l), Pos2::new(x, bot_l.max(top_l + 1.0))],
-                Stroke::new(bar_step.max(1.0), WAVE_LEFT),
+                Stroke::new(bar_step.max(1.0), p.wave_left),
             );
 
             // Lane R
@@ -995,14 +961,14 @@ pub fn render_live_recording_waveform(
             let bot_r = lane_r_center - (pt.min_r.clamp(-1.0, 0.0) * (lane_h * 0.46));
             painter.line_segment(
                 [Pos2::new(x, top_r), Pos2::new(x, bot_r.max(top_r + 1.0))],
-                Stroke::new(bar_step.max(1.0), WAVE_RIGHT),
+                Stroke::new(bar_step.max(1.0), p.wave_right),
             );
         }
     }
 
     // Glowing REC Playhead
     if is_recording {
-        let rec_col = Color32::from_rgb(239, 68, 68);
+        let rec_col = LED_RED;
         painter.line_segment(
             [Pos2::new(playhead_x, wf_rect.min.y), Pos2::new(playhead_x, ruler_rect.max.y)],
             Stroke::new(2.0, rec_col),
@@ -1099,7 +1065,7 @@ pub fn render_detail_magnifier_scope(
 ) -> ScopeInteraction {
     let mut interaction = ScopeInteraction::default();
 
-    let scope_h = (ui.available_height() - 34.0).clamp(96.0, 180.0);
+    let scope_h = (ui.available_height() - 92.0).clamp(72.0, 260.0);
     let available_w = ui.available_width().max(280.0);
     let size = Vec2::new(available_w, scope_h);
 
@@ -1107,8 +1073,7 @@ pub fn render_detail_magnifier_scope(
     let painter = ui.painter();
 
     // Recessed dark oscilloscope plate
-    painter.rect_filled(rect, 6.0, Color32::from_rgb(14, 16, 22));
-    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_rgb(45, 52, 70)));
+    draw_recessed_well(painter, rect, 6.0, BG_INSET);
 
     let header_w = 38.0;
     let scope_left = rect.min.x + header_w + 6.0;
@@ -1123,8 +1088,8 @@ pub fn render_detail_magnifier_scope(
     }
     let audio_end_t = end_t;
 
-    // Smooth mouse-wheel zoom on the Schnitt-Lupe
-    if resp.hovered() {
+    // Option + wheel zooms the scope while ordinary scrolling moves the console.
+    if resp.hovered() && ui.input(|input| input.modifiers.alt) {
         let delta = ui.input(|input| {
             let scroll = input.smooth_scroll_delta;
             if scroll.y.abs() > 0.1 { scroll.y } else { scroll.x }
@@ -1138,7 +1103,7 @@ pub fn render_detail_magnifier_scope(
 
     let scope_top = rect.min.y + 6.0;
     let ruler_h = 20.0;
-    let scope_wf_h = (scope_h - ruler_h - 12.0).max(64.0);
+    let scope_wf_h = (scope_h - ruler_h - 12.0).max(36.0);
     let scope_bottom = scope_top + scope_wf_h;
     let scope_rect = Rect::from_min_max(Pos2::new(scope_left, scope_top), Pos2::new(scope_right, scope_bottom));
 
@@ -1180,8 +1145,8 @@ pub fn render_detail_magnifier_scope(
         let cut_x = t_to_x(active_cut_time);
         let left_zone = Rect::from_min_max(scope_rect.min, Pos2::new(cut_x, scope_rect.max.y));
         let right_zone = Rect::from_min_max(Pos2::new(cut_x, scope_rect.min.y), scope_rect.max);
-        painter.rect_filled(left_zone, 2.0, Color32::from_rgba_unmultiplied(30, 58, 138, 22));
-        painter.rect_filled(right_zone, 2.0, Color32::from_rgba_unmultiplied(16, 185, 129, 20));
+        painter.rect_filled(left_zone, 2.0, CUT_ACCENT.gamma_multiply(0.08));
+        painter.rect_filled(right_zone, 2.0, ACCENT.gamma_multiply(0.07));
 
         if let Some(idx) = selected_marker_idx {
             if cut_x - scope_rect.min.x > 75.0 {
@@ -1419,7 +1384,7 @@ pub fn render_detail_magnifier_scope(
                 let diff_sec = tp.time_sec - active_cut_time;
                 let badge_label = format!("⚡{} {:+.2}s", t_idx + 1, diff_sec);
                 painter.rect_filled(pill_rect, 3.0, Color32::from_rgba_unmultiplied(12, 34, 34, 230));
-                painter.rect_stroke(pill_rect, 3.0, Stroke::new(1.0, t_col));
+
                 painter.text(
                     pill_rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1446,7 +1411,7 @@ pub fn render_detail_magnifier_scope(
         if m >= start_t && m <= audio_end_t {
             let mx = t_to_x(m);
             let is_sel = selected_marker_idx == Some(m_i);
-            let col = if is_sel { Color32::from_rgb(255, 215, 0) } else { LED_AMBER };
+            let col = if is_sel { EDIT_HIGHLIGHT } else { LED_AMBER };
             painter.line_segment(
                 [Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)],
                 Stroke::new(if is_sel { 2.5 } else { 1.8 }, col),
@@ -1455,7 +1420,7 @@ pub fn render_detail_magnifier_scope(
             let flag_w = if is_sel { 52.0 } else { 38.0 };
             let flag = Rect::from_center_size(Pos2::new(mx, scope_rect.min.y + 10.0), Vec2::new(flag_w, 18.0));
             painter.rect_filled(flag, 3.0, col);
-            painter.rect_stroke(flag, 3.0, Stroke::new(1.0, BORDER_DARK));
+
             let label = if is_sel { format!("✂ T{:02}", m_i + 2) } else { format!("T{:02}", m_i + 2) };
             painter.text(flag.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(9.5), Color32::BLACK);
 
@@ -1493,7 +1458,7 @@ pub fn render_detail_magnifier_scope(
         if scope_rect.contains(pos) && hovered_scope_marker.is_none() && interaction.clicked_transient_time.is_none() {
             painter.line_segment(
                 [Pos2::new(pos.x, scope_rect.min.y), Pos2::new(pos.x, scope_rect.max.y)],
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 215, 0, 110)),
+                Stroke::new(1.0, EDIT_HIGHLIGHT.gamma_multiply(0.44)),
             );
         }
     }

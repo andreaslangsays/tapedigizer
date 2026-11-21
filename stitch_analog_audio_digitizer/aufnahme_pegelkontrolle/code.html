@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><meta content="web_dashboard" name="shell-type"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><style>@layer base{html,body{margin:0;padding:0;}body{overscroll-behavior:none;}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config={darkMode:"class",theme:{extend:{colors:{"outline-variant":"#534434","inverse-primary":"#855300","inverse-on-surface":"#2f3034","on-tertiary-container":"#8d0012","primary":"#ffc174","primary-container":"#f59e0b","background":"#121316","on-secondary-container":"#00311f","secondary-fixed":"#6ffbbe","surface-variant":"#343538","error-container":"#93000a","on-tertiary-fixed-variant":"#930013","on-secondary-fixed-variant":"#005236","surface-tint":"#ffb95f","primary-fixed":"#ffddb8","surface-container-lowest":"#0d0e11","surface-dim":"#121316","on-secondary-fixed":"#002113","on-tertiary-fixed":"#410004","tertiary-fixed-dim":"#ffb3ad","on-surface-variant":"#d8c3ad","secondary":"#4edea3","error":"#ffb4ab","surface-container-highest":"#343538","secondary-container":"#00a572","on-error":"#690005","on-surface":"#e3e2e6","primary-fixed-dim":"#ffb95f","on-primary-container":"#613b00","on-primary-fixed":"#2a1700","surface-container-low":"#1b1b1f","surface-bright":"#38393c","tertiary-fixed":"#ffdad7","tertiary":"#ffbcb7","surface-container-high":"#292a2d","inverse-surface":"#e3e2e6","outline":"#a08e7a","on-background":"#e3e2e6","surface":"#121316","surface-container":"#1f1f23","on-error-container":"#ffdad6","secondary-fixed-dim":"#4edea3","on-tertiary":"#68000a","tertiary-container":"#ff938c","on-primary":"#472a00","on-secondary":"#003824","on-primary-fixed-variant":"#653e00"},borderRadius:{"DEFAULT":"0.125rem","lg":"0.25rem","xl":"0.5rem","full":"0.75rem"},spacing:{"gutter":"0.25rem","margin":"0.5rem","space-xs":"0.125rem","space-sm":"0.25rem","space-xl":"1rem","space-md":"0.5rem","space-lg":"0.75rem"},fontFamily:{"headline-lg":["Inter"],"body-sm":["Inter"],"counter-display":["JetBrains Mono"],"body-md":["Inter"],"body-lg":["Inter"],"label-lg":["JetBrains Mono"],"label-md":["JetBrains Mono"],"headline-sm":["Inter"],"label-sm":["JetBrains Mono"],"headline-md":["Inter"]},fontSize:{"headline-lg":["24px",{lineHeight:"32px",letterSpacing:"-0.015em",fontWeight:"600"}],"body-sm":["11px",{lineHeight:"14px",fontWeight:"400"}],"counter-display":["28px",{lineHeight:"32px",letterSpacing:"0.04em",fontWeight:"700"}],"body-md":["12px",{lineHeight:"16px",fontWeight:"400"}],"body-lg":["13px",{lineHeight:"18px",fontWeight:"400"}],"label-lg":["13px",{lineHeight:"16px",letterSpacing:"0.02em",fontWeight:"500"}],"label-md":["11px",{lineHeight:"14px",letterSpacing:"0.03em",fontWeight:"500"}],"headline-sm":["14px",{lineHeight:"20px",letterSpacing:"-0.005em",fontWeight:"600"}],"label-sm":["9px",{lineHeight:"12px",letterSpacing:"0.05em",fontWeight:"600"}],"headline-md":["18px",{lineHeight:"24px",letterSpacing:"-0.01em",fontWeight:"600"}]}}}};</script></head><body class="bg-surface font-body-md text-on-surface antialiased select-none"><header class="fixed top-0 left-0 right-0 z-50 h-16 bg-surface-container border-b border-surface-variant flex flex-col justify-between shadow-[0_1px_8px_rgba(0,0,0,0.4)]"><div class="h-10 px-margin flex items-center justify-between border-b border-surface-container-high bg-surface-container-lowest"><div class="flex items-center gap-space-lg"><div class="flex items-center gap-space-xs pl-space-xs"><span class="w-3 h-3 rounded-full bg-[#ff5f56] inline-block cursor-pointer shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]"></span><span class="w-3 h-3 rounded-full bg-[#ffbd2e] inline-block cursor-pointer shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]"></span><span class="w-3 h-3 rounded-full bg-[#27c93f] inline-block cursor-pointer shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]"></span></div><div class="flex items-center gap-space-md pl-space-md border-l border-surface-variant"><img alt="Tape2Track Logo" class="h-5 w-auto object-contain" src="https://lh3.googleusercontent.com/aida/ALJJyrAHWIMGhvuVOeT-Cl8Vwn4aTEwqd_t_lCwVb3gWwQ2uWMmlK-vS0aYe46FXWfjVSK9Dw3rbP_gWp9gVf0v5Mj9jiRZ5_T5n3nCkV_FYIZ9Z4VdAI42GZNRl9D_-9gHo8e0hxrdZLVC0xnaAcB1VNvcVBAPPZ_OiOlFjFdcZAl9CuQHJdZoI-VhQrDmvOKqMDl_8FJJBsQW1m9g5T84ZlF_lD0GMntZv3z0adKIjsw"/><span class="font-headline-sm text-headline-sm text-primary tracking-tight">Tape2Track Studio <span class="font-label-sm text-label-sm text-outline px-space-xs py-space-xs rounded bg-surface-container">v2.4</span></span></div><div class="hidden xl:flex items-center gap-space-sm px-space-md py-space-xs rounded bg-surface-container border border-surface-variant"><span class="w-2 h-2 rounded-full bg-secondary shadow-[0_0_8px_rgba(78,222,163,0.8)]"></span><span class="font-label-sm text-label-sm text-on-surface-variant">Apollo Twin X (USB-C) • 96kHz / 24-bit • 2.1ms • Clock: Internal</span></div></div><div class="flex items-center gap-space-lg"><div class="hidden md:flex items-center gap-space-md px-space-md py-space-xs rounded bg-surface-container-low border border-surface-variant"><span class="font-label-sm text-label-sm text-on-surface-variant">DSP: <strong class="text-secondary font-label-sm">14%</strong></span><span class="font-label-sm text-label-sm text-on-surface-variant">PEAK: <strong class="text-primary-container font-label-sm">-1.2 dBFS</strong></span><span class="font-label-sm text-label-sm text-on-surface-variant">SSD: <strong class="text-on-surface font-label-sm">842 GB frei</strong></span></div><div class="w-7 h-7 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[16px]">person</span></div></div></div><div class="h-6 px-margin flex items-center justify-between bg-surface-container"><nav class="flex items-center gap-space-xs" data-active-classes="bg-primary-container text-on-primary-container font-bold rounded"><a aria-current="page" class="px-space-md py-space-xs transition-colors bg-primary-container text-on-primary-container font-bold rounded" data-path="recording-engine" href="#">Aufnahme / Record</a><a class="font-label-md text-label-md px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" data-path="slice-and-align" href="#">Schnitt &amp; Marker</a><a class="font-label-md text-label-md px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" data-path="dsp-and-effects" href="#">Track-Bearbeitung</a><a class="font-label-md text-label-md px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" data-path="mastering-export" href="#">Batch Export</a></nav><div class="flex items-center gap-space-md text-on-surface-variant"><span class="font-label-sm text-label-sm uppercase tracking-widest text-outline">Analog Digitization Engine</span></div></div></header><aside class="fixed left-0 top-16 bottom-7 w-64 bg-surface-container-low border-r border-surface-variant z-40 flex flex-col justify-between p-space-md"><div class="flex flex-col gap-space-md"><div class="px-space-sm py-space-xs font-label-sm text-label-sm text-outline uppercase tracking-wider">Hardware Deck Control</div><div class="p-space-md rounded bg-surface-container-lowest border border-surface-variant flex flex-col gap-space-xs"><div class="flex justify-between items-center"><span class="font-label-sm text-label-sm text-on-surface-variant">Turntable Speed</span><span class="font-label-md text-label-md text-primary font-bold">33 1/3 RPM</span></div><div class="flex justify-between items-center"><span class="font-label-sm text-label-sm text-on-surface-variant">Preamp Gain</span><span class="font-label-md text-label-md text-secondary">+18.5 dB</span></div><div class="flex justify-between items-center"><span class="font-label-sm text-label-sm text-on-surface-variant">Phono EQ</span><span class="font-label-md text-label-md text-primary-container">RIAA Curve ON</span></div></div><div class="px-space-sm pt-space-md font-label-sm text-label-sm text-outline uppercase tracking-wider">Project Navigation</div><nav class="flex flex-col gap-space-xs" data-active-classes="bg-surface-container-high text-primary font-bold rounded"><a aria-current="page" class="flex items-center justify-between px-space-md py-space-xs transition-colors bg-surface-container-high text-primary font-bold rounded" data-path="recording-engine" href="#"><span>01 - Direct Ingest</span><span class="font-label-sm text-label-sm text-outline">REC</span></a><a class="flex items-center justify-between px-space-md py-space-xs rounded text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="slice-and-align" href="#"><span>02 - Track Slicing</span><span class="font-label-sm text-label-sm text-outline">SPLIT</span></a><a class="flex items-center justify-between px-space-md py-space-xs rounded text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="dsp-and-effects" href="#"><span>03 - De-Click &amp; EQ</span><span class="font-label-sm text-label-sm text-outline">DSP</span></a><a class="flex items-center justify-between px-space-md py-space-xs rounded text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="mastering-export" href="#"><span>04 - Multi-Format Out</span><span class="font-label-sm text-label-sm text-outline">FLAC</span></a><a class="flex items-center justify-between px-space-md py-space-xs rounded text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="system-settings" href="#"><span>05 - Audio Hardware Setup</span><span class="font-label-sm text-label-sm text-outline">I/O</span></a></nav></div><div class="p-space-md rounded bg-surface-container border border-surface-variant"><div class="font-label-sm text-label-sm text-on-surface-variant mb-space-xs">Master Calibration</div><div class="flex items-center gap-space-sm"><span class="w-2 h-2 rounded-full bg-secondary"></span><span class="font-label-sm text-label-sm text-on-surface">IEC 98 Phono Standard</span></div></div></aside><div class="pl-64"><main class="relative pt-16 pb-7 w-full bg-surface min-h-screen"><div class="flex flex-col w-full text-on-surface select-none pb-12">
+<!-- Sub-Chassis Header Strip -->
+<section class="bg-surface-container-low px-margin py-space-sm flex flex-wrap items-center justify-between gap-space-md shadow-sm">
+<div class="flex items-center gap-space-lg min-w-0">
+<div class="flex items-center gap-space-xs">
+<span class="w-2.5 h-2.5 rounded-full bg-error animate-ping"></span>
+<span class="w-2.5 h-2.5 rounded-full bg-error -ml-3"></span>
+<span class="font-label-sm text-label-sm text-error uppercase tracking-widest pl-space-xs">LIVE INPUT STREAM</span>
+</div>
+<div class="h-3 w-px bg-surface-variant"></div>
+<div class="flex items-center gap-space-xs font-label-sm text-label-sm text-on-surface-variant">
+<span>INTERFACE:</span>
+<span class="text-primary font-bold">Universal Audio Apollo Twin X</span>
+<span class="text-surface-variant">•</span>
+<span class="text-secondary font-mono">ASIO Direct 96kHz / 24-bit TrueStereo</span>
+</div>
+</div>
+<div class="flex items-center gap-space-lg">
+<div class="flex items-center gap-space-xs bg-surface-container-lowest px-space-md py-space-xs rounded">
+<span class="material-symbols-outlined text-secondary text-[14px]">memory</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Ringbuffer: <span class="text-secondary font-bold">4096 spl (0 Overflows)</span></span>
+</div>
+<div class="flex items-center gap-space-xs bg-surface-container-lowest px-space-md py-space-xs rounded">
+<span class="material-symbols-outlined text-primary text-[14px]">save</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Target SSD: <span class="text-primary font-bold">NVMe RAID0 (940 MB/s)</span></span>
+</div>
+</div>
+</section>
+<!-- 1. Top Project Setup Bar (Tactile Machined Module) -->
+<section class="p-space-lg bg-surface flex flex-col gap-space-md">
+<div class="bg-surface-container-low p-space-md rounded-lg flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-space-lg shadow-md">
+<!-- Project Metadata Input -->
+<div class="flex flex-col gap-space-xs flex-1 min-w-[280px]">
+<div class="flex items-center justify-between">
+<label class="font-label-sm text-label-sm text-outline uppercase tracking-wider flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-[13px] text-primary">folder_open</span>
+            Master Tape Projekt-Titel &amp; Archiv-ID
+          </label>
+<span class="font-label-sm text-label-sm text-secondary font-mono">ID: TT-1985-DIR-01A</span>
+</div>
+<div class="flex items-center bg-surface-container-lowest rounded px-space-md py-space-xs shadow-inner">
+<span class="material-symbols-outlined text-outline mr-space-sm text-[16px]">edit_note</span>
+<input class="w-full bg-transparent font-headline-sm text-headline-sm text-primary tracking-wide focus:outline-none" type="text" value="Dire Straits - Brothers in Arms (Original 1985 Master Tape)"/>
+<span class="font-label-sm text-label-sm text-outline-variant uppercase px-space-xs py-space-xs bg-surface-container rounded ml-space-xs">WAV 96k</span>
+</div>
+</div>
+<!-- Medium & Side Choosers -->
+<div class="flex flex-wrap sm:flex-nowrap items-center gap-space-md">
+<!-- Media Selector Pill Cluster -->
+<div class="flex flex-col gap-space-xs">
+<span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Quellmedium</span>
+<div class="flex items-center bg-surface-container-lowest p-0.5 rounded shadow-inner">
+<button class="flex items-center gap-space-xs px-space-md py-1 rounded bg-primary-container text-on-primary-container font-label-md text-label-md font-bold shadow-sm transition-transform active:scale-95">
+<span class="material-symbols-outlined text-[15px]">mobile_share_stack</span>
+<span>Kassette</span>
+</button>
+<button class="flex items-center gap-space-xs px-space-md py-1 rounded text-on-surface-variant hover:text-on-surface font-label-md text-label-md transition-colors">
+<span class="material-symbols-outlined text-[15px]">album</span>
+<span>Schallplatte (Vinyl)</span>
+</button>
+</div>
+</div>
+<!-- Vinyl/Tape Side Selection -->
+<div class="flex flex-col gap-space-xs">
+<span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Tonträger-Seite</span>
+<div class="flex items-center bg-surface-container-lowest p-0.5 rounded shadow-inner">
+<button class="px-space-md py-1 rounded bg-surface-container-high text-primary font-bold font-label-md text-label-md shadow-sm">Seite A</button>
+<button class="px-space-md py-1 rounded text-on-surface-variant hover:text-on-surface font-label-md text-label-md">Seite B</button>
+<button class="px-space-md py-1 rounded text-on-surface-variant/40 font-label-md text-label-md cursor-not-allowed">Seite C</button>
+<button class="px-space-md py-1 rounded text-on-surface-variant/40 font-label-md text-label-md cursor-not-allowed">Seite D</button>
+</div>
+</div>
+</div>
+<!-- Quick Preset & Safety Silence Detection -->
+<div class="flex flex-col gap-space-xs">
+<span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Laufzeit-Vorgabe (Kapazität)</span>
+<div class="flex items-center gap-space-xs bg-surface-container-lowest p-1 rounded">
+<button class="px-space-sm py-0.5 rounded text-on-surface-variant hover:bg-surface-container text-label-sm font-label-sm">C-60 (30m)</button>
+<button class="px-space-sm py-0.5 rounded bg-primary text-on-primary font-bold text-label-sm font-label-sm shadow-sm">C-90 (45m)</button>
+<button class="px-space-sm py-0.5 rounded text-on-surface-variant hover:bg-surface-container text-label-sm font-label-sm">C-120 (60m)</button>
+<button class="px-space-sm py-0.5 rounded text-on-surface-variant hover:bg-surface-container text-label-sm font-label-sm">LP (22m)</button>
+<button class="px-space-sm py-0.5 rounded text-on-surface-variant hover:bg-surface-container text-label-sm font-label-sm">Maxi (12m)</button>
+<button class="px-space-sm py-0.5 rounded text-on-surface-variant hover:bg-surface-container text-label-sm font-label-sm">Custom</button>
+</div>
+</div>
+</div>
+<!-- Sub-options: Auto-Stop & Lead-out Detection Strip -->
+<div class="flex flex-wrap items-center justify-between gap-space-md px-space-md py-space-xs bg-surface-container rounded font-label-sm text-label-sm text-on-surface-variant">
+<div class="flex items-center gap-space-xl">
+<label class="flex items-center gap-space-sm cursor-pointer hover:text-on-surface transition-colors">
+<input checked="" class="accent-primary w-3.5 h-3.5 rounded cursor-pointer" type="checkbox"/>
+<span class="text-on-surface font-medium">Automatischer Stopp nach 46:30 min</span>
+<span class="text-outline text-label-sm font-label-sm font-mono">(Inkl. 90s Auslaufband-Toleranz)</span>
+</label>
+<label class="flex items-center gap-space-sm cursor-pointer hover:text-on-surface transition-colors">
+<input checked="" class="accent-secondary w-3.5 h-3.5 rounded cursor-pointer" type="checkbox"/>
+<span class="text-on-surface font-medium">Intelligente Leerrillen- / Stille-Erkennung</span>
+<span class="text-secondary font-mono text-label-sm font-label-sm">&lt; -54 dBFS für &gt; 15s</span>
+</label>
+</div>
+<div class="flex items-center gap-space-md">
+<span class="text-outline">Dolby HX-Pro Bypass: <span class="text-on-surface">Aktiviert</span></span>
+<span class="text-surface-variant">•</span>
+<span class="text-outline">DC Offset Removal: <span class="text-secondary font-bold">ON (0.4 Hz)</span></span>
+</div>
+</div>
+</section>
+<!-- 2. Center Live Waveform Monitor & Reel Visualizer Bento Grid -->
+<section class="px-space-lg flex flex-col gap-space-md">
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-space-md">
+<!-- Tape Reel & Hardware Simulation Dock (4 Cols) -->
+<div class="lg:col-span-4 bg-surface-container-low rounded-lg p-space-md flex flex-col justify-between shadow-md">
+<div class="flex items-center justify-between pb-space-sm">
+<div class="flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-primary text-[18px]">radio</span>
+<span class="font-headline-sm text-headline-sm text-on-surface">Tape Transport Simulator</span>
+</div>
+<span class="font-label-sm text-label-sm px-space-xs py-space-xs bg-surface-container-highest text-secondary rounded font-mono">TYPE II / CrO₂</span>
+</div>
+<!-- Reel Mechanics Visualizer -->
+<div class="relative bg-surface-container-lowest rounded p-space-md flex items-center justify-around h-48 overflow-hidden shadow-inner">
+<!-- Background Deck Plate Machining Lines -->
+<div class="absolute inset-0 opacity-10 bg-[radial-gradient(#ffc174_1px,transparent_1px)] [background-size:16px_16px]"></div>
+<!-- Left Supply Reel (Abwickelspule) -->
+<div class="relative flex flex-col items-center">
+<div class="relative w-28 h-28 rounded-full bg-surface-variant flex items-center justify-center shadow-lg">
+<!-- Outer Tape Mass (Shrinking) -->
+<div class="absolute w-24 h-24 rounded-full bg-outline-variant/60 animate-[spin_6s_linear_infinite]"></div>
+<!-- Inner Reel Core -->
+<div class="relative w-14 h-14 rounded-full bg-surface-container-high flex items-center justify-center shadow-inner">
+<div class="w-6 h-6 rounded-full bg-surface-container-lowest flex items-center justify-center">
+<div class="w-2 h-2 rounded-full bg-primary"></div>
+</div>
+<!-- 3 Flange Cutouts -->
+<div class="absolute w-1 h-3 bg-surface-variant rounded top-1"></div>
+<div class="absolute w-1 h-3 bg-surface-variant rounded bottom-1 left-3 rotate-45"></div>
+<div class="absolute w-1 h-3 bg-surface-variant rounded bottom-1 right-3 -rotate-45"></div>
+</div>
+</div>
+<span class="font-label-sm text-label-sm text-outline mt-space-xs">SUPPLY REEL (58%)</span>
+</div>
+<!-- Tension Arm & Head Bridge Center Indicator -->
+<div class="flex flex-col items-center gap-space-xs z-10">
+<div class="w-8 h-10 bg-surface-container-high rounded flex flex-col items-center justify-center p-1 shadow-md">
+<div class="w-6 h-2 bg-primary-container rounded mb-1"></div>
+<div class="w-4 h-1 bg-secondary rounded"></div>
+<span class="font-label-sm text-[8px] text-outline font-mono">HEAD</span>
+</div>
+<!-- Flutter Indicator -->
+<div class="flex items-center gap-0.5">
+<span class="w-1 h-2 bg-secondary rounded-sm"></span>
+<span class="w-1 h-3 bg-secondary rounded-sm"></span>
+<span class="w-1 h-1.5 bg-secondary rounded-sm"></span>
+</div>
+<span class="font-label-sm text-[8px] text-secondary font-mono tracking-tighter">0.04% W&amp;F</span>
+</div>
+<!-- Right Take-up Reel (Aufwickelspule) -->
+<div class="relative flex flex-col items-center">
+<div class="relative w-28 h-28 rounded-full bg-surface-variant flex items-center justify-center shadow-lg">
+<!-- Outer Tape Mass (Growing) -->
+<div class="absolute w-20 h-20 rounded-full bg-outline-variant/80 animate-[spin_5s_linear_infinite]"></div>
+<!-- Inner Reel Core -->
+<div class="relative w-14 h-14 rounded-full bg-surface-container-high flex items-center justify-center shadow-inner">
+<div class="w-6 h-6 rounded-full bg-surface-container-lowest flex items-center justify-center">
+<div class="w-2 h-2 rounded-full bg-primary-container"></div>
+</div>
+<!-- 3 Flange Cutouts -->
+<div class="absolute w-1 h-3 bg-surface-variant rounded top-1"></div>
+<div class="absolute w-1 h-3 bg-surface-variant rounded bottom-1 left-3 rotate-45"></div>
+<div class="absolute w-1 h-3 bg-surface-variant rounded bottom-1 right-3 -rotate-45"></div>
+</div>
+</div>
+<span class="font-label-sm text-label-sm text-outline mt-space-xs">TAKE-UP (42%)</span>
+</div>
+</div>
+<!-- 7-Segment Mechanical Counter & Dual Time HUD -->
+<div class="mt-space-md grid grid-cols-2 gap-space-sm">
+<div class="bg-surface-container-lowest p-space-sm rounded flex flex-col items-center justify-center shadow-inner">
+<span class="font-label-sm text-label-sm text-outline tracking-wider uppercase">Tape Counter</span>
+<div class="flex items-center gap-1 mt-1 font-counter-display text-primary text-headline-lg bg-surface-container-high px-space-md py-0.5 rounded tracking-widest shadow-sm">
+<span class="bg-surface-container-lowest px-1 rounded text-primary">1</span>
+<span class="bg-surface-container-lowest px-1 rounded text-primary">8</span>
+<span class="bg-surface-container-lowest px-1 rounded text-primary">4</span>
+<span class="bg-surface-container-lowest px-1 rounded text-primary">2</span>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-space-sm rounded flex flex-col items-center justify-center shadow-inner">
+<span class="font-label-sm text-label-sm text-outline tracking-wider uppercase">Verbleibende Zeit</span>
+<div class="font-counter-display text-secondary text-headline-md tracking-wider mt-1.5">
+              -26:17.16
+            </div>
+</div>
+</div>
+</div>
+<!-- Real-Time Waveform Monitor & Timeline Canvas (8 Cols) -->
+<div class="lg:col-span-8 bg-surface-container-low rounded-lg p-space-md flex flex-col justify-between shadow-md">
+<!-- Canvas Top Ruler & Navigation Toolbar -->
+<div class="flex flex-wrap items-center justify-between pb-space-xs gap-space-sm">
+<div class="flex items-center gap-space-md">
+<span class="font-headline-sm text-headline-sm text-on-surface flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-primary text-[18px]">graphic_eq</span>
+              Echtzeit-Pegelschnittstelle (Live Oscilloscope)
+            </span>
+<span class="font-label-sm text-label-sm text-primary px-space-sm py-0.5 bg-primary/10 rounded font-mono">CH 1/2 STEREO</span>
+</div>
+<!-- Master Timecode Readout -->
+<div class="flex items-center gap-space-sm bg-surface-container-lowest px-space-md py-0.5 rounded shadow-inner">
+<span class="font-label-sm text-label-sm text-outline">TC:</span>
+<span class="font-counter-display text-primary-container text-headline-md font-bold tracking-widest">00:18:42.84</span>
+<span class="text-outline text-label-sm font-mono">/ 00:45:00.00</span>
+</div>
+</div>
+<!-- The Waveform Recessed Well -->
+<div class="relative w-full h-56 bg-surface-container-lowest rounded overflow-hidden shadow-[inset_0_2px_8px_rgba(0,0,0,0.8)] flex flex-col justify-between">
+<!-- Time Ruler (top track) -->
+<div class="h-5 bg-surface-container border-b border-surface-variant flex items-center justify-between px-2 font-counter-display text-[9px] text-outline z-20">
+<span>00:00:00</span>
+<span>05:00:00</span>
+<span>10:00:00</span>
+<span>15:00:00</span>
+<span class="text-primary font-bold">18:42:15 ▼</span>
+<span>25:00:00</span>
+<span>30:00:00</span>
+<span>35:00:00</span>
+<span>40:00:00</span>
+<span>45:00:00</span>
+</div>
+<!-- Oscilloscope Reticle Grid (SVG Background) -->
+<svg class="absolute inset-0 w-full h-full opacity-20 pointer-events-none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<pattern height="20" id="audioGrid" patternunits="userSpaceOnUse" width="40">
+<line class="text-outline" stroke="currentColor" stroke-width="0.5" x1="0" x2="40" y1="0" y2="0"></line>
+<line class="text-outline" stroke="currentColor" stroke-width="0.5" x1="0" x2="0" y1="0" y2="20"></line>
+</pattern>
+</defs>
+<rect fill="url(#audioGrid)" height="100%" width="100%"></rect>
+<line class="text-primary-container" stroke="currentColor" stroke-dasharray="4 2" stroke-width="1" x1="0" x2="100%" y1="50%" y2="50%"></line>
+</svg>
+<!-- Waveform Stereo Graphics -->
+<div class="relative w-full flex-1 flex flex-col justify-around py-1 px-1 z-10">
+<!-- Left Channel Waveform -->
+<div class="relative h-20 w-full flex items-center overflow-hidden">
+<span class="absolute left-2 top-1 font-label-sm text-[8px] text-primary/70 font-mono z-20">LEFT CHANNEL</span>
+<!-- Detailed Amber Vector Waveform -->
+<svg class="w-full h-full text-primary-container" preserveaspectratio="none" viewbox="0 0 1000 80">
+<path d="M0,40 Q20,38 40,40 T80,40 T120,35 T160,45 T200,32 T240,48 T280,28 T320,52 T360,20 T400,60 T440,15 T480,65 T520,25 T560,55 T600,10 T640,70 T680,18 T720,62 T760,22 T800,58 T840,30 T880,50 T920,38 T960,42 T1000,40 L1000,40 L0,40 Z" fill="currentColor" fill-opacity="0.2" stroke="currentColor" stroke-width="1.2"></path>
+<path d="M400,40 Q420,15 440,8 T460,72 T480,10 T500,70 T520,18 T540,62 T560,25 T580,55 T600,6 T620,74 T640,14 T660,66 T680,22 T700,58 T720,28 T740,52 L740,40 Z" fill="currentColor" fill-opacity="0.4" stroke="currentColor" stroke-width="1.8"></path>
+</svg>
+</div>
+<!-- Zero Crossing Hairline -->
+<div class="w-full h-px bg-surface-variant flex items-center justify-between px-4">
+<span class="font-label-sm text-[8px] text-outline font-mono">0.0 dB</span>
+<span class="font-label-sm text-[8px] text-secondary font-mono">TRACK 03 INGESTION</span>
+<span class="font-label-sm text-[8px] text-outline font-mono">0.0 dB</span>
+</div>
+<!-- Right Channel Waveform -->
+<div class="relative h-20 w-full flex items-center overflow-hidden">
+<span class="absolute left-2 top-1 font-label-sm text-[8px] text-primary/70 font-mono z-20">RIGHT CHANNEL</span>
+<svg class="w-full h-full text-primary" preserveaspectratio="none" viewbox="0 0 1000 80">
+<path d="M0,40 Q20,42 40,40 T80,40 T120,44 T160,36 T200,47 T240,33 T280,51 T320,29 T360,58 T400,22 T440,64 T480,16 T520,54 T560,26 T600,68 T640,12 T680,61 T720,19 T760,57 T800,23 T840,49 T880,31 T920,41 T960,39 T1000,40 L1000,40 L0,40 Z" fill="currentColor" fill-opacity="0.18" stroke="currentColor" stroke-width="1.2"></path>
+<path d="M400,40 Q420,64 440,71 T460,9 T480,69 T500,11 T520,61 T540,19 T560,54 T580,26 T600,73 T620,7 T640,65 T660,15 T680,57 T700,23 T720,51 T740,29 L740,40 Z" fill="currentColor" fill-opacity="0.35" stroke="currentColor" stroke-width="1.8"></path>
+</svg>
+</div>
+</div>
+<!-- Dynamic Playhead Scrubber Positioned at ~42% -->
+<div class="absolute top-5 bottom-0 left-[41.5%] w-px bg-primary shadow-[0_0_8px_rgba(255,193,116,0.9)] z-30 pointer-events-none flex flex-col items-center">
+<div class="w-2.5 h-2.5 bg-primary rotate-45 -mt-1 shadow-md"></div>
+<div class="h-full w-px bg-primary"></div>
+</div>
+<!-- Live Slice Track Markers -->
+<div class="absolute bottom-1 left-[14%] flex items-center gap-1 z-20">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-label-sm text-[9px] bg-surface-container px-1 rounded text-secondary font-mono">01 So Far Away</span>
+</div>
+<div class="absolute bottom-1 left-[28%] flex items-center gap-1 z-20">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-label-sm text-[9px] bg-surface-container px-1 rounded text-secondary font-mono">02 Money for Nothing</span>
+</div>
+<div class="absolute bottom-1 left-[41.5%] flex items-center gap-1 z-20">
+<span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+<span class="font-label-sm text-[9px] bg-surface-container px-1 rounded text-primary font-bold font-mono">03 Walk of Life (Recording...)</span>
+</div>
+<!-- Status Overlay Watermark -->
+<div class="absolute right-3 bottom-2 text-right pointer-events-none">
+<div class="font-label-sm text-[9px] text-outline font-mono">ZOOM: 1:1 SAMPLE-ACCURATE</div>
+<div class="font-label-sm text-[9px] text-secondary font-mono">FLAC LOSSLESS ENCODE ON-THE-FLY</div>
+</div>
+</div>
+<!-- Waveform Sub-bar with Live Stats -->
+<div class="flex items-center justify-between pt-space-xs font-label-sm text-label-sm text-on-surface-variant">
+<div class="flex items-center gap-space-md">
+<span class="flex items-center gap-space-xs">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+              Kanal-Korrelation: <strong class="text-on-surface font-mono">+0.88 (Mono-kompatibel)</strong>
+</span>
+<span class="text-surface-variant">•</span>
+<span>Rauschen (Noise Floor): <strong class="text-outline font-mono">-68.4 dBFS</strong></span>
+</div>
+<div class="flex items-center gap-space-xs">
+<button class="px-space-sm py-0.5 bg-surface-container hover:bg-surface-container-high rounded text-on-surface text-label-sm font-label-sm flex items-center gap-1">
+<span class="material-symbols-outlined text-[12px]">zoom_in</span> Wave Zoom
+            </button>
+<button class="px-space-sm py-0.5 bg-surface-container hover:bg-surface-container-high rounded text-on-surface text-label-sm font-label-sm flex items-center gap-1">
+<span class="material-symbols-outlined text-[12px]">center_focus_strong</span> Center Scrubber
+            </button>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- 3. Calibration & Precision Level Metering Section (Pegelanzeige & Einpegeln) -->
+<section class="p-space-lg flex flex-col gap-space-md">
+<div class="bg-surface-container-low rounded-lg p-space-md shadow-md flex flex-col gap-space-md">
+<div class="flex flex-wrap items-center justify-between gap-space-sm border-b border-surface-variant pb-space-sm">
+<div class="flex items-center gap-space-md">
+<span class="font-headline-sm text-headline-sm text-on-surface flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-secondary text-[18px]">equalizer</span>
+            Analog-Kalibrierung &amp; Studio-Pegel (Broadcast IEC 60268-10)
+          </span>
+<span class="font-label-sm text-label-sm text-secondary bg-secondary-container/20 px-space-sm py-0.5 rounded font-bold">
+            Status: Optimaler Dynamikbereich (Kein Clipping)
+          </span>
+</div>
+<div class="flex items-center gap-space-md font-label-sm text-label-sm">
+<span class="text-outline">Max Peak Hold: <strong class="text-primary-container font-mono">L -2.4 dBFS | R -2.1 dBFS</strong></span>
+<button class="px-space-sm py-0.5 bg-surface-container-highest hover:bg-surface-variant text-on-surface rounded font-label-sm text-label-sm">
+            Reset Peak Hold
+          </button>
+</div>
+</div>
+<!-- Meter Bridge & Preamp Console -->
+<div class="grid grid-cols-1 xl:grid-cols-12 gap-space-lg items-center">
+<!-- Dual LED Ladder Meters (5 Cols) -->
+<div class="xl:col-span-5 bg-surface-container-lowest p-space-md rounded flex flex-col gap-space-sm shadow-inner">
+<div class="flex items-center justify-between text-outline font-label-sm text-[9px] font-mono px-1">
+<span>-∞</span>
+<span>-48</span>
+<span>-36</span>
+<span>-24</span>
+<span>-18</span>
+<span>-12</span>
+<span>-6</span>
+<span>-3</span>
+<span>-1</span>
+<span class="text-error font-bold">CLIP</span>
+</div>
+<!-- Channel Left (CH 1) -->
+<div class="flex items-center gap-space-sm">
+<span class="w-4 font-mono font-bold text-label-sm text-on-surface">L</span>
+<div class="flex-1 h-5 bg-surface-container-high rounded-sm p-0.5 flex gap-0.5 items-center">
+<!-- Green segments (-inf to -12) -->
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<!-- Amber segments (-12 to -2) -->
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container/30 rounded-xs"></span>
+<!-- Red / Clip segments -->
+<span class="h-full flex-1 bg-error-container/20 rounded-xs"></span>
+<span class="h-full flex-1 bg-error/20 rounded-xs"></span>
+</div>
+<span class="w-16 text-right font-counter-display text-label-md text-primary font-bold">-2.4 dB</span>
+</div>
+<!-- Channel Right (CH 2) -->
+<div class="flex items-center gap-space-sm">
+<span class="w-4 font-mono font-bold text-label-sm text-on-surface">R</span>
+<div class="flex-1 h-5 bg-surface-container-high rounded-sm p-0.5 flex gap-0.5 items-center">
+<!-- Green segments -->
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<span class="h-full flex-1 bg-secondary rounded-xs"></span>
+<!-- Amber segments -->
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<span class="h-full flex-1 bg-primary-container rounded-xs"></span>
+<!-- Red / Clip segments -->
+<span class="h-full flex-1 bg-error-container/20 rounded-xs"></span>
+<span class="h-full flex-1 bg-error/20 rounded-xs"></span>
+</div>
+<span class="w-16 text-right font-counter-display text-label-md text-primary font-bold">-2.1 dB</span>
+</div>
+<!-- RMS Average Bar Indicator -->
+<div class="flex items-center justify-between text-outline font-label-sm text-[9px] pt-1">
+<span>RMS LUFS: <strong class="text-on-surface font-mono">-14.2 LUFS (Integrated)</strong></span>
+<span>True Peak Margin: <strong class="text-secondary font-mono">+2.1 dB Headroom</strong></span>
+</div>
+</div>
+<!-- Gain Trimmers & Encoders (4 Cols) -->
+<div class="xl:col-span-4 bg-surface-container p-space-md rounded flex items-center justify-around">
+<!-- Left Gain Potentiometer -->
+<div class="flex flex-col items-center gap-space-xs">
+<span class="font-label-sm text-label-sm text-outline">INPUT TRIM L</span>
+<div class="relative w-14 h-14 rounded-full bg-surface-container-lowest border-2 border-surface-variant flex items-center justify-center shadow-lg cursor-pointer group">
+<!-- Radial Tick Mark -->
+<div class="absolute top-1 w-1 h-3 bg-primary rounded"></div>
+<span class="font-counter-display text-label-md text-primary font-bold">+3.2</span>
+</div>
+<div class="flex items-center gap-1 font-mono text-[10px] text-on-surface-variant">
+<button class="px-1 bg-surface-container-high rounded hover:text-on-surface">-0.1</button>
+<span>dB</span>
+<button class="px-1 bg-surface-container-high rounded hover:text-on-surface">+0.1</button>
+</div>
+</div>
+<!-- Stereo Link Lock Mechanism -->
+<div class="flex flex-col items-center gap-space-xs">
+<button class="p-space-sm rounded-full bg-primary-container text-on-primary-container shadow-md hover:scale-105 transition-transform" title="Stereo Link Lock Active">
+<span class="material-symbols-outlined text-[18px]">link</span>
+</button>
+<span class="font-label-sm text-[9px] text-primary font-bold uppercase tracking-tighter">LINK LOCK ON</span>
+<span class="font-label-sm text-[8px] text-outline">Gang L+R</span>
+</div>
+<!-- Right Gain Potentiometer -->
+<div class="flex flex-col items-center gap-space-xs">
+<span class="font-label-sm text-label-sm text-outline">INPUT TRIM R</span>
+<div class="relative w-14 h-14 rounded-full bg-surface-container-lowest border-2 border-surface-variant flex items-center justify-center shadow-lg cursor-pointer group">
+<!-- Radial Tick Mark -->
+<div class="absolute top-1 w-1 h-3 bg-primary rounded"></div>
+<span class="font-counter-display text-label-md text-primary font-bold">+3.2</span>
+</div>
+<div class="flex items-center gap-1 font-mono text-[10px] text-on-surface-variant">
+<button class="px-1 bg-surface-container-high rounded hover:text-on-surface">-0.1</button>
+<span>dB</span>
+<button class="px-1 bg-surface-container-high rounded hover:text-on-surface">+0.1</button>
+</div>
+</div>
+</div>
+<!-- Hardware & DSP Emulation Switches (3 Cols) -->
+<div class="xl:col-span-3 bg-surface-container p-space-md rounded flex flex-col gap-space-xs justify-center">
+<label class="flex items-center justify-between cursor-pointer p-1 rounded hover:bg-surface-container-high transition-colors">
+<span class="font-label-sm text-label-sm text-on-surface flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-[14px] text-primary">cloud_download</span>
+              Tape Saturation Monitoring
+            </span>
+<input checked="" class="accent-primary w-3.5 h-3.5 rounded cursor-pointer" type="checkbox"/>
+</label>
+<label class="flex items-center justify-between cursor-pointer p-1 rounded hover:bg-surface-container-high transition-colors">
+<span class="font-label-sm text-label-sm text-on-surface flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-[14px] text-secondary">graphic_eq</span>
+              Phono RIAA Entzerrung (Curve)
+            </span>
+<input class="accent-secondary w-3.5 h-3.5 rounded cursor-pointer" type="checkbox"/>
+</label>
+<label class="flex items-center justify-between cursor-pointer p-1 rounded hover:bg-surface-container-high transition-colors">
+<span class="font-label-sm text-label-sm text-on-surface flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-[14px] text-primary-container">tune</span>
+              Subsonic Filter (18dB @ 20Hz)
+            </span>
+<input checked="" class="accent-primary-container w-3.5 h-3.5 rounded cursor-pointer" type="checkbox"/>
+</label>
+</div>
+</div>
+</div>
+</section>
+<!-- 4. Tactile Master Transport Control Bar (Uncompromising Audio Hardware Console) -->
+<section class="px-space-lg flex flex-col">
+<div class="bg-surface-container-high rounded-xl p-space-md flex flex-wrap items-center justify-between gap-space-lg shadow-xl">
+<!-- Tactile Transport Button Cluster -->
+<div class="flex items-center gap-space-sm">
+<!-- Arm Record Button (Blinking Red) -->
+<button class="relative flex items-center gap-space-xs px-space-md py-space-md rounded bg-error-container text-on-error-container font-label-md text-label-md font-bold shadow-md hover:brightness-110 active:scale-95 transition-all">
+<span class="w-3 h-3 rounded-full bg-error animate-ping absolute left-3"></span>
+<span class="w-3 h-3 rounded-full bg-error mr-1"></span>
+<span>ARMED</span>
+</button>
+<!-- Large RECORD Active Button -->
+<button class="flex items-center gap-space-sm px-space-xl py-space-md rounded bg-error text-on-error font-headline-sm text-headline-sm font-bold shadow-lg shadow-error/30 active:scale-95 transition-transform">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">fiber_manual_record</span>
+<span>REC ACTIVE</span>
+</button>
+<!-- Pause -->
+<button class="flex items-center gap-space-xs px-space-lg py-space-md rounded bg-surface-container text-on-surface hover:bg-surface-container-highest active:scale-95 transition-all font-label-md text-label-md shadow">
+<span class="material-symbols-outlined text-[18px]">pause</span>
+<span>PAUSE</span>
+</button>
+<!-- Stop -->
+<button class="flex items-center gap-space-xs px-space-lg py-space-md rounded bg-surface-container text-on-surface hover:bg-surface-container-highest active:scale-95 transition-all font-label-md text-label-md shadow">
+<span class="material-symbols-outlined text-[18px]" style="font-variation-settings: 'FILL' 1;">stop</span>
+<span>STOP</span>
+</button>
+<!-- Monitor / Headphones Passthrough -->
+<button class="flex items-center gap-space-xs px-space-md py-space-md rounded bg-surface-container-lowest text-secondary font-label-md text-label-md shadow-inner hover:bg-surface-container transition-colors">
+<span class="material-symbols-outlined text-[18px]">headphones</span>
+<span>MONITOR: ANHÖREN</span>
+</button>
+</div>
+<!-- Quick Track Slicing Marker Shortcut Button -->
+<div class="flex items-center gap-space-md">
+<button class="flex items-center gap-space-sm px-space-lg py-space-md rounded-lg bg-primary-container text-on-primary-container font-headline-sm text-headline-sm font-bold shadow-md hover:brightness-110 active:scale-95 transition-all">
+<span class="material-symbols-outlined text-[20px]">bookmark_add</span>
+<span>+ Track-Marker setzen</span>
+<span class="font-mono text-label-sm text-on-primary-container/80 px-space-xs py-0.5 bg-black/20 rounded">[Space / M]</span>
+</button>
+<!-- Status Diagnostic Badge -->
+<div class="hidden md:flex flex-col items-end gap-0.5">
+<div class="flex items-center gap-space-xs font-label-sm text-label-sm text-secondary font-bold">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+            AUFNAHME LÄUFT STABIL
+          </div>
+<div class="font-label-sm text-[9px] text-outline font-mono">
+            Buffer 100% sicher • 0 Underruns • Dropouts: 0
+          </div>
+</div>
+</div>
+</div>
+</section>
+</div></main></div><footer class="fixed bottom-0 left-0 right-0 z-50 h-7 bg-surface-container-lowest border-t border-surface-variant px-margin flex items-center justify-between font-label-sm text-label-sm text-on-surface-variant"><div class="flex items-center gap-space-lg"><span class="flex items-center gap-space-xs"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Project: <strong class="text-on-surface font-label-sm">Pink_Floyd_The_Wall_Vinyl_Master_SideA.wav</strong></span><span class="text-surface-variant">|</span><span>Source: <strong class="text-on-surface font-label-sm">Vinyl LP (33 1/3 RPM)</strong></span><span class="text-surface-variant">|</span><span>Gain: <strong class="text-on-surface font-label-sm">+18.5 dB</strong></span><span class="text-surface-variant">|</span><span>RIAA: <strong class="text-secondary font-label-sm">ON</strong></span></div><div class="flex items-center gap-space-md"><span class="text-outline">TIME ELAPSED:</span><span class="font-counter-display text-label-md text-primary bg-surface-container px-space-md py-space-xs rounded border border-surface-variant">00:23:41.802</span></div></footer></body></html>
