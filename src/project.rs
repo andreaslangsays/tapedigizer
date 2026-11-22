@@ -388,6 +388,9 @@ mod tests {
             noise_profile: Some(profile.clone()),
             ..SongSettings::default()
         };
+        use crate::audio::processing::EffectStage;
+        song.effect_chain.move_by(EffectStage::Limiter, -3);
+        song.effect_chain.set_enabled(EffectStage::Equalizer, false);
         let channel = &mut song.channels[1];
         channel.gain_db = 3.0;
         channel.muted = true;
@@ -401,6 +404,10 @@ mod tests {
             mid_hz: 800.0,
             high_hz: 8000.0,
             mid_q: 0.9,
+            peaks: [
+                crate::audio::processing::PeakEqBand { hz: 300.0, gain_db: 1.0, q: 2.0 },
+                crate::audio::processing::PeakEqBand { hz: 4200.0, gain_db: -2.0, q: 0.7 },
+            ],
         };
         channel.denoiser = crate::audio::denoiser::DenoiserParams {
             enabled: true,

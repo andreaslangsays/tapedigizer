@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.0-blue.svg" alt="Version 1.8.0" />
+  <img src="https://img.shields.io/badge/version-2.0.0-blue.svg" alt="Version 2.0.0" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-darkgrey.svg" alt="macOS" />
   <img src="https://img.shields.io/badge/audio-24--bit%20PCM%20WAV-orange.svg" alt="24-bit WAV" />
@@ -23,19 +23,27 @@
 
 **TapeDigizer** ist eine hochpräzise, native macOS-Desktop-App (entwickelt in **Rust** mit hardwarebeschleunigter Benutzeroberfläche), die das Digitalisieren von **Schallplatten (Vinyl LP & Single 45)**, **Kassetten** und **Tonbändern** so einfach, präzise und professionell wie möglich macht.
 
-### Highlights in v1.8.0
+### Neu in 2.0.0
+
+* **Flexibles Effekt-Rack:** Sechs einzeln schaltbare und umsortierbare Inserts pro Track, ein fester Hauptmix und ein Live-Vergleich von Eingang, Ausgang und Differenzsignal.
+* **Nichtdestruktive Bearbeitung:** Track-Verarbeitung bleibt im Projekt editierbar. Änderungen an der Aufnahme erzeugen eine neue WAV-Fassung und lassen die ursprüngliche Datei erhalten.
+* **Gemeinsame Bedienelemente:** Potis, Tasten und bündige Panelzeilen verwenden zentrale Komponenten in Silverface und Obsidian.
+
+### Studiokonsole
 
 * **Modernes Dual-Theme Studio-Design (Silverface & Obsidian):** Neues, helles **Silverface**-Mastering-Design als Standard und umschaltbarer **Obsidian**-Dark-Mode direkt in der nativen macOS Unified Titlebar (`Hell` / `Dunkel`).
-* **Skalierende Konsole ohne vertikales Scrollen:** Alle Arbeitsbereiche (**Aufnahme**, **Schnitt**, **Einzeltrack**, **Tracks**, **Export**) skalieren dynamisch mit der Fensterhöhe — alle Regler, Kurven und Meter bleiben jederzeit ohne Scrollen im Blick.
-* **Integrierte Einzeltrack-Bearbeitung (Song-Studio):** Direkt im Hauptmenü unter **`[ Marker | Tracks | Einzeltrack | Export ]`** (`⌘F`) erreichbar. Pro Song eigene Wellenform, A/B-Vergleich (`Bearbeitet` / `Original`) sowie 5 moderne Effekt-Module:
+* **Skalierende Konsole ohne vertikales Scrollen:** Alle Arbeitsbereiche (**Aufnahme**, **Schnitt**, **Einzeltrack**, **Tracks**, **Export**) skalieren dynamisch mit der Fensterhöhe — Wellenformen und Effekt-Rack passen sich an, Trackliste und Exportvorschau werden paginiert. Die Mindestgröße beträgt `1060 × 700 pt`.
+* **Integrierte Einzeltrack-Bearbeitung (Song-Studio):** Direkt im Hauptmenü unter **`[ Marker | Tracks | Einzeltrack | Export ]`** (`⌘F`) erreichbar. Pro Song eigene Wellenform, A/B-Vergleich (`Bearbeitet` / `Original`) und eine Effektkette im unteren Rack. Sechs Inserts lassen sich einzeln aktivieren und mit `←` / `→` verschieben. Der Hauptmix sitzt fest am Ende. Beim Vorhören zeigt jede ausgewählte Stufe Eingang, Ausgang und Differenzsignal. Die Kette wird im Projekt gespeichert und beim Export angewendet. Die Quell-WAV bleibt erhalten.
   * **Einzelkanäle:** Kanal-Trim, taktile `MUTE`- und `Ø Phase`-Schalter, L/R-Kopplung und Solo.
   * **Restauration:** Dunkles OLED-Spektral-Display mit Hiss- und Zielkurve, Spectral-Denoiser (`Reduktion`, `Empfindlichkeit`, `Glättung`), Subsonic/DC-Filter und pro-Track Rauschprofil.
-  * **3-Band-Equalizer:** Interaktive Frequenzkurve (`20 Hz – 20 kHz`) mit verschiebbaren Band-Knoten, `Flat`-Reset und Baxandall-/Peak-Reglern.
-  * **Dynamik (Compressor, Expander & neuer Brickwall-Limiter):** 3-Wege-Umschaltung mit eigener Kennlinie; der neue **Brickwall-Limiter** bietet `Ceiling` (`-24..0 dB`), `Drive` (`0..+24 dB`), `Release` (`5..500 ms`), `0 ms` Attack und Stereo-Link.
-  * **Mix & Ausgabe:** Stereo-/Mono-Routing (`Stereo`, `L Mono`, `R Mono`, `Mono-Mix`), Balance, Stereobreite, vertikales OLED-Stereo-LED-Meter und Exportformat pro Song.
-* **Präzise Drehregler (Potis):** Glatte Aluminium-Potis mit 270°-Farbbogen, sofortigem vertikalem Drag ohne Sprung, logarithmischer Skalierung für Frequenzen & Zeiten (`Hz`/`ms`), Mausrad-/Trackpad-Steuerung, `Shift`-Feinmodus und Doppelklick-Reset auf `0`.
+  * **5-Band-Equalizer:** Low Shelf, Mittenband und High Shelf plus zwei frei platzierbare Glockenbänder mit Frequenz, Gain und Q. Fünf ziehbare Punkte, `Flat`-Reset und Live-Ausgangsspektrum in der Frequenzgrafik.
+  * **Compressor, Expander und Brickwall-Limiter:** Drei separate Inserts mit eigenen Kennlinien. Der **Brickwall-Limiter** bietet `Ceiling` (`-24..0 dB`), `Drive` (`0..+24 dB`), `Release` (`5..500 ms`), `0 ms` Attack und Stereo-Link.
+  * **Hauptmix:** Stereo-/Mono-Routing (`Stereo`, `L Mono`, `R Mono`, `Mono-Mix`), Balance, Stereobreite, vertikales OLED-Stereo-LED-Meter und Exportformat pro Song.
+* **Präzise Drehregler (Potis):** Glatte Aluminium-Potis mit 270°-Farbbogen, sofortigem vertikalem Drag ohne Sprung, logarithmischer Skalierung für Frequenzen & Zeiten (`Hz`/`ms`), Mausrad-/Trackpad-Steuerung, `Shift`-Feinmodus und Doppelklick-Reset bipolarer Potis auf `0`.
 * **Analog-Instrumentierung:** Umschaltbare Vintage-VU-Meter (`VU` / `LED`) und animiertes Band-Transport-Deck in der Aufnahme-Ansicht sowie direkter Projekt-/WAV-Laden-Button auf der leeren Schnitt-Startseite.
 * **Audio Unit für macOS:** Der TapeDigizer Denoiser lässt sich als Effekt in Logic Pro und anderen Audio-Unit-fähigen DAWs verwenden.
+
+Die [Design-Dokumentation](docs/design/README.md) beschreibt die Farbpaletten, das Konsolenlayout und die Bedienelemente in Version 2.0.0.
 
 ### ✨ Hauptfunktionen
 
@@ -59,11 +67,11 @@ Die Studiokonsole hat zwei klar getrennte Hauptbereiche: **Aufnahme** für Quell
    * **Stereo-Balance-Hinweis:** Warnt vor ungleicher Tonabnehmer- oder Tonkopf-Justierung.
 
 3. **✂️ Track-Schnitt, Präzisions-Schnitt-Lupe & Mastering-Export**
-   * **Konsolenlayout:** Stereo-Wellenform über die gesamte Fensterbreite mit Schnittmarken, Zeitlineal und Bereichsauswahl. Die Schnitt-Lupe liegt direkt unter der Wellenform. Rauschfilter, Trackliste und WAV-Export haben eigene Tabs.
+   * **Konsolenlayout:** Stereo-Wellenform über die gesamte Fensterbreite mit Schnittmarken, Zeitlineal und Bereichsauswahl. Die Schnitt-Lupe liegt direkt unter der Wellenform. **Aufnahme bearbeiten** öffnet in derselben Ansicht die Werkzeuge für die Gesamtaufnahme. Tracks, Einzeltrack und Export haben eigene Reiter.
    * **🔍 Neu gestaltete Präzisions-Schnitt-Lupe:**
      * **Zonen-Hervorhebung:** Farbliche Markierung des auslaufenden Tracks (◀ ENDE Txx) und des beginnenden Tracks (START Tyy ▶).
      * **Transienten-Fokussierung (Max. 3):** Die Transienten-Erkennung ist intelligent begrenzt – es werden maximal die **3 signifikantesten Transienten** (stärkste Song-Einsätze) im Umkreis des Markers angezeigt, um Überfrachtung zu vermeiden.
-     * **Nulldurchgang-Snap (Zero-Crossing):** Automatisches oder manuelles Einrasten auf den nächsten Nulldurchgang (`∿ Nulldurchgang`), um Knackser und Klicks am Schnittpunkt physikalisch auszuschließen.
+     * **Nulldurchgang-Snap (Zero-Crossing):** Automatisches oder manuelles Einrasten auf den nächsten Nulldurchgang (`∿ Nulldurchgang`), um Knackser am Schnittpunkt zu reduzieren.
      * **Stufenloser Zoom & Feinschnitt:** Schnelles Rein-/Rauszoomen per ⌥ + Mausrad direkt in der Lupe, Nudge-Tasten für Millisekunden- und Sample-Schritte (`±1 Smp`, `±10 ms`).
    * **📝 Kompakte & mächtige Trackliste:**
      * Kompakte Einzeilen-Einträge für maximale Übersicht auch bei über 20 Titeln pro Seite.
@@ -72,9 +80,10 @@ Die Studiokonsole hat zwei klar getrennte Hauptbereiche: **Aufnahme** für Quell
      * Sofortiges Vorhören jedes Songs (`▶`) und `Weglassen`-Toggle für Rillenpausen oder Bandrauschen.
    * **🎛️ Analog-Mastering beim Export:**
      * **20 Hz Subsonic- / Rumpelfilter:** Entfernt tieffrequentes Platten-Rumpeln (Phono-Rumble) und Gleichstrom-Gleichlaufschwankungen.
-     * **Schnittkanten Micro-Fades (5 ms):** Automatische klickfreie Ein- und Ausblendungen an allen Schnittgrenzen.
-     * **L/R-Balance-Korrektur:** Gleicht Pegeldifferenzen zwischen linkem und rechtem Kanal automatisch an.
-     * **Normalisierung:** 3 Modi (Original für DAW-Nachbearbeitung, Pro-Track Peak-Normalisierung, Album-/Seiten-Normalisierung).
+     * **Schnitt-Fades:** Aus oder `15 ms`, `100 ms`, `300 ms` für Ein- und Ausblendungen an den Trackgrenzen.
+     * **L/R-Trim:** Manuelle Pegelkorrektur zwischen linkem und rechtem Kanal für Tracks mit den globalen Exporteinstellungen.
+     * **Normalisierung:** 3 Modi (Originalpegel, Peak pro Track bei −0,3 dBFS oder gemeinsamer Gain für die Albumseite).
+   * **WAV-Versionen für Aufnahmebearbeitung:** Löschen, Trim und gerenderte Filter erzeugen eine neue Datei. Undo/Redo wechselt WAV-Fassung und Marker gemeinsam. Das Projekt speichert die aktive Fassung.
    * **Vollwertiges Projekt-Management & Undo/Redo:** Speichern (`⌘S`), Öffnen (`⌘O`) im `.tapedigizer`-Format, mehrstufiges Undo (`⌘Z`) und Redo (`⇧⌘Z`).
 
 4. **🌍 Mehrsprachigkeit & Persistenz**
@@ -87,19 +96,27 @@ Die Studiokonsole hat zwei klar getrennte Hauptbereiche: **Aufnahme** für Quell
 
 **TapeDigizer** is a high-precision native macOS desktop application (built with **Rust** and hardware-accelerated GUI) designed to digitize **vinyl records (LP 33⅓ & Single 45)**, **cassettes**, and **reel-to-reel tapes** effortlessly with studio-grade fidelity.
 
-### Highlights in v1.8.0
+### New in 2.0.0
+
+* **Flexible effect rack:** Six independently switchable and reorderable inserts per track, a fixed main mix, and live input, output, and difference signal meters.
+* **Nondestructive editing:** Track processing remains editable in the project. Recording edits create a new WAV revision and preserve the original file.
+* **Shared controls:** Knobs, buttons, and aligned panel rows use common components in Silverface and Obsidian.
+
+### Studio console
 
 * **Modern Dual-Theme Studio Console (Silverface & Obsidian):** Clean light **Silverface** mastering palette by default plus a live **Obsidian** dark mode toggle right in the native macOS Unified Titlebar (`Light` / `Dark`).
-* **Responsive Scroll-Free Layout:** All workspaces (**Recording**, **Cut**, **Track FX**, **Tracks**, **Export**) scale dynamically to fit the window height with zero vertical scrolling.
-* **Integrated Single-Track Processing (Song Studio):** Built directly into the Editing sub-navigation **`[ Cut | Tracks | Track FX | Export ]`** (`⌘F`). Local waveform, A/B audition (`Processed` / `Original`), and 5 modern effect modules saved per song:
+* **Responsive Scroll-Free Layout:** All workspaces (**Recording**, **Cut**, **Track FX**, **Tracks**, **Export**) fit the available height at the supported window sizes, starting at `1060 × 700 pt`. Track lists and export previews paginate.
+* **Integrated Single-Track Processing (Song Studio):** Built directly into the Editing sub-navigation **`[ Cut | Tracks | Track FX | Export ]`** (`⌘F`). Each song has a local waveform, A/B audition (`Processed` / `Original`), and an insert chain in the lower rack. Enable each of the six inserts independently and reorder them with `←` / `→`. The main mix stays at the end. During playback the selected stage shows input, output, and difference signal peaks. The project stores the chain, and export applies it while preserving the source WAV.
   * **Channels:** Input trim, tactile `MUTE` and `Ø Phase` switches, L/R link, and channel solo.
   * **Restoration:** Dark OLED spectrum display with raw hiss & target curves, spectral denoiser (`Reduction`, `Sensitivity`, `Smoothing`), subsonic/DC filter, and per-track noise profile.
-  * **3-Band Equalizer:** Interactive frequency response curve (`20 Hz – 20 kHz`) with draggable band nodes, `Flat` reset, and low-shelf / parametric mid / high-shelf controls.
-  * **Dynamics (Compressor, Expander & new Brickwall Limiter):** 3-way unit switcher with live transfer curves; the new **Brickwall Limiter** adds `Ceiling` (`-24..0 dB`), `Drive` (`0..+24 dB`), `Release` (`5..500 ms`), `0 ms` attack, and stereo detector linking.
-  * **Mix & Export:** Stereo/mono routing (`Stereo`, `Left mono`, `Right mono`, `Mono mix`), balance, stereo width, vertical OLED stereo LED meter, and per-song export format.
-* **Precision Rotary Knobs:** Smooth silver-aluminum knobs with 270° colored arcs, instant vertical drag, logarithmic scaling for frequencies & times (`Hz`/`ms`), mouse-wheel / trackpad scrolling, `Shift` fine mode, and double-click reset to `0`.
+  * **5-Band Equalizer:** Low shelf, mid band, and high shelf plus two freely tunable peak bands with frequency, gain, and Q. Five draggable points, a `Flat` reset, and a live output spectrum in the frequency graph.
+  * **Compressor, Expander, and Brickwall Limiter:** Three separate inserts with their own transfer curves. The **Brickwall Limiter** provides `Ceiling` (`-24..0 dB`), `Drive` (`0..+24 dB`), `Release` (`5..500 ms`), `0 ms` attack, and stereo detector linking.
+  * **Main mix:** Stereo/mono routing (`Stereo`, `Left mono`, `Right mono`, `Mono mix`), balance, stereo width, vertical OLED stereo LED meter, and per-song export format.
+* **Precision Rotary Knobs:** Smooth silver-aluminum knobs with 270° colored arcs, instant vertical drag, logarithmic scaling for frequencies & times (`Hz`/`ms`), mouse-wheel / trackpad scrolling, `Shift` fine mode, and double-click reset to `0` for bipolar knobs.
 * **Analog Instrumentation:** Switchable vintage analog VU meters (`VU` / `LED`), animated tape transport deck in Recording, and a primary Load Project / WAV button on the empty Editing start screen.
 * **Audio Unit for macOS:** Use TapeDigizer Denoiser as an effect in Logic Pro and other Audio Unit hosts.
+
+The [design documentation](docs/design/README.md) covers the palettes, console layout, and controls in version 2.0.0.
 
 ### ✨ Key Features
 
@@ -125,16 +142,17 @@ The console has two distinct workspaces: **Recording** for source setup, level m
    * **Precision Splice Scope (Schnitt-Lupe):**
      * Distinct track zone shading (◀ END Txx vs START Tyy ▶).
      * **3-Transient Limit:** Restricts transient markers to the top 3 most prominent musical onsets around the splice point to prevent visual clutter.
-     * **Zero-Crossing Snap:** Magnetically aligns cuts to sample zero-crossings (`∿ Zero-Crossing`) to eliminate clicks and pops.
+     * **Zero-Crossing Snap:** Magnetically aligns cuts to sample zero-crossings (`∿ Zero-Crossing`) to reduce clicks and pops.
      * Zoomable down to individual samples with micro-nudge controls (`±1 Smp`, `±10 ms`).
    * **Compact Tracklist & Batch Title Import:**
      * Single-line compact track rows showing >= 20 characters comfortably.
      * **Batch-Paste:** Paste complete tracklists from Discogs, Wikipedia, or Bandcamp to populate titles automatically.
+   * **Recording revisions:** Range deletion, cropping, and rendered filters create a new WAV. Undo and redo switch the WAV and its markers together during the session. Save Project stores the active revision.
    * **Analog Mastering Export Options:**
      * **20 Hz Subsonic / Rumble Filter:** Removes turntable rumble and subsonic DC flutter.
-     * **Boundary Micro-Fades (5 ms):** Transparent click-free fades at track heads and tails.
-     * **L/R Balance Compensation:** Rebalances channel level imbalances.
-     * **Normalization:** Raw DAW mode, per-track peak normalization, and album side loudness matching.
+     * **Cut fades:** Off, `15 ms`, `100 ms`, or `300 ms` at track starts and ends.
+     * **L/R trim:** Manual channel balance adjustment for tracks using the global export settings.
+     * **Normalization:** Original level, per-track peak normalization to −0.3 dBFS, or shared gain for the album side.
 
 ---
 

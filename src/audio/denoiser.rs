@@ -1143,6 +1143,8 @@ mod tests {
         let left: Vec<f32> = (0..10_000).map(|i| (i as f32) / 10_000.0).collect();
         let right = left.clone();
         let mut snap = crate::splitter::MarkerSnapshot {
+            audio_revision: None,
+            revision_preview_enabled: false,
             markers: vec![1.5, 3.0, 7.0],
             custom_titles: vec!["A".into(), "B".into(), "C".into(), "D".into()],
             song_settings: [(3, crate::audio::processing::SongSettings { gain_db: 3.5, ..Default::default() })].into(),

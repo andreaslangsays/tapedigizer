@@ -1,6 +1,8 @@
+use super::stage_meter::{StageLevels, StageMeter};
+use super::spectrum::{OutputSpectrum, SpectrumCapture, SpectrumTap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use crate::audio::processing::{SongProcessor, SongSettings};
+use crate::audio::processing::{MonitorStage, SongProcessor, SongSettings};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -37,6 +39,7 @@ pub(crate) struct PlayerDenoiserState {
     pub params: DenoiserParams,
     song: Option<Box<SongProcessor>>,
     song_settings: Option<SongSettings>,
+    stage_meter: Option<StageMeter>,
     pub denoiser: Box<SpectralDenoiser>,
     pub initialized: bool,
     pub cur_idx: usize,
@@ -52,6 +55,7 @@ impl PlayerDenoiserState {
             params: DenoiserParams::default(),
             song: None,
             song_settings: None,
+            stage_meter: None,
             denoiser: Box::new(SpectralDenoiser::new(sample_rate)),
             initialized: false,
             cur_idx: 0,
@@ -70,7 +74,11 @@ impl PlayerDenoiserState {
         if let Some(song) = &mut self.song {
             // Flush only zeros beyond this song/selection, never a neighboring sample.
             let (l, r) = if sample < end { (left[sample], right[sample]) } else { (0.0, 0.0) };
-            let (output, taps) = song.process_with_monitor_taps(l, r);
+            let stage = self.stage_meter.as_ref().map(StageMeter::stage);
+            let ((output, taps), levels) = song.process_monitored(l, r, stage);
+            if let (Some(meter), Some(levels)) = (&mut self.stage_meter, levels) {
+                meter.push(levels, song.latency());
+            }
             MonitorFrame { output, taps }
         } else {
             let sample = sample.min(end.saturating_sub(1));
@@ -81,8 +89,15 @@ impl PlayerDenoiserState {
     fn prime_at(&mut self, idx: usize, left: &[f32], right: &[f32], end: usize) {
         if let Some(song) = &mut self.song { song.reset(); } else { self.denoiser.reset(); }
         let latency = self.latency();
+        if let Some(meter) = &mut self.stage_meter {
+            meter.reset();
+        }
         for sample in idx..idx + latency {
             let _ = self.source_frame(sample, left, right, end);
+        }
+        // Exclude preroll peaks from the visible interval, retaining delay alignment.
+        if let Some(meter) = &mut self.stage_meter {
+            meter.take();
         }
         self.cur_out = self.source_frame(idx + latency, left, right, end);
         self.next_out = self.source_frame(idx + latency + 1, left, right, end);
@@ -119,6 +134,7 @@ pub struct AudioPlayer {
     loop_start: Arc<AtomicUsize>,
     output_peaks: Arc<[AtomicU32; 2]>,
     output_clipping: Arc<AtomicBool>,
+    spectrum: Option<Arc<SpectrumTap>>,
     is_playing: Arc<AtomicBool>,
     audition: Arc<Mutex<Option<(f64, usize)>>>,
     denoiser_state: Arc<Mutex<PlayerDenoiserState>>,
@@ -139,6 +155,7 @@ impl AudioPlayer {
             loop_start: Arc::new(AtomicUsize::new(0)),
             output_peaks: Arc::new([AtomicU32::new(0), AtomicU32::new(0)]),
             output_clipping: Arc::new(AtomicBool::new(false)),
+            spectrum: None,
             is_playing: Arc::new(AtomicBool::new(false)),
             audition: Arc::new(Mutex::new(None)),
             denoiser_state: Arc::new(Mutex::new(PlayerDenoiserState::new(44100))),
@@ -157,7 +174,12 @@ impl AudioPlayer {
         next.samples_l = left;
         next.samples_r = right;
         next.clip_range = Some(start..end);
-        next.denoiser_state.lock().denoiser.set_sample_rate(sample_rate);
+        next.spectrum = Some(Arc::new(SpectrumTap::default()));
+        {
+            let mut state = next.denoiser_state.lock();
+            state.denoiser.set_sample_rate(sample_rate);
+            state.stage_meter = Some(StageMeter::default());
+        }
         *self = next;
         Ok(())
     }
@@ -214,38 +236,23 @@ impl AudioPlayer {
         ds.initialized = false;
     }
 
-    pub fn load_decoded(&mut self, audio: DecodedAudio) -> Result<(), String> {
-        let prev_params = self.denoiser_state.lock().params.clone();
-        let prev_profile = self.denoiser_state.lock().denoiser.noise_profile().cloned();
+    /// Install audio independently of the availability of a playback device.
+    pub fn load_decoded(&mut self, audio: DecodedAudio) {
+        let (params, profile) = {
+            let state = self.denoiser_state.lock();
+            (state.params.clone(), state.denoiser.noise_profile().cloned())
+        };
         let mut next = Self::new();
         next.sample_rate = audio.sample_rate;
         next.samples_l = Arc::new(audio.left);
         next.samples_r = Arc::new(audio.right);
         {
-            let mut ds = next.denoiser_state.lock();
-            ds.denoiser.set_sample_rate(audio.sample_rate);
-            ds.denoiser.set_noise_profile(prev_profile);
-            ds.params = prev_params;
+            let mut state = next.denoiser_state.lock();
+            state.denoiser.set_sample_rate(audio.sample_rate);
+            state.denoiser.set_noise_profile(profile);
+            state.params = params;
         }
-        next.init_output_stream()?;
         *self = next;
-        Ok(())
-    }
-
-    pub fn replace_decoded(&mut self, audio: DecodedAudio) -> Result<(), String> {
-        if self.stream.is_some() {
-            self.load_decoded(audio)
-        } else {
-            self.sample_rate = audio.sample_rate;
-            self.samples_l = Arc::new(audio.left);
-            self.samples_r = Arc::new(audio.right);
-            let clamped = self.current_seconds().min(self.total_seconds());
-            self.seek_seconds(clamped);
-            let mut ds = self.denoiser_state.lock();
-            ds.denoiser.set_sample_rate(audio.sample_rate);
-            ds.initialized = false;
-            Ok(())
-        }
     }
 
     pub fn set_song_settings(&self, settings: &SongSettings) {
@@ -276,6 +283,23 @@ impl AudioPlayer {
          self.output_clipping.load(Ordering::Relaxed))
     }
 
+    pub(crate) fn take_stage_levels(&self, stage: MonitorStage) -> Option<StageLevels> {
+        let mut state = self.denoiser_state.try_lock()?;
+        let meter = state.stage_meter.as_mut()?;
+        meter.select(stage);
+        meter.take()
+    }
+
+    pub fn set_spectrum_enabled(&self, enabled: bool) {
+        if let Some(tap) = &self.spectrum {
+            tap.set_enabled(enabled);
+        }
+    }
+
+    pub fn take_spectrum(&self) -> Option<OutputSpectrum> {
+        self.spectrum.as_ref()?.take()
+    }
+
     pub fn reset_output_clip(&self) { self.output_clipping.store(false, Ordering::Relaxed); }
 
     pub fn set_denoiser_params(&self, params: DenoiserParams) {
@@ -304,7 +328,9 @@ impl AudioPlayer {
 
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let output_channels = config.channels() as usize;
-        let source_step = f64::from(self.sample_rate) / f64::from(config.sample_rate().0);
+        let output_rate = config.sample_rate().0;
+        let source_step = f64::from(self.sample_rate) / f64::from(output_rate);
+        let mut spectrum = self.spectrum.clone().map(|tap| (tap, SpectrumCapture::new()));
 
         let audition = self.audition.clone();
         let denoiser_arc = self.denoiser_state.clone();
@@ -344,12 +370,22 @@ impl AudioPlayer {
                                 data, output_channels, clip_l, clip_r,
                                 start, end, source_step, ds_opt,
                             );
+                            drop(ds_guard);
                             *preview = (next < end as f64).then_some((next, end));
+                            if let Some((tap, capture)) = &mut spectrum {
+                                capture.push(tap, data, output_channels, output_rate);
+                            }
                             return;
                         }
                     }
                     if !is_playing_arc.load(Ordering::Relaxed) || total_samples == 0 {
                         data.fill(0.0);
+                        if let Some(meter) = &mut ds_guard.stage_meter {
+                            meter.reset();
+                        }
+                        if let Some((_, capture)) = &mut spectrum {
+                            capture.reset();
+                        }
                         output_peaks[0].store(0, Ordering::Relaxed);
                         output_peaks[1].store(0, Ordering::Relaxed);
                         return;
@@ -365,6 +401,7 @@ impl AudioPlayer {
                         f64::from_bits(start), end, source_step, ds_opt,
                         looping.then_some(loop_from),
                     );
+                    drop(ds_guard);
                     let mut peaks = [0.0_f32; 2];
                     for frame in data.chunks_mut(output_channels) {
                         for channel in 0..output_channels.min(2) {
@@ -374,6 +411,9 @@ impl AudioPlayer {
                         }
                     }
                     for channel in 0..2 { output_peaks[channel].store(peaks[channel].to_bits(), Ordering::Relaxed); }
+                    if let Some((tap, capture)) = &mut spectrum {
+                        capture.push(tap, data, output_channels, output_rate);
+                    }
                     let end_reached = !looping && position >= end as f64;
                     let next = position.min(end as f64).to_bits();
                     if playhead_arc.compare_exchange(start, next, Ordering::Relaxed, Ordering::Relaxed).is_ok()
@@ -628,6 +668,44 @@ mod tests {
                 assert!((downsampled[i / 2] - output.0).abs() < 0.000001);
             }
         }
+    }
+
+    #[test]
+    fn reordering_the_live_chain_preserves_position_and_updates_the_stage_meter() {
+        use crate::audio::processing::{EffectStage, LimiterSettings};
+        let source = Arc::new(vec![0.4; 32]);
+        let mut player = AudioPlayer::new();
+        player
+            .load_song_clip(source.clone(), source.clone(), 48_000, 0, source.len())
+            .unwrap();
+        let mut settings = SongSettings::default();
+        for channel in &mut settings.channels {
+            channel.gain_db = 6.0206;
+            channel.limiter = LimiterSettings {
+                enabled: true,
+                ceiling_db: -6.0206,
+                ..Default::default()
+            };
+        }
+        let mut position = 0.0;
+        let stage = MonitorStage::Insert(EffectStage::Limiter);
+        assert!(player.take_stage_levels(stage).is_none());
+        for (expected, limiter_input) in [(0.5, 0.8), (0.8, 0.4)] {
+            player.set_song_settings(&settings);
+            let mut buffer = [0.0; 8];
+            {
+                let mut state = player.denoiser_state.lock();
+                position = render_output_filtered(
+                    &mut buffer, 2, &source, &source, position, source.len(), 1.0, Some(&mut state),
+                );
+            }
+            assert!(buffer.iter().all(|sample| (sample - expected).abs() < 0.0001));
+            let levels = player.take_stage_levels(stage).unwrap();
+            assert!((levels.before - limiter_input).abs() < 0.0001);
+            assert!((levels.difference - (limiter_input - 0.5_f32).max(0.0)).abs() < 0.0001);
+            settings.effect_chain.move_by(EffectStage::Limiter, -5);
+        }
+        assert_eq!(position, 8.0);
     }
 
     #[test]

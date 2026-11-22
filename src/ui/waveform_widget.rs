@@ -1,9 +1,7 @@
 use egui::{Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use crate::audio::recorder::StereoWaveformPoint;
-use crate::ui::theme::{
-    draw_recessed_well, ACCENT, BG_CARD, BG_INSET, BG_WINDOW, BORDER_LIGHT, CUT_ACCENT, EDIT_HIGHLIGHT, LED_AMBER, LED_RED,
-    LED_GREEN, TEXT_MUTED, TEXT_SECONDARY, WAVE_LEFT, WAVE_RIGHT,
-};
+use crate::ui::theme::palette;
+use crate::ui::widgets::paint::draw_recessed_well;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EditTool {
@@ -77,7 +75,7 @@ pub fn render_stereo_waveform(
 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter();
-    let p = crate::ui::theme::palette();
+    let p = palette(ui.ctx());
 
     // Studio Rack Plate Housing
     draw_recessed_well(painter, rect, 8.0, p.bg_inset);
@@ -261,7 +259,7 @@ pub fn render_stereo_waveform(
             if x2 > x1 + 1.0 {
                 let seg_r = Rect::from_min_max(Pos2::new(x1, wf_rect.min.y), Pos2::new(x2, wf_rect.max.y));
                 if is_p {
-                    painter.rect_filled(seg_r, 0.0, Color32::from_rgba_unmultiplied(160, 40, 20, 32));
+                    painter.rect_filled(seg_r, 0.0, p.red.gamma_multiply(0.12));
                     // Diagonal hatched pattern
                     let mut hx = x1;
                     while hx < x2 + seg_r.height() {
@@ -270,7 +268,7 @@ pub fn render_stereo_waveform(
                         let cp1 = Pos2::new(p1.x.clamp(x1, x2), p1.y);
                         let cp2 = Pos2::new(p2.x.clamp(x1, x2), p2.y);
                         if (cp1.x - cp2.x).abs() > 1.0 {
-                            painter.line_segment([cp1, cp2], Stroke::new(1.0, Color32::from_rgba_unmultiplied(220, 60, 30, 25)));
+                            painter.line_segment([cp1, cp2], Stroke::new(1.0, p.red.gamma_multiply(0.18)));
                         }
                         hx += 16.0;
                     }
@@ -279,16 +277,16 @@ pub fn render_stereo_waveform(
                             Pos2::new((x1 + x2) * 0.5, wf_rect.min.y + 14.0),
                             Vec2::new(140.0, 18.0),
                         );
-                        painter.rect_filled(badge, 3.0, Color32::from_rgba_unmultiplied(35, 18, 14, 210));
+                        painter.rect_filled(badge, 3.0, p.amber_dim);
 
-                        painter.text(badge.center(), egui::Align2::CENTER_CENTER, "⏸ PAUSE (WEGGELASSEN)", egui::FontId::monospace(9.0), LED_AMBER);
+                        painter.text(badge.center(), egui::Align2::CENTER_CENTER, "⏸ PAUSE (WEGGELASSEN)", egui::FontId::monospace(9.0), p.text_primary);
                     }
                 } else {
                     seg_active_count += 1;
                     let tint = if seg_active_count % 2 == 1 {
-                        Color32::from_rgb(12, 25, 28)
+                        p.teal_dim.gamma_multiply(0.40)
                     } else {
-                        Color32::from_rgb(15, 23, 36)
+                        p.bg_card.gamma_multiply(0.55)
                     };
                     if !markers.is_empty() {
                         painter.rect_filled(seg_r, 0.0, tint);
@@ -299,7 +297,7 @@ pub fn render_stereo_waveform(
                             egui::Align2::LEFT_CENTER,
                             format!("TRACK {:02}", seg_active_count),
                             egui::FontId::monospace(9.5),
-                            Color32::from_rgba_unmultiplied(190, 210, 240, 130),
+                            p.text_secondary,
                         );
                     }
                 }
@@ -314,9 +312,9 @@ pub fn render_stereo_waveform(
             let rx2 = time_to_screen_x(r_end).clamp(wf_rect.min.x, wf_rect.max.x);
             if rx2 > rx1 + 1.0 {
                 let reg_r = Rect::from_min_max(Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y));
-                painter.rect_filled(reg_r, 0.0, LED_AMBER.gamma_multiply(0.12));
-                painter.line_segment([Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx1, ruler_rect.max.y)], Stroke::new(1.5, LED_AMBER));
-                painter.line_segment([Pos2::new(rx2, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y)], Stroke::new(1.5, LED_AMBER));
+                painter.rect_filled(reg_r, 0.0, p.amber.gamma_multiply(0.12));
+                painter.line_segment([Pos2::new(rx1, wf_rect.min.y), Pos2::new(rx1, ruler_rect.max.y)], Stroke::new(1.5, p.amber));
+                painter.line_segment([Pos2::new(rx2, wf_rect.min.y), Pos2::new(rx2, ruler_rect.max.y)], Stroke::new(1.5, p.amber));
             }
         }
     }
@@ -327,12 +325,12 @@ pub fn render_stereo_waveform(
     // Center zero baselines for L & R
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_l_center), Pos2::new(wf_rect.max.x, lane_l_center)],
-        Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
+        Stroke::new(1.0, p.border_mid),
     );
     if !mono {
     painter.line_segment(
         [Pos2::new(wf_rect.min.x, lane_r_center), Pos2::new(wf_rect.max.x, lane_r_center)],
-        Stroke::new(1.0, Color32::from_rgb(32, 38, 50)),
+        Stroke::new(1.0, p.border_mid),
     );
     }
 
@@ -372,7 +370,7 @@ pub fn render_stereo_waveform(
             let h_l = (bot_l - top_l).max(1.0);
             painter.line_segment(
                 [Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)],
-                Stroke::new(bar_w, WAVE_LEFT),
+                Stroke::new(bar_w, p.wave_left),
             );
 
             // Lane R
@@ -381,7 +379,7 @@ pub fn render_stereo_waveform(
             let h_r = (bot_r - top_r).max(1.0);
             if !mono { painter.line_segment(
                 [Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)],
-                Stroke::new(bar_w, WAVE_RIGHT),
+                Stroke::new(bar_w, p.wave_right),
             ); }
         }
     } else {
@@ -390,14 +388,14 @@ pub fn render_stereo_waveform(
             egui::Align2::CENTER_CENTER,
             "Keine Audiodaten — Aufnahme in Tab 1 starten",
             egui::FontId::proportional(14.0),
-            TEXT_MUTED,
+            p.text_muted,
         );
     }
 
     // -------------------------------------------------------------
     // Timeline Ruler Bar (Dedicated Playhead scrub zone)
     // -------------------------------------------------------------
-    draw_recessed_well(painter, ruler_rect, 3.0, BG_CARD);
+    draw_recessed_well(painter, ruler_rect, 3.0, p.bg_card);
     let ruler_y = ruler_rect.min.y + 11.0;
 
     if total_duration_sec > 1.0 {
@@ -426,7 +424,7 @@ pub fn render_stereo_waveform(
                 // Ticks
                 painter.line_segment(
                     [Pos2::new(tx, ruler_rect.min.y + 2.0), Pos2::new(tx, ruler_rect.min.y + 7.0)],
-                    Stroke::new(1.0, BORDER_LIGHT),
+                    Stroke::new(1.0, p.border_mid),
                 );
 
                 let mins = (t / 60.0).floor() as u64;
@@ -438,7 +436,7 @@ pub fn render_stereo_waveform(
                     egui::Align2::CENTER_TOP,
                     label,
                     egui::FontId::monospace(9.5),
-                    TEXT_SECONDARY,
+                    p.text_secondary,
                 );
             }
             t += step_sec;
@@ -451,19 +449,19 @@ pub fn render_stereo_waveform(
         egui::Align2::LEFT_CENTER,
         "ZEIT",
         egui::FontId::monospace(9.0),
-        TEXT_MUTED,
+        p.text_muted,
     );
 
     // -------------------------------------------------------------
     // Minimap / Overview Scrollbar (Shows whole tape & drag window)
     // -------------------------------------------------------------
-    draw_recessed_well(painter, overview_rect, 3.0, BG_WINDOW);
+    draw_recessed_well(painter, overview_rect, 3.0, p.bg_window);
     painter.text(
         Pos2::new(rect.min.x + 10.0, overview_rect.center().y),
         egui::Align2::LEFT_CENTER,
         "ÜBERSICHT",
         egui::FontId::monospace(8.0),
-        TEXT_MUTED,
+        p.text_muted,
     );
 
     // Overview track blocks representation (Gesamtansicht der geschnittenen Stücke)
@@ -487,15 +485,15 @@ pub fn render_stereo_waveform(
                 let block_r = Rect::from_min_max(Pos2::new(x1, overview_rect.min.y + 1.0), Pos2::new(x2, overview_rect.max.y - 1.0));
                 let (fill, label) = if is_p {
                     (
-                        Color32::from_rgba_unmultiplied(160, 40, 20, 90),
+                        p.red_dim,
                         "⏸".to_string(),
                     )
                 } else {
                     active_idx += 1;
                     let bg = if active_idx % 2 == 1 {
-                        Color32::from_rgb(23, 47, 46)
+                        p.teal_dim
                     } else {
-                        Color32::from_rgb(28, 42, 62)
+                        p.bg_card
                     };
                     (bg, if markers.is_empty() { String::new() } else { format!("{:02}", active_idx) })
                 };
@@ -509,7 +507,7 @@ pub fn render_stereo_waveform(
                         egui::Align2::CENTER_CENTER,
                         label,
                         egui::FontId::monospace(8.5),
-                        Color32::WHITE,
+                        p.text_primary,
                     );
                 }
             }
@@ -522,7 +520,7 @@ pub fn render_stereo_waveform(
                 let orx2 = overview_rect.min.x + (r_end / total_duration_sec) as f32 * ov_w;
                 if orx2 > orx1 + 1.0 {
                     let ob_r = Rect::from_min_max(Pos2::new(orx1, overview_rect.min.y), Pos2::new(orx2, overview_rect.max.y));
-                    painter.rect_filled(ob_r, 2.0, LED_AMBER.gamma_multiply(0.27));
+                    painter.rect_filled(ob_r, 2.0, p.amber.gamma_multiply(0.27));
 
                 }
             }
@@ -539,7 +537,7 @@ pub fn render_stereo_waveform(
 
     let is_thumb_hovered = mouse_pos_opt.is_some_and(|p| thumb_rect.contains(p));
     if view_width_frac < 0.999 {
-        let thumb_edge = if is_thumb_hovered { ACCENT } else { BORDER_LIGHT };
+        let thumb_edge = if is_thumb_hovered { p.amber } else { p.border_mid };
         painter.hline(thumb_rect.x_range(), thumb_rect.bottom() - 1.0, Stroke::new(2.0, thumb_edge));
         painter.vline(thumb_rect.left(), thumb_rect.y_range(), Stroke::new(1.0, thumb_edge));
         painter.vline(thumb_rect.right(), thumb_rect.y_range(), Stroke::new(1.0, thumb_edge));
@@ -580,7 +578,7 @@ pub fn render_stereo_waveform(
         if x < wf_rect.min.x || x > wf_rect.max.x {
             continue;
         }
-        let stroke = Stroke::new(1.5, Color32::from_rgb(129, 222, 172));
+        let stroke = Stroke::new(1.5, p.teal);
         painter.extend(egui::Shape::dashed_line(
             &[Pos2::new(x, wf_rect.min.y), Pos2::new(x, ruler_rect.max.y)],
             stroke, 5.0, 4.0,
@@ -601,9 +599,9 @@ pub fn render_stereo_waveform(
         if mx >= wf_rect.min.x - 2.0 && mx <= wf_rect.max.x + 2.0 {
             let is_selected = *selected_marker_idx == Some(idx);
             let marker_color = if is_selected {
-                EDIT_HIGHLIGHT
+                p.edit_highlight
             } else {
-                LED_AMBER
+                p.amber
             };
 
             // Vertical razor cut line
@@ -632,7 +630,7 @@ pub fn render_stereo_waveform(
             }
 
             let flag_bg = if is_selected {
-                EDIT_HIGHLIGHT
+                p.edit_highlight
             } else {
                 marker_color
             };
@@ -667,7 +665,7 @@ pub fn render_stereo_waveform(
             // White playhead line
             painter.line_segment(
                 [Pos2::new(px, wf_rect.min.y), Pos2::new(px, ruler_rect.max.y)],
-                Stroke::new(2.0, Color32::WHITE),
+                Stroke::new(2.0, p.text_primary),
             );
 
             // Inverted triangle playhead handle on ruler
@@ -676,7 +674,7 @@ pub fn render_stereo_waveform(
                 Pos2::new(px + 7.0, ruler_rect.min.y),
                 Pos2::new(px, ruler_rect.min.y + 10.0),
             ];
-            painter.add(egui::Shape::convex_polygon(triangle_pts, Color32::WHITE, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(triangle_pts, p.text_primary, Stroke::NONE));
 
             // Top flag
             let top_pts = vec![
@@ -684,7 +682,7 @@ pub fn render_stereo_waveform(
                 Pos2::new(px + 5.0, wf_rect.min.y),
                 Pos2::new(px, wf_rect.min.y + 7.0),
             ];
-            painter.add(egui::Shape::convex_polygon(top_pts, Color32::WHITE, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(top_pts, p.text_primary, Stroke::NONE));
         }
     }
 
@@ -698,7 +696,7 @@ pub fn render_stereo_waveform(
                 // Pulsing green/cyan audition playhead
                 painter.line_segment(
                     [Pos2::new(ax, wf_rect.min.y), Pos2::new(ax, ruler_rect.max.y)],
-                    Stroke::new(2.0, LED_GREEN),
+                    Stroke::new(2.0, p.teal),
                 );
 
                 // Audition badge
@@ -708,14 +706,14 @@ pub fn render_stereo_waveform(
                     Pos2::new(ax, wf_rect.min.y + 36.0),
                     Vec2::new(100.0, 20.0),
                 );
-                painter.rect_filled(badge_rect, 4.0, Color32::from_rgb(16, 50, 30));
+                painter.rect_filled(badge_rect, 4.0, p.teal_dim);
 
                 painter.text(
                     badge_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     format!("VORHÖREN {:02}:{:02}", mins, secs),
                     egui::FontId::monospace(9.5),
-                    LED_GREEN,
+                    p.teal,
                 );
             }
         }
@@ -736,8 +734,8 @@ pub fn render_stereo_waveform(
             if is_scissor {
                 ui.ctx().set_cursor_icon(CursorIcon::None);
                 let cursor = [pos - Vec2::new(0.0, 8.0), pos + Vec2::new(0.0, 8.0)];
-                painter.line_segment(cursor, Stroke::new(5.0, BG_INSET));
-                painter.line_segment(cursor, Stroke::new(2.0, LED_AMBER));
+                painter.line_segment(cursor, Stroke::new(5.0, p.bg_inset));
+                painter.line_segment(cursor, Stroke::new(2.0, p.amber));
 
                 // Dashed vertical cutting line
                 let dash_len = 5.0;
@@ -745,7 +743,7 @@ pub fn render_stereo_waveform(
                 while cy < wf_rect.max.y {
                     painter.line_segment(
                         [Pos2::new(pos.x, cy), Pos2::new(pos.x, (cy + dash_len).min(wf_rect.max.y))],
-                        Stroke::new(1.5, LED_AMBER),
+                        Stroke::new(1.5, p.amber),
                     );
                     cy += dash_len * 2.0;
                 }
@@ -757,14 +755,14 @@ pub fn render_stereo_waveform(
                 );
                 let mins = (mouse_t / 60.0).floor() as u64;
                 let secs = (mouse_t % 60.0).floor() as u64;
-                painter.rect_filled(guide_tag, 4.0, Color32::from_rgb(45, 35, 10));
+                painter.rect_filled(guide_tag, 4.0, p.amber_dim);
 
                 painter.text(
                     guide_tag.center(),
                     egui::Align2::CENTER_CENTER,
                     format!("TRENNER {:02}:{:02}", mins, secs),
                     egui::FontId::monospace(9.5),
-                    LED_AMBER,
+                    p.text_primary,
                 );
             } else if active_tool == EditTool::Select {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
@@ -856,7 +854,7 @@ pub fn render_live_recording_waveform(
 
     let (rect, _response) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter();
-    let p = crate::ui::theme::palette();
+    let p = palette(ui.ctx());
 
     // Studio Rack Plate Housing
     draw_recessed_well(painter, rect, 8.0, p.bg_inset);
@@ -968,7 +966,7 @@ pub fn render_live_recording_waveform(
 
     // Glowing REC Playhead
     if is_recording {
-        let rec_col = LED_RED;
+        let rec_col = p.red;
         painter.line_segment(
             [Pos2::new(playhead_x, wf_rect.min.y), Pos2::new(playhead_x, ruler_rect.max.y)],
             Stroke::new(2.0, rec_col),
@@ -1003,7 +1001,7 @@ pub fn render_live_recording_waveform(
         if x <= wf_rect.max.x {
             painter.line_segment(
                 [Pos2::new(x, ruler_rect.min.y + 1.0), Pos2::new(x, ruler_rect.min.y + 4.0)],
-                Stroke::new(1.0, Color32::from_rgb(80, 85, 100)),
+                Stroke::new(1.0, p.border_mid),
             );
             let mins = (t / 60.0).floor() as u64;
             let secs = (t % 60.0).floor() as u64;
@@ -1012,7 +1010,7 @@ pub fn render_live_recording_waveform(
                 egui::Align2::CENTER_CENTER,
                 format!("{:02}:{:02}", mins, secs),
                 egui::FontId::monospace(9.0),
-                TEXT_MUTED,
+                p.text_muted,
             );
         }
         t += step_sec;
@@ -1072,8 +1070,10 @@ pub fn render_detail_magnifier_scope(
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter();
 
-    // Recessed dark oscilloscope plate
-    draw_recessed_well(painter, rect, 6.0, BG_INSET);
+    let p = palette(ui.ctx());
+
+    // Recessed oscilloscope plate
+    draw_recessed_well(painter, rect, 6.0, p.bg_inset);
 
     let header_w = 38.0;
     let scope_left = rect.min.x + header_w + 6.0;
@@ -1124,8 +1124,8 @@ pub fn render_detail_magnifier_scope(
     let lane_r_center = lane_r_top + lane_h * 0.5;
 
     // Badges on left
-    draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 5.0, lane_l_top), Pos2::new(rect.min.x + header_w, lane_l_bot)), "L", WAVE_LEFT);
-    draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 5.0, lane_r_top), Pos2::new(rect.min.x + header_w, lane_r_bot)), "R", WAVE_RIGHT);
+    draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 5.0, lane_l_top), Pos2::new(rect.min.x + header_w, lane_l_bot)), "L", p.wave_left);
+    draw_track_badge(painter, Rect::from_min_max(Pos2::new(rect.min.x + 5.0, lane_r_top), Pos2::new(rect.min.x + header_w, lane_r_bot)), "R", p.wave_right);
 
     let t_to_x = |t: f64| -> f32 {
         let frac = ((t - start_t) / window_span_sec).clamp(0.0, 1.0) as f32;
@@ -1145,8 +1145,8 @@ pub fn render_detail_magnifier_scope(
         let cut_x = t_to_x(active_cut_time);
         let left_zone = Rect::from_min_max(scope_rect.min, Pos2::new(cut_x, scope_rect.max.y));
         let right_zone = Rect::from_min_max(Pos2::new(cut_x, scope_rect.min.y), scope_rect.max);
-        painter.rect_filled(left_zone, 2.0, CUT_ACCENT.gamma_multiply(0.08));
-        painter.rect_filled(right_zone, 2.0, ACCENT.gamma_multiply(0.07));
+        painter.rect_filled(left_zone, 2.0, p.edit_highlight.gamma_multiply(0.08));
+        painter.rect_filled(right_zone, 2.0, p.amber.gamma_multiply(0.07));
 
         if let Some(idx) = selected_marker_idx {
             if cut_x - scope_rect.min.x > 75.0 {
@@ -1155,7 +1155,7 @@ pub fn render_detail_magnifier_scope(
                     egui::Align2::LEFT_CENTER,
                     format!("◀ ENDE T{:02}", idx + 1),
                     egui::FontId::monospace(8.5),
-                    Color32::from_rgba_unmultiplied(160, 185, 230, 160),
+                    p.text_secondary,
                 );
             }
             if scope_rect.max.x - cut_x > 85.0 {
@@ -1164,7 +1164,7 @@ pub fn render_detail_magnifier_scope(
                     egui::Align2::RIGHT_CENTER,
                     format!("START T{:02} ▶", idx + 2),
                     egui::FontId::monospace(8.5),
-                    Color32::from_rgba_unmultiplied(110, 231, 183, 180),
+                    p.teal,
                 );
             }
         }
@@ -1173,11 +1173,11 @@ pub fn render_detail_magnifier_scope(
     // Center zero lines (Nulldurchgang-Achsen)
     painter.line_segment(
         [Pos2::new(scope_left, lane_l_center), Pos2::new(scope_right, lane_l_center)],
-        Stroke::new(1.0, Color32::from_rgb(38, 46, 62)),
+        Stroke::new(1.0, p.border_mid),
     );
     painter.line_segment(
         [Pos2::new(scope_left, lane_r_center), Pos2::new(scope_right, lane_r_center)],
-        Stroke::new(1.0, Color32::from_rgb(38, 46, 62)),
+        Stroke::new(1.0, p.border_mid),
     );
 
     // Adaptive Grid lines
@@ -1200,14 +1200,14 @@ pub fn render_detail_magnifier_scope(
             let is_major = ((grid_t / step_major) - (grid_t / step_major).round()).abs() < 0.001;
 
             let grid_stroke = if is_major {
-                Stroke::new(1.0, Color32::from_rgb(42, 48, 64))
+                Stroke::new(1.0, p.border_subtle)
             } else {
-                Stroke::new(0.5, Color32::from_rgb(24, 28, 38))
+                Stroke::new(0.5, p.border_subtle.gamma_multiply(0.6))
             };
             painter.line_segment([Pos2::new(gx, scope_rect.min.y), Pos2::new(gx, scope_rect.max.y)], grid_stroke);
 
             if is_major {
-                painter.line_segment([Pos2::new(gx, ruler_rect.min.y), Pos2::new(gx, ruler_rect.min.y + 4.0)], Stroke::new(1.0, Color32::from_rgb(90, 100, 120)));
+                painter.line_segment([Pos2::new(gx, ruler_rect.min.y), Pos2::new(gx, ruler_rect.min.y + 4.0)], Stroke::new(1.0, p.border_mid));
                 let m = (grid_t / 60.0).floor() as u64;
                 let s = grid_t % 60.0;
                 let label = if window_span_sec <= 1.2 {
@@ -1222,7 +1222,7 @@ pub fn render_detail_magnifier_scope(
                     egui::Align2::CENTER_TOP,
                     label,
                     egui::FontId::monospace(8.5),
-                    Color32::from_rgb(135, 145, 165),
+                    p.text_secondary,
                 );
             }
         }
@@ -1299,12 +1299,12 @@ pub fn render_detail_magnifier_scope(
             let top_l = lane_l_center - (amplitude(max_l) * (lane_h * 0.47));
             let bot_l = lane_l_center - (amplitude(min_l) * (lane_h * 0.47));
             let h_l = (bot_l - top_l).max(1.0);
-            painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)], Stroke::new(col_w, WAVE_LEFT));
+            painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)], Stroke::new(col_w, p.wave_left));
 
             let top_r = lane_r_center - (amplitude(max_r) * (lane_h * 0.47));
             let bot_r = lane_r_center - (amplitude(min_r) * (lane_h * 0.47));
             let h_r = (bot_r - top_r).max(1.0);
-            painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)], Stroke::new(col_w, WAVE_RIGHT));
+            painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)], Stroke::new(col_w, p.wave_right));
         }
     } else {
         let n_pts = waveform_data.len();
@@ -1331,12 +1331,12 @@ pub fn render_detail_magnifier_scope(
                 let top_l = lane_l_center - (amplitude(pt.max_l) * (lane_h * 0.47));
                 let bot_l = lane_l_center - (amplitude(pt.min_l) * (lane_h * 0.47));
                 let h_l = (bot_l - top_l).max(1.0);
-                painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)], Stroke::new(col_w, WAVE_LEFT));
+                painter.line_segment([Pos2::new(x, top_l), Pos2::new(x, top_l + h_l)], Stroke::new(col_w, p.wave_left));
 
                 let top_r = lane_r_center - (amplitude(pt.max_r) * (lane_h * 0.47));
                 let bot_r = lane_r_center - (amplitude(pt.min_r) * (lane_h * 0.47));
                 let h_r = (bot_r - top_r).max(1.0);
-                painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)], Stroke::new(col_w, WAVE_RIGHT));
+                painter.line_segment([Pos2::new(x, top_r), Pos2::new(x, top_r + h_r)], Stroke::new(col_w, p.wave_right));
             }
         }
     }
@@ -1360,9 +1360,9 @@ pub fn render_detail_magnifier_scope(
                     .unwrap_or(false);
 
                 let t_col = if is_hovered {
-                    Color32::WHITE
+                    p.text_primary
                 } else {
-                    Color32::from_rgb(45, 212, 191) // High-contrast Studio Mint/Cyan for Transients
+                    p.teal
                 };
 
                 // Vertical transient line
@@ -1383,7 +1383,7 @@ pub fn render_detail_magnifier_scope(
                 // Compact badge showing transient index & delta from cut marker
                 let diff_sec = tp.time_sec - active_cut_time;
                 let badge_label = format!("⚡{} {:+.2}s", t_idx + 1, diff_sec);
-                painter.rect_filled(pill_rect, 3.0, Color32::from_rgba_unmultiplied(12, 34, 34, 230));
+                painter.rect_filled(pill_rect, 3.0, p.teal_dim);
 
                 painter.text(
                     pill_rect.center(),
@@ -1411,7 +1411,7 @@ pub fn render_detail_magnifier_scope(
         if m >= start_t && m <= audio_end_t {
             let mx = t_to_x(m);
             let is_sel = selected_marker_idx == Some(m_i);
-            let col = if is_sel { EDIT_HIGHLIGHT } else { LED_AMBER };
+            let col = if is_sel { p.edit_highlight } else { p.amber };
             painter.line_segment(
                 [Pos2::new(mx, scope_rect.min.y), Pos2::new(mx, ruler_rect.max.y)],
                 Stroke::new(if is_sel { 2.5 } else { 1.8 }, col),
@@ -1443,14 +1443,14 @@ pub fn render_detail_magnifier_scope(
         let px = t_to_x(current_playhead_sec);
         painter.line_segment(
             [Pos2::new(px, scope_rect.min.y), Pos2::new(px, ruler_rect.max.y)],
-            Stroke::new(1.5, Color32::WHITE),
+            Stroke::new(1.5, p.text_primary),
         );
         let tri = vec![
             Pos2::new(px - 5.0, ruler_rect.min.y),
             Pos2::new(px + 5.0, ruler_rect.min.y),
             Pos2::new(px, ruler_rect.min.y + 8.0),
         ];
-        painter.add(egui::Shape::convex_polygon(tri, Color32::WHITE, Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(tri, p.text_primary, Stroke::NONE));
     }
 
     // Ghost Cut Guide when hovering inside the Lupe waveform
@@ -1458,7 +1458,7 @@ pub fn render_detail_magnifier_scope(
         if scope_rect.contains(pos) && hovered_scope_marker.is_none() && interaction.clicked_transient_time.is_none() {
             painter.line_segment(
                 [Pos2::new(pos.x, scope_rect.min.y), Pos2::new(pos.x, scope_rect.max.y)],
-                Stroke::new(1.0, EDIT_HIGHLIGHT.gamma_multiply(0.44)),
+                Stroke::new(1.0, p.edit_highlight.gamma_multiply(0.44)),
             );
         }
     }
@@ -1508,6 +1508,34 @@ pub fn render_detail_magnifier_scope(
 #[cfg(test)]
 mod viewport_tests {
     use super::*;
+
+    #[test]
+    fn obsidian_waveform_ruler_uses_the_dark_display_surface() {
+        use crate::ui::theme::{apply_theme, ThemeMode};
+
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, ThemeMode::Obsidian);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 360.0))),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_stereo_waveform(
+                    ui, &[], 10.0, 0.0, false, &[], &[], &[], &mut None, None,
+                    &mut 1.0, &mut 1.0, 128.0, &mut 0.0, EditTool::Pointer,
+                    false, None, false,
+                );
+            });
+        });
+        let ruler_fill = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.rect.height() == 22.0 && rect.rect.width() > 380.0 => {
+                Some(rect.fill)
+            }
+            _ => None,
+        });
+        assert_eq!(ruler_fill, Some(crate::ui::theme::palette(&ctx).bg_card));
+    }
 
     #[test]
     fn playback_follows_at_two_thirds_even_at_end_and_when_seeking_back() {

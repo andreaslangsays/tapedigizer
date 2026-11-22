@@ -1,8 +1,9 @@
 use crate::audio::meter::MeterLevels;
-use crate::ui::theme::{
-    draw_keyboard_focus, draw_recessed_well, paint_rounded_vertical_gradient, palette, RADIUS_WELL,
+use crate::ui::theme::{palette, OLED_PALETTE, RADIUS_WELL};
+use crate::ui::widgets::paint::{
+    draw_keyboard_focus, draw_recessed_well, paint_rounded_vertical_gradient,
 };
-use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2};
+use egui::{Color32, Pos2, Rect, RichText, Stroke, Ui, Vec2};
 
 pub fn render_stereo_meter(
     ui: &mut Ui,
@@ -11,7 +12,7 @@ pub fn render_stereo_meter(
     reset_label: &str,
     clipping_label: &str,
 ) -> bool {
-    let p = palette();
+    let p = palette(ui.ctx());
     let desired_size = Vec2::new(ui.available_width().max(260.0), 72.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
 
@@ -165,7 +166,7 @@ fn draw_led_ladder_bar(
     _rms_db: f32,
     peak_hold_db: f32,
 ) {
-    let p = palette();
+    let p = palette(painter.ctx());
     let well_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height));
     painter.rect_filled(well_rect, 2.0, p.bg_inset);
 
@@ -226,7 +227,7 @@ fn format_db(db: f32) -> String {
 }
 
 fn draw_digital_db_box(painter: &egui::Painter, rect: Rect, db: f32) {
-    let p = palette();
+    let p = palette(painter.ctx());
     let text = format_db(db);
     let col = if db >= -0.5 {
         p.red
@@ -246,7 +247,7 @@ fn draw_digital_db_box(painter: &egui::Painter, rect: Rect, db: f32) {
 }
 
 fn draw_clip_lamp(painter: &egui::Painter, rect: Rect, is_clipping: bool) {
-    let p = palette();
+    let p = palette(painter.ctx());
     if is_clipping {
         painter.rect_filled(rect, 4.0, p.red);
     } else {
@@ -349,7 +350,7 @@ fn draw_single_vu_dial(
     peak_db: f32,
     clipping: bool,
 ) {
-    let p = palette();
+    let p = palette(painter.ctx());
     paint_rounded_vertical_gradient(painter, rect, RADIUS_WELL, p.vu_face_top, p.vu_face_bottom);
     painter.rect_stroke(
         rect.shrink(0.5),
@@ -454,4 +455,89 @@ fn draw_single_vu_dial(
         egui::FontId::monospace(9.5),
         if peak_hot { p.red } else { p.amber },
     );
+}
+
+pub fn meter_readout(ui: &mut Ui, label: &str, value: String, color: Color32) {
+    let p = palette(ui.ctx());
+    ui.add(
+        egui::Label::new(
+            RichText::new(label)
+                .size(11.0)
+                .monospace()
+                .color(p.text_muted),
+        )
+        .truncate(),
+    );
+    ui.add(egui::Label::new(RichText::new(value).size(19.0).monospace().color(color)).truncate());
+}
+
+/// Kompaktes dunkles vertikales Stereo-LED-Meter (wie im Stitch Mix-/Ausgangs-Panel).
+pub fn draw_vertical_stereo_meter(
+    ui: &mut Ui,
+    peak_l_db: f32,
+    peak_r_db: f32,
+    is_clipping: bool,
+    height: f32,
+) -> bool {
+    let p = OLED_PALETTE;
+    let desired = Vec2::new(66.0, height.max(96.0));
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    let painter = ui.painter();
+
+    // Immer dunkles OLED-Gehäuse wie im Stitch-Entwurf
+    painter.rect_filled(rect, RADIUS_WELL, p.bg_inset);
+    painter.rect_stroke(rect.shrink(0.5), RADIUS_WELL, Stroke::new(0.75, p.border_subtle));
+
+    let peak_max = peak_l_db.max(peak_r_db);
+    let peak_txt = if peak_max <= -59.5 {
+        "-∞ dB".to_string()
+    } else {
+        format!("{peak_max:+.1}")
+    };
+    painter.text(
+        Pos2::new(rect.center().x, rect.min.y + 8.0),
+        egui::Align2::CENTER_TOP,
+        peak_txt,
+        egui::FontId::monospace(9.5),
+        if is_clipping {
+            p.red
+        } else {
+            p.wave_right
+        },
+    );
+
+    let bar_top = rect.min.y + 24.0;
+    let bar_bot = rect.max.y - 18.0;
+    let bar_h = (bar_bot - bar_top).max(20.0);
+    let segments = 14usize;
+    let gap = 2.0;
+    let seg_h = ((bar_h - (segments as f32 - 1.0) * gap) / segments as f32).max(2.0);
+
+    for (col_idx, db) in [(0usize, peak_l_db), (1usize, peak_r_db)] {
+        let x = rect.center().x + if col_idx == 0 { -13.0 } else { 3.0 };
+        let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        let lit = (norm * segments as f32).round() as usize;
+        for i in 0..segments {
+            let y = bar_bot - (i as f32 + 1.0) * seg_h - (i as f32) * gap;
+            let seg_db = -60.0 + ((i + 1) as f32 / segments as f32) * 60.0;
+            let (on_col, off_col) = if seg_db >= -1.0 {
+                (p.red, p.red_dim)
+            } else if seg_db >= -6.0 {
+                (p.amber, p.amber_dim)
+            } else {
+                (p.teal, p.teal_dim)
+            };
+            let sr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(10.0, seg_h));
+            painter.rect_filled(sr, 1.5, if i < lit { on_col } else { off_col });
+        }
+        painter.text(
+            Pos2::new(x + 5.0, rect.max.y - 5.0),
+            egui::Align2::CENTER_BOTTOM,
+            if col_idx == 0 { "L" } else { "R" },
+            egui::FontId::monospace(9.0),
+            p.text_muted,
+        );
+    }
+
+    response.clicked()
 }

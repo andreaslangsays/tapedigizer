@@ -1,16 +1,23 @@
 //! A focused single-track workspace under Editing: local transport, nondestructive processing and no neighboring songs.
-use super::theme::{
-    bevel_button, bevel_button_sized, draw_recessed_well, draw_vertical_stereo_meter,
-    hardware_fader, module_card, palette, panel_title, rack_columns, rotary_colored,
-    rotary_colored_sized, section_title, segmented_control, surface_bay, time_display, BevelStyle,
-    ACCENT, FX_ACCENT, HEIGHT_CONTROL, LED_AMBER, LED_RED, RADIUS_WELL,
-};
+use super::effect_rack;
+use super::eq_editor::EqEditor;
+use crate::audio::spectrum::OutputSpectrum;
+use crate::audio::stage_meter::StageLevels;
+use super::meter_widget::draw_vertical_stereo_meter;
+use super::theme::{palette, HEIGHT_CONTROL, OLED_PALETTE, RADIUS_WELL};
+use super::widgets::button::{bevel_button, bevel_button_sized, segmented_control, BevelStyle};
+use super::widgets::fader::hardware_fader;
+use super::widgets::field::bounded_combo;
+use super::widgets::paint::draw_recessed_well;
+use super::widgets::panel::{module_contents, panel_row, panel_title, rack_columns, surface_bay, time_display, PanelStyle};
+use super::widgets::rotary::{rotary, RotaryAccent, RotarySize, RotarySpec};
 use super::waveform_widget::{render_stereo_waveform, EditTool};
 use crate::audio::denoiser::{AuditionMode, NoiseProfile};
 use crate::audio::meter::{linear_to_db, MeterLevels};
 use crate::audio::player::AudioPlayer;
 use crate::audio::processing::{
-    ChannelSettings, DynamicsSettings, LimiterSettings, Routing, SongExportMode, SongSettings,
+    ChannelSettings, DynamicsSettings, EffectStage, LimiterSettings, MonitorStage, Routing,
+    SongExportMode, SongProcessor, SongSettings,
 };
 use crate::audio::recorder::StereoWaveformPoint;
 use crate::i18n::Language;
@@ -25,22 +32,8 @@ pub enum SongEditorAction {
     Export(usize),
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Module {
-    Channels,
-    Restoration,
-    Equalizer,
-    Dynamics,
-    #[default]
-    Mix,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum DynamicsUnit {
-    #[default]
-    Compressor,
-    Expander,
-    Limiter,
+fn is_dynamics(stage: EffectStage) -> bool {
+    matches!(stage, EffectStage::Compressor | EffectStage::Expander | EffectStage::Limiter)
 }
 
 type ClipKey = (usize, usize, usize, usize, u32);
@@ -59,8 +52,11 @@ pub struct SongEditor {
     source_view: bool,
     select_tool: bool,
     channel: usize,
-    module: Module,
-    dynamics_unit: DynamicsUnit,
+    module: MonitorStage,
+    stage_levels: Option<StageLevels>,
+    eq_editor: EqEditor,
+    spectrum: Option<OutputSpectrum>,
+    normalize_target_db: f32,
     active: bool,
     error: Option<String>,
     edit_transaction: Option<MarkerSnapshot>,
@@ -82,8 +78,11 @@ impl Default for SongEditor {
             source_view: false,
             select_tool: false,
             channel: 0,
-            module: Module::Mix,
-            dynamics_unit: DynamicsUnit::Compressor,
+            module: MonitorStage::Mix,
+            stage_levels: None,
+            eq_editor: EqEditor::default(),
+            spectrum: None,
+            normalize_target_db: -0.3,
             active: false,
             error: None,
             edit_transaction: None,
@@ -94,28 +93,25 @@ impl Default for SongEditor {
 impl SongEditor {
     #[cfg(test)]
     pub(crate) fn select_layout_test_module(&mut self, index: usize) {
-        self.module = [
-            Module::Mix,
-            Module::Channels,
-            Module::Restoration,
-            Module::Equalizer,
-            Module::Dynamics,
-            Module::Dynamics,
-        ][index.min(5)];
-        self.dynamics_unit = match index {
-            4 => DynamicsUnit::Expander,
-            5 => DynamicsUnit::Limiter,
-            _ => DynamicsUnit::Compressor,
+        self.module = match index {
+            0 => MonitorStage::Mix,
+            i => MonitorStage::Insert(EffectStage::ALL[i - 1]),
         };
     }
 
     #[cfg(test)]
     pub(crate) fn layout_test_module(&self) -> u8 {
-        self.module as u8
+        match self.module {
+            MonitorStage::Mix => 0,
+            MonitorStage::Insert(stage) => stage as u8 + 1,
+        }
     }
 
     pub fn suspend(&mut self) {
         self.player.pause();
+        self.player.set_spectrum_enabled(false);
+        self.spectrum = None;
+        self.stage_levels = None;
         self.active = false;
     }
 
@@ -186,6 +182,8 @@ impl SongEditor {
         self.waveform.clear();
         self.mono_wave_key = None;
         self.mono_waveform.clear();
+        self.spectrum = None;
+        self.stage_levels = None;
         if let Err(error) =
             self.player
                 .load_song_clip(left.clone(), right.clone(), rate, start, end)
@@ -250,6 +248,58 @@ impl SongEditor {
         }
     }
 
+    fn normalize_song(
+        &mut self,
+        settings: &mut SongSettings,
+        left: &[f32],
+        right: &[f32],
+        rate: u32,
+        track: &TrackInfo,
+        lang: Language,
+    ) {
+        let start = (track.start_seconds * f64::from(rate)).round() as usize;
+        let end = ((track.end_seconds * f64::from(rate)).round() as usize)
+            .min(left.len())
+            .min(right.len());
+        if start >= end {
+            self.error = Some(if lang == Language::De {
+                "Track enthält keine Audiodaten zum Normalisieren.".into()
+            } else {
+                "Track has no audio samples to normalize.".into()
+            });
+            return;
+        }
+        let mut probe = settings.clone();
+        probe.gain_db = 0.0;
+        let mut processor = SongProcessor::new(rate, &probe);
+        let latency = processor.latency();
+        let mut peak = 0.0_f32;
+        let mut frame_index = 0usize;
+        for (&l, &r) in left[start..end].iter().zip(&right[start..end]) {
+            let (out_l, out_r) = processor.process_frame(l, r);
+            if frame_index >= latency {
+                peak = peak.max(out_l.abs()).max(out_r.abs());
+            }
+            frame_index += 1;
+        }
+        for _ in 0..latency {
+            let (out_l, out_r) = processor.process_frame(0.0, 0.0);
+            peak = peak.max(out_l.abs()).max(out_r.abs());
+        }
+        if peak <= 1e-6 || !peak.is_finite() {
+            self.error = Some(if lang == Language::De {
+                "Track enthält kein messbares Signal zum Normalisieren.".into()
+            } else {
+                "Track has no measurable signal to normalize.".into()
+            });
+            return;
+        }
+        let peak_db = 20.0 * peak.log10();
+        let needed_db = (self.normalize_target_db.clamp(-6.0, 0.0) - peak_db).clamp(-24.0, 12.0);
+        settings.gain_db = (needed_db * 100.0).round() / 100.0;
+        self.error = None;
+    }
+
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -264,6 +314,7 @@ impl SongEditor {
         presets: &[NoiseProfile],
         lang: Language,
     ) -> Option<SongEditorAction> {
+        let p = palette(ui.ctx());
         let t = |de, en| if lang == Language::De { de } else { en };
         let available = ui.available_height();
         let requested = if self.active {
@@ -324,6 +375,7 @@ impl SongEditor {
                 inherited
             });
         self.update_monitor(&settings);
+        let monitor_before = (self.original, self.solo, self.mono_audition);
         let before = settings.clone();
         let mut adopt = false;
         let (l, r, clip) = self.player.output_peaks();
@@ -355,24 +407,25 @@ impl SongEditor {
                     track.duration_formatted()
                 );
                 let combo_w = (ui.available_width() - 400.0).clamp(130.0, 400.0);
-                egui::ComboBox::from_id_salt("song_studio_selector")
-                    .selected_text(title)
-                    .width(combo_w)
-                    .truncate()
-                    .show_ui(ui, |ui| {
+                bounded_combo(
+                    ui,
+                    egui::ComboBox::from_id_salt("song_studio_selector").selected_text(&title),
+                    combo_w,
+                    |ui| {
                         for track in tracks.iter().filter(|track| !track.is_pause) {
-                            ui.selectable_value(
-                                &mut choice,
-                                Some(track.segment_index),
-                                format!(
-                                    "{:02} · {}   {}",
-                                    track.index,
-                                    track.title,
-                                    track.duration_formatted()
-                                ),
+                            let label = format!(
+                                "{:02} · {}   {}",
+                                track.index,
+                                track.title,
+                                track.duration_formatted()
                             );
+                            ui.selectable_value(&mut choice, Some(track.segment_index), &label)
+                                .on_hover_text(label);
                         }
-                    });
+                    },
+                )
+                .response
+                .on_hover_text(title);
                 segmented_control(
                     ui,
                     "song_ab_monitor",
@@ -432,7 +485,7 @@ impl SongEditor {
                     ui.checkbox(&mut self.view.loop_playback, t("Schleife", "Loop"));
                     ui.checkbox(&mut self.mono_audition, t("Mono", "Mono"));
                     if self.original || self.solo.is_some() || self.mono_audition {
-                        ui.colored_label(LED_AMBER, t("Monitor", "Monitor"));
+                        ui.colored_label(p.amber, t("Monitor", "Monitor"));
                     }
                 });
                 let meter_label = t("Ausgang · dBFS", "Output · dBFS");
@@ -461,7 +514,7 @@ impl SongEditor {
         }
         if let Some(error) = self.error.clone() {
             ui.horizontal(|ui| {
-                ui.colored_label(LED_RED, error);
+                ui.colored_label(p.red, error);
                 if bevel_button(ui, "×", BevelStyle::Compact).clicked() {
                     self.error = None;
                 }
@@ -469,9 +522,9 @@ impl SongEditor {
         }
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            section_title(ui, t("Song-Wellenform", "Song waveform"), FX_ACCENT);
+            panel_title(ui, t("Song-Wellenform", "Song waveform"));
             ui.colored_label(
-                ACCENT,
+                p.amber,
                 if self.source_view || self.original {
                     t("Quelle · L/R", "Source · L/R")
                 } else {
@@ -547,7 +600,7 @@ impl SongEditor {
             self.selection,
             &mut self.view.zoom,
             &mut self.view.vertical_zoom,
-            (available * 0.13).clamp(60.0, 124.0),
+            (available * 0.10).clamp(60.0, 124.0),
             &mut self.view.scroll,
             if self.select_tool {
                 EditTool::Select
@@ -565,22 +618,11 @@ impl SongEditor {
             self.selection = Some(region);
         }
         ui.add_space(6.0);
+        let previous_module = self.module;
         // Processing-Rack: skalierend & ohne Scrollbar (alles direkt im Blick)
         surface_bay(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                segmented_control(
-                    ui,
-                    "song_processing_signal_flow",
-                    &mut self.module,
-                    &[
-                        (Module::Channels, t("Kanäle", "Channels"), ""),
-                        (Module::Restoration, t("Restauration", "Restoration"), ""),
-                        (Module::Equalizer, "Equalizer", ""),
-                        (Module::Dynamics, t("Dynamik", "Dynamics"), ""),
-                        (Module::Mix, t("Mix & Ausgabe", "Mix & export"), ""),
-                    ],
-                    HEIGHT_CONTROL,
-                );
+                effect_rack::selector(ui, &mut self.module, &settings, lang);
                 if !independent {
                     ui.add_space(6.0);
                     if bevel_button(
@@ -598,20 +640,40 @@ impl SongEditor {
                     }
                 }
             });
+            if self.module != previous_module || !self.player.is_playing() {
+                self.stage_levels = None;
+            }
+            if self.player.is_playing() {
+                if let Some(levels) = self.player.take_stage_levels(self.module) {
+                    self.stage_levels = Some(levels);
+                }
+            }
+            if self.module == MonitorStage::Mix {
+                ui.horizontal(|ui| effect_rack::comparison(ui, self.stage_levels, lang));
+            }
             ui.add_space(4.0);
             let rack_h = ui.available_height();
-            let knob_size = if rack_h < 270.0 {
-                36.0
-            } else if rack_h < 330.0 {
-                42.0
+            let show_spectrum = self.module == MonitorStage::Insert(EffectStage::Equalizer) && self.player.is_playing();
+            self.player.set_spectrum_enabled(show_spectrum);
+            if show_spectrum {
+                if let Some(spectrum) = self.player.take_spectrum() {
+                    self.spectrum = Some(spectrum);
+                }
             } else {
-                50.0
+                self.spectrum = None;
+            }
+            let knob_size = if rack_h < 270.0 {
+                RotarySize::Compact
+            } else if rack_h < 330.0 {
+                RotarySize::Medium
+            } else {
+                RotarySize::Large
             };
             ui.scope(|ui| {
-                        if self.module == Module::Mix {
-                            let p = palette();
-                            rack_columns(ui, 3, |columns| {
-                                module_card(
+                        if self.module == MonitorStage::Mix {
+                            let p = palette(ui.ctx());
+                            panel_row(ui, 3, PanelStyle::Module, |columns| {
+                                module_contents(
                                     &mut columns[0],
                                     "01",
                                     t("Kanal & Routing", "Channel & routing"),
@@ -656,21 +718,27 @@ impl SongEditor {
                                             );
                                         } else if settings.routing == Routing::Stereo {
                                             ui.columns(2, |cols| {
-                                                rotary_colored(
+                                                rotary(
                                                     &mut cols[0],
-                                                    t("Balance", "Balance"),
                                                     &mut settings.balance_db,
-                                                    -12.0..=12.0,
-                                                    " dB",
-                                                    p.accent_top,
+                                                    RotarySpec::new(
+                                                        t("Balance", "Balance"),
+                                                        -12.0..=12.0,
+                                                        " dB",
+                                                        RotaryAccent::Primary,
+                                                        RotarySize::Standard,
+                                                    ),
                                                 );
-                                                rotary_colored(
+                                                rotary(
                                                     &mut cols[1],
-                                                    t("Breite", "Width"),
                                                     &mut settings.width,
-                                                    0.0..=2.0,
-                                                    " ×",
-                                                    p.teal,
+                                                    RotarySpec::new(
+                                                        t("Breite", "Width"),
+                                                        0.0..=2.0,
+                                                        " ×",
+                                                        RotaryAccent::Signal,
+                                                        RotarySize::Standard,
+                                                    ),
                                                 );
                                             });
                                             ui.checkbox(
@@ -681,7 +749,7 @@ impl SongEditor {
                                     },
                                 );
 
-                                module_card(
+                                module_contents(
                                     &mut columns[1],
                                     "02",
                                     t("Ausgangspegel", "Output level"),
@@ -691,14 +759,16 @@ impl SongEditor {
                                         if settings.routing == Routing::Stereo {
                                             let meter_h = (rack_h - 110.0).clamp(80.0, 118.0);
                                             ui.columns(2, |pair| {
-                                                rotary_colored_sized(
+                                                rotary(
                                                     &mut pair[0],
-                                                    t("Song-Pegel", "Song gain"),
                                                     &mut settings.gain_db,
-                                                    -24.0..=12.0,
-                                                    " dB",
-                                                    p.accent_top,
-                                                    knob_size,
+                                                    RotarySpec::new(
+                                                        t("Song-Pegel", "Song gain"),
+                                                        -24.0..=12.0,
+                                                        " dB",
+                                                        RotaryAccent::Primary,
+                                                        knob_size,
+                                                    ),
                                                 );
                                                 pair[1].vertical_centered(|ui| {
                                                     if draw_vertical_stereo_meter(
@@ -714,28 +784,70 @@ impl SongEditor {
                                             });
                                         } else {
                                             ui.columns(2, |cols| {
-                                                rotary_colored(
+                                                rotary(
                                                     &mut cols[0],
-                                                    t("Song-Pegel", "Song gain"),
                                                     &mut settings.gain_db,
-                                                    -24.0..=12.0,
-                                                    " dB",
-                                                    p.accent_top,
+                                                    RotarySpec::new(
+                                                        t("Song-Pegel", "Song gain"),
+                                                        -24.0..=12.0,
+                                                        " dB",
+                                                        RotaryAccent::Primary,
+                                                        RotarySize::Standard,
+                                                    ),
                                                 );
-                                                rotary_colored(
+                                                rotary(
                                                     &mut cols[1],
-                                                    t("Mono-Ausgang", "Mono out"),
                                                     &mut settings.mono_gain_db,
-                                                    -24.0..=12.0,
-                                                    " dB",
-                                                    p.teal,
+                                                    RotarySpec::new(
+                                                        t("Mono-Ausgang", "Mono out"),
+                                                        -24.0..=12.0,
+                                                        " dB",
+                                                        RotaryAccent::Signal,
+                                                        RotarySize::Standard,
+                                                    ),
                                                 );
                                             });
                                         }
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            if bevel_button(
+                                                ui,
+                                                t("Normalisieren", "Normalize"),
+                                                BevelStyle::Primary,
+                                            )
+                                            .on_hover_text(t(
+                                                "Misst den Spitzenpegel inkl. aktiver Effekte und setzt den Song-Pegel auf den Zielpegel",
+                                                "Measures processed peak level and sets song gain to reach target peak",
+                                            ))
+                                            .clicked()
+                                            {
+                                                self.normalize_song(
+                                                    &mut settings,
+                                                    &left,
+                                                    &right,
+                                                    rate,
+                                                    track,
+                                                    lang,
+                                                );
+                                                adopt = true;
+                                            }
+                                            ui.add_sized(
+                                                [58.0, 22.0],
+                                                egui::DragValue::new(&mut self.normalize_target_db)
+                                                    .range(-6.0..=0.0)
+                                                    .speed(0.1)
+                                                    .max_decimals(1)
+                                                    .suffix(" dB"),
+                                            )
+                                            .on_hover_text(t(
+                                                "Ziel-Spitzenpegel (dBFS)",
+                                                "Target peak level (dBFS)",
+                                            ));
+                                        });
                                     },
                                 );
 
-                                module_card(
+                                module_contents(
                                     &mut columns[2],
                                     "03",
                                     t("Ausgabe & Bypass", "Export & bypass"),
@@ -788,8 +900,8 @@ impl SongEditor {
                                     },
                                 );
                             });
-                        } else {
-                            ui.horizontal_wrapped(|ui| {
+                        } else if let MonitorStage::Insert(stage) = self.module {
+                            let channel_before = ui.horizontal_wrapped(|ui| {
                                 panel_title(ui, t("Kanal", "Channel"));
                                 segmented_control(
                                     ui,
@@ -798,11 +910,13 @@ impl SongEditor {
                                     &[(0, t("Links", "Left"), ""), (1, t("Rechts", "Right"), "")],
                                     HEIGHT_CONTROL,
                                 );
+                                effect_rack::commands(ui, self.module, &mut settings, self.channel, lang);
+                                let channel_before = settings.channels[self.channel].clone();
                                 ui.checkbox(
                                     &mut settings.channels_linked,
                                     t("Regler L/R koppeln", "Link L/R controls"),
                                 );
-                                if self.module == Module::Dynamics {
+                                if is_dynamics(stage) {
                                     ui.checkbox(
                                         &mut settings.stereo_dynamics_linked,
                                         t("Detektoren koppeln", "Link detectors"),
@@ -822,18 +936,40 @@ impl SongEditor {
                                 {
                                     self.solo = if solo { None } else { Some(self.channel) };
                                 }
-                            });
-                            let channel_before = settings.channels[self.channel].clone();
+                                if stage == EffectStage::Restoration {
+                                    let noise = &mut settings.channels[self.channel].denoiser;
+                                    ui.checkbox(&mut noise.enabled, t("Rauschfilter", "Noise reduction"));
+                                    ui.checkbox(&mut noise.dc_filter_enabled, "DC / Subsonic");
+                                }
+                                ui.separator();
+                                effect_rack::comparison(ui, self.stage_levels, lang);
+                                channel_before
+                            }).inner;
                             ui.add_space(4.0);
-                            channel_controls(
-                                ui,
-                                &mut settings.channels[self.channel],
-                                self.module,
-                                &mut self.dynamics_unit,
-                                rack_h,
-                                knob_size,
-                                lang,
-                            );
+                            if self.module == MonitorStage::Insert(EffectStage::Equalizer) {
+                                self.eq_editor.show(
+                                    ui,
+                                    &mut settings.channels[self.channel].eq,
+                                    rate,
+                                    self.spectrum.as_ref(),
+                                    (rack_h - 200.0).clamp(82.0, 170.0),
+                                    lang,
+                                );
+                            } else {
+                                channel_controls(
+                                    ui,
+                                    &mut settings.channels[self.channel],
+                                    stage,
+                                    rack_h,
+                                    knob_size,
+                                    lang,
+                                );
+                            }
+                            if !channel_before.stage_active(stage)
+                                && settings.channels[self.channel].stage_active(stage)
+                            {
+                                settings.effect_chain.set_enabled(stage, true);
+                            }
                             if settings.channels_linked {
                                 let edited = settings.channels[self.channel].clone();
                                 link_changed_controls(
@@ -843,7 +979,7 @@ impl SongEditor {
                                 );
                             }
                         }
-                        if self.module == Module::Restoration {
+                        if self.module == MonitorStage::Insert(EffectStage::Restoration) {
                             ui.add_space(3.0);
                             let ch = &settings.channels[self.channel];
                             let spectrum_h = (ui.available_height() - 36.0).clamp(40.0, 128.0);
@@ -856,7 +992,7 @@ impl SongEditor {
                                 lang,
                             );
                             ui.add_space(4.0);
-                            let p = palette();
+                            let p = palette(ui.ctx());
                             let profile_sub = settings.noise_profile.as_ref().map_or_else(
                                 || t("Kein Profil", "No profile").to_string(),
                                 |profile| profile.name.clone(),
@@ -971,7 +1107,9 @@ impl SongEditor {
                 splitter.commit_edit(snapshot);
             }
         }
-        self.update_monitor(&settings);
+        if changed || monitor_before != (self.original, self.solo, self.mono_audition) {
+            self.update_monitor(&settings);
+        }
         if self.player.is_playing() {
             ui.ctx().request_repaint();
         }
@@ -1027,6 +1165,19 @@ fn link_changed_controls(
             })+
         };
     }
+    for index in 0..edited.eq.peaks.len() {
+        let (old, new) = (before.eq.peaks[index], edited.eq.peaks[index]);
+        let target = &mut other.eq.peaks[index];
+        if old.hz != new.hz {
+            target.hz = new.hz;
+        }
+        if old.gain_db != new.gain_db {
+            target.gain_db = new.gain_db;
+        }
+        if old.q != new.q {
+            target.q = new.q;
+        }
+    }
     link!(
         gain_db,
         muted,
@@ -1070,35 +1221,36 @@ fn link_changed_controls(
 fn channel_controls(
     ui: &mut Ui,
     channel: &mut ChannelSettings,
-    module: Module,
-    dynamics_unit: &mut DynamicsUnit,
+    stage: EffectStage,
     rack_h: f32,
-    knob_size: f32,
+    knob_size: RotarySize,
     lang: Language,
 ) {
     let t = |de, en| if lang == Language::De { de } else { en };
-    let p = palette();
-    if module == Module::Channels {
-        rack_columns(ui, 2, |cols| {
-            module_card(
+    let p = palette(ui.ctx());
+    if stage == EffectStage::Channels {
+        panel_row(ui, 2, PanelStyle::Module, |cols| {
+            module_contents(
                 &mut cols[0],
                 "01",
                 t("Eingangspegel", "Input gain"),
                 t("Kanal-Trim", "Channel trim"),
                 p.accent_top,
                 |ui| {
-                    rotary_colored_sized(
+                    rotary(
                         ui,
-                        t("Kanalpegel", "Channel gain"),
                         &mut channel.gain_db,
-                        -24.0..=12.0,
-                        " dB",
-                        p.accent_top,
-                        knob_size,
+                        RotarySpec::new(
+                            t("Kanalpegel", "Channel gain"),
+                            -24.0..=12.0,
+                            " dB",
+                            RotaryAccent::Primary,
+                            knob_size,
+                        ),
                     );
                 },
             );
-            module_card(
+            module_contents(
                 &mut cols[1],
                 "02",
                 t("Taktile Kanalschalter", "Channel switches"),
@@ -1143,21 +1295,9 @@ fn channel_controls(
             );
         });
     }
-    if module == Module::Restoration {
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(
-                &mut channel.denoiser.enabled,
-                t("Rauschfilter aktiv", "Noise reduction enabled"),
-            );
-            ui.checkbox(
-                &mut channel.denoiser.dc_filter_enabled,
-                t("DC / Subsonic aktiv", "DC / subsonic enabled"),
-            );
-        });
-        ui.add_space(3.0);
-        let rest_k = knob_size.min(36.0);
-        rack_columns(ui, 4, |cols| {
-            module_card(
+    if stage == EffectStage::Restoration {
+        panel_row(ui, 4, PanelStyle::Module, |cols| {
+            module_contents(
                 &mut cols[0],
                 "01",
                 t("Reduktion", "Reduction"),
@@ -1165,19 +1305,21 @@ fn channel_controls(
                 p.accent_top,
                 |ui| {
                     ui.add_enabled_ui(channel.denoiser.enabled, |ui| {
-                        rotary_colored_sized(
+                        rotary(
                             ui,
-                            t("Reduktion", "Reduction"),
                             &mut channel.denoiser.reduction_db,
-                            0.0..=40.0,
-                            " dB",
-                            p.accent_top,
-                            rest_k,
+                            RotarySpec::new(
+                                t("Reduktion", "Reduction"),
+                                0.0..=40.0,
+                                " dB",
+                                RotaryAccent::Primary,
+                                RotarySize::Compact,
+                            ),
                         );
                     });
                 },
             );
-            module_card(
+            module_contents(
                 &mut cols[1],
                 "02",
                 t("Empfindlichkeit", "Sensitivity"),
@@ -1185,19 +1327,21 @@ fn channel_controls(
                 p.accent_top,
                 |ui| {
                     ui.add_enabled_ui(channel.denoiser.enabled, |ui| {
-                        rotary_colored_sized(
+                        rotary(
                             ui,
-                            t("Schwelle", "Sensitivity"),
                             &mut channel.denoiser.sensitivity,
-                            0.5..=4.0,
-                            " ×",
-                            p.accent_top,
-                            rest_k,
+                            RotarySpec::new(
+                                t("Schwelle", "Sensitivity"),
+                                0.5..=4.0,
+                                " ×",
+                                RotaryAccent::Primary,
+                                RotarySize::Compact,
+                            ),
                         );
                     });
                 },
             );
-            module_card(
+            module_contents(
                 &mut cols[2],
                 "03",
                 t("Glättung", "Smoothing"),
@@ -1205,19 +1349,21 @@ fn channel_controls(
                 p.teal,
                 |ui| {
                     ui.add_enabled_ui(channel.denoiser.enabled, |ui| {
-                        rotary_colored_sized(
+                        rotary(
                             ui,
-                            t("Glättung", "Smoothing"),
                             &mut channel.denoiser.smoothing,
-                            0.0..=0.95,
-                            "",
-                            p.teal,
-                            rest_k,
+                            RotarySpec::new(
+                                t("Glättung", "Smoothing"),
+                                0.0..=0.95,
+                                "",
+                                RotaryAccent::Signal,
+                                RotarySize::Compact,
+                            ),
                         );
                     });
                 },
             );
-            module_card(
+            module_contents(
                 &mut cols[3],
                 "04",
                 "Subsonic Hz",
@@ -1225,116 +1371,30 @@ fn channel_controls(
                 p.amber,
                 |ui| {
                     ui.add_enabled_ui(channel.denoiser.dc_filter_enabled, |ui| {
-                        rotary_colored_sized(
+                        rotary(
                             ui,
-                            t("Grenzfrequenz", "Cutoff"),
                             &mut channel.denoiser.dc_cutoff_hz,
-                            5.0..=80.0,
-                            " Hz",
-                            p.amber,
-                            rest_k,
+                            RotarySpec::new(
+                                t("Grenzfrequenz", "Cutoff"),
+                                5.0..=80.0,
+                                " Hz",
+                                RotaryAccent::Amber,
+                                RotarySize::Compact,
+                            ),
                         );
                     });
                 },
             );
         });
     }
-    if module == Module::Equalizer {
+    if is_dynamics(stage) {
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut channel.eq.enabled, t("Equalizer aktiv", "Enable equalizer"));
-            if bevel_button(ui, t("Flat", "Flat"), BevelStyle::Compact)
-                .on_hover_text(t("Kurve zurücksetzen (Flat)", "Reset curve to flat"))
-                .clicked()
-            {
-                channel.eq.low_db = 0.0;
-                channel.eq.mid_db = 0.0;
-                channel.eq.high_db = 0.0;
-            }
-            ui.label(
-                egui::RichText::new(format!(
-                    "1: {:+.1} dB @ {:.0} Hz  ·  2: {:+.1} dB @ {:.0} Hz (Q {:.1})  ·  3: {:+.1} dB @ {:.0} Hz",
-                    channel.eq.low_db,
-                    channel.eq.low_hz,
-                    channel.eq.mid_db,
-                    channel.eq.mid_hz,
-                    channel.eq.mid_q,
-                    channel.eq.high_db,
-                    channel.eq.high_hz,
-                ))
-                .monospace()
-                .size(10.5)
-                .color(p.text_secondary),
-            );
-        });
-        ui.add_space(4.0);
-        ui.add_enabled_ui(channel.eq.enabled, |ui| {
-            let eq_h = (rack_h - 210.0).clamp(48.0, 160.0);
-            draw_eq_response_curve(ui, &mut channel.eq, eq_h);
-            ui.add_space(4.0);
-            let eq_k = knob_size.min(38.0);
-            rack_columns(ui, 3, |cols| {
-                module_card(
-                    &mut cols[0],
-                    "01",
-                    t("Tiefen (Low Shelf)", "Low shelf"),
-                    t("Analog Baxandall Typ", "Analog shelf"),
-                    p.accent_top,
-                    |ui| {
-                        ui.columns(2, |pair| {
-                            rotary_colored_sized(&mut pair[0], "Gain", &mut channel.eq.low_db, -18.0..=18.0, " dB", p.accent_top, eq_k);
-                            rotary_colored_sized(&mut pair[1], t("Frequenz", "Freq"), &mut channel.eq.low_hz, 20.0..=500.0, " Hz", p.accent_top, eq_k);
-                        });
-                    },
-                );
-                module_card(
-                    &mut cols[1],
-                    "02",
-                    t("Mitten (Parametric Peak)", "Mid band (Peak)"),
-                    t("Symmetrischer Glockenfilter", "Symmetrical bell"),
-                    p.teal,
-                    |ui| {
-                        ui.columns(3, |trio| {
-                            rotary_colored_sized(&mut trio[0], "Gain", &mut channel.eq.mid_db, -18.0..=18.0, " dB", p.teal, eq_k);
-                            rotary_colored_sized(&mut trio[1], "Freq", &mut channel.eq.mid_hz, 150.0..=8000.0, " Hz", p.teal, eq_k);
-                            rotary_colored_sized(&mut trio[2], "Q", &mut channel.eq.mid_q, 0.2..=8.0, "", p.teal, eq_k);
-                        });
-                    },
-                );
-                module_card(
-                    &mut cols[2],
-                    "03",
-                    t("Höhen (High Shelf)", "High shelf"),
-                    t("Seidiger Band-Glanz", "Silky air shelf"),
-                    p.amber,
-                    |ui| {
-                        ui.columns(2, |pair| {
-                            rotary_colored_sized(&mut pair[0], "Gain", &mut channel.eq.high_db, -18.0..=18.0, " dB", p.amber, eq_k);
-                            rotary_colored_sized(&mut pair[1], t("Frequenz", "Freq"), &mut channel.eq.high_hz, 1500.0..=20_000.0, " Hz", p.amber, eq_k);
-                        });
-                    },
-                );
-            });
-        });
-    }
-    if module == Module::Dynamics {
-        ui.horizontal_wrapped(|ui| {
-            segmented_control(
-                ui,
-                "dynamics_unit_select",
-                dynamics_unit,
-                &[
-                    (DynamicsUnit::Compressor, "Compressor", ""),
-                    (DynamicsUnit::Expander, "Expander", ""),
-                    (DynamicsUnit::Limiter, "Limiter", ""),
-                ],
-                HEIGHT_CONTROL,
-            );
-            match *dynamics_unit {
-                DynamicsUnit::Compressor => {
-                    ui.checkbox(&mut channel.compressor.enabled, t("Aktiv", "Enabled"));
+            match stage {
+                EffectStage::Compressor => {
+                    ui.checkbox(&mut channel.compressor.enabled, t("Kanal aktiv", "Channel enabled"));
                 }
-                DynamicsUnit::Expander => {
-                    ui.checkbox(&mut channel.expander.enabled, t("Aktiv", "Enabled"));
+                EffectStage::Expander => {
+                    ui.checkbox(&mut channel.expander.enabled, t("Kanal aktiv", "Channel enabled"));
                     segmented_control(
                         ui,
                         "expander_direction",
@@ -1346,30 +1406,32 @@ fn channel_controls(
                         HEIGHT_CONTROL,
                     );
                 }
-                DynamicsUnit::Limiter => {
-                    ui.checkbox(&mut channel.limiter.enabled, t("Aktiv", "Enabled"));
+                EffectStage::Limiter => {
+                    ui.checkbox(&mut channel.limiter.enabled, t("Kanal aktiv", "Channel enabled"));
                     ui.label(
                         egui::RichText::new(t(
-                            "Brickwall · 0 ms Attack · True-Peak-Decke",
+                            "Brickwall · 0 ms Attack · Sample-Peak-Grenze",
                             "Brickwall · 0 ms attack · peak ceiling",
                         ))
                         .size(10.5)
                         .color(p.text_muted),
                     );
                 }
+                _ => {}
             }
         });
         ui.add_space(4.0);
-        match *dynamics_unit {
-            DynamicsUnit::Compressor => {
+        match stage {
+            EffectStage::Compressor => {
                 dynamics_controls(ui, &mut channel.compressor, false, rack_h, lang);
             }
-            DynamicsUnit::Expander => {
+            EffectStage::Expander => {
                 dynamics_controls(ui, &mut channel.expander, true, rack_h, lang);
             }
-            DynamicsUnit::Limiter => {
+            EffectStage::Limiter => {
                 limiter_controls(ui, &mut channel.limiter, rack_h, knob_size, lang);
             }
+            _ => {}
         }
     }
 }
@@ -1378,76 +1440,70 @@ fn limiter_controls(
     ui: &mut Ui,
     params: &mut LimiterSettings,
     rack_h: f32,
-    knob_size: f32,
+    knob_size: RotarySize,
     lang: Language,
 ) {
     let t = |de, en| if lang == Language::De { de } else { en };
-    let p = palette();
-    let lim_k = knob_size.clamp(40.0, 52.0);
+    let p = palette(ui.ctx());
+    let lim_k = match knob_size {
+        RotarySize::Compact => RotarySize::Narrow,
+        other => other,
+    };
     let curve_h = (rack_h - 120.0).clamp(92.0, 180.0);
     ui.add_enabled_ui(params.enabled, |ui| {
-        let total_w = ui.available_width();
-        let left_w = 164.0_f32;
-        let right_w = (total_w - left_w - 22.0).max(240.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(left_w, 0.0),
-                egui::Layout::top_down(egui::Align::LEFT),
+        panel_row(ui, 2, PanelStyle::Module, |panels| {
+            module_contents(
+                &mut panels[0],
+                "01",
+                t("Kennlinie", "Curve"),
+                "Brickwall Limiter",
+                p.red,
                 |ui| {
-                    module_card(
-                        ui,
-                        "01",
-                        t("Kennlinie", "Curve"),
-                        "Brickwall Limiter",
-                        LED_RED,
-                        |ui| {
-                            draw_limiter_transfer_curve(ui, params, curve_h);
-                        },
-                    );
+                    draw_limiter_transfer_curve(ui, params, curve_h);
                 },
             );
-            ui.allocate_ui_with_layout(
-                egui::vec2(right_w, 0.0),
-                egui::Layout::top_down(egui::Align::LEFT),
+            module_contents(
+                &mut panels[1],
+                "02",
+                t("Limiter-Parameter", "Limiter parameters"),
+                t("Spitzenpegel-Begrenzer", "Brickwall peak control"),
+                p.red,
                 |ui| {
-                    module_card(
-                        ui,
-                        "02",
-                        t("Limiter-Parameter", "Limiter parameters"),
-                        t("Spitzenpegel-Begrenzer", "Brickwall peak control"),
-                        LED_RED,
-                        |ui| {
-                            rack_columns(ui, 3, |cols| {
-                                rotary_colored_sized(
-                                    &mut cols[0],
-                                    "Ceiling",
-                                    &mut params.ceiling_db,
-                                    -24.0..=0.0,
-                                    " dB",
-                                    LED_RED,
-                                    lim_k,
-                                );
-                                rotary_colored_sized(
-                                    &mut cols[1],
-                                    "Drive",
-                                    &mut params.drive_db,
-                                    0.0..=24.0,
-                                    " dB",
-                                    p.accent_top,
-                                    lim_k,
-                                );
-                                rotary_colored_sized(
-                                    &mut cols[2],
-                                    "Release",
-                                    &mut params.release_ms,
-                                    5.0..=500.0,
-                                    " ms",
-                                    p.teal,
-                                    lim_k,
-                                );
-                            });
-                        },
-                    );
+                    rack_columns(ui, 3, |cols| {
+                        rotary(
+                            &mut cols[0],
+                            &mut params.ceiling_db,
+                            RotarySpec::new(
+                                "Ceiling",
+                                -24.0..=0.0,
+                                " dB",
+                                RotaryAccent::Limit,
+                                lim_k,
+                            ),
+                        );
+                        rotary(
+                            &mut cols[1],
+                            &mut params.drive_db,
+                            RotarySpec::new(
+                                "Drive",
+                                0.0..=24.0,
+                                " dB",
+                                RotaryAccent::Primary,
+                                lim_k,
+                            ),
+                        );
+                        rotary(
+                            &mut cols[2],
+                            &mut params.release_ms,
+                            RotarySpec::new(
+                                "Release",
+                                5.0..=500.0,
+                                " ms",
+                                RotaryAccent::Signal,
+                                lim_k,
+                            ),
+                        );
+                    });
                 },
             );
         });
@@ -1455,8 +1511,8 @@ fn limiter_controls(
 }
 
 fn draw_limiter_transfer_curve(ui: &mut Ui, params: &LimiterSettings, height: f32) {
-    let p = palette();
-    let size = egui::vec2(128.0, height.max(84.0));
+    let p = palette(ui.ctx());
+    let size = egui::vec2(ui.available_width(), height.max(84.0));
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     draw_recessed_well(painter, rect, RADIUS_WELL, p.bg_inset);
@@ -1484,7 +1540,7 @@ fn draw_limiter_transfer_curve(ui: &mut Ui, params: &LimiterSettings, height: f3
         [egui::pos2(inner.min.x, ceil_y), egui::pos2(inner.max.x, ceil_y)],
         egui::Stroke::new(
             1.0,
-            egui::Color32::from_rgba_unmultiplied(LED_RED.r(), LED_RED.g(), LED_RED.b(), 110),
+            egui::Color32::from_rgba_unmultiplied(p.red.r(), p.red.g(), p.red.b(), 110),
         ),
     );
 
@@ -1495,18 +1551,18 @@ fn draw_limiter_transfer_curve(ui: &mut Ui, params: &LimiterSettings, height: f3
         let out_db = (in_db + params.drive_db).min(params.ceiling_db);
         pts.push(map(in_db, out_db));
     }
-    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.2, LED_RED)));
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.2, p.red)));
 
     // Kniepunkt (Eingangspegel, ab dem begrenzt wird)
     let knee_in = (params.ceiling_db - params.drive_db).clamp(-60.0, 0.0);
     let knee_pt = map(knee_in, params.ceiling_db);
-    painter.circle_filled(knee_pt, 3.5, LED_RED);
+    painter.circle_filled(knee_pt, 3.5, p.red);
     painter.text(
         egui::pos2(inner.min.x + 2.0, inner.min.y + 1.0),
         egui::Align2::LEFT_TOP,
         format!("{:.1} dB", params.ceiling_db),
         egui::FontId::monospace(8.5),
-        LED_RED,
+        p.red,
     );
 }
 
@@ -1518,108 +1574,93 @@ fn dynamics_controls(
     lang: Language,
 ) {
     let t = |de, en| if lang == Language::De { de } else { en };
-    let p = palette();
+    let p = palette(ui.ctx());
     let dyn_k = if rack_h < 285.0 {
-        34.0
+        RotarySize::Dense
     } else if rack_h < 340.0 {
-        40.0
+        RotarySize::Narrow
     } else {
-        46.0
+        RotarySize::Standard
     };
     let curve_h = (rack_h - 130.0).clamp(88.0, 180.0);
     ui.add_enabled_ui(params.enabled, |ui| {
-        let total_w = ui.available_width();
-        let left_w = 164.0_f32;
-        let right_w = (total_w - left_w - 22.0).max(240.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(left_w, 0.0),
-                egui::Layout::top_down(egui::Align::LEFT),
+        panel_row(ui, 2, PanelStyle::Module, |panels| {
+            module_contents(
+                &mut panels[0],
+                "01",
+                t("Kennlinie", "Curve"),
+                if expander { "Expander" } else { "Compressor" },
+                p.accent_top,
                 |ui| {
-                    module_card(
-                        ui,
-                        "01",
-                        t("Kennlinie", "Curve"),
-                        if expander { "Expander" } else { "Compressor" },
-                        p.accent_top,
-                        |ui| {
-                            draw_dynamics_transfer_curve(ui, params, expander, curve_h);
-                        },
-                    );
+                    draw_dynamics_transfer_curve(ui, params, expander, curve_h);
                 },
             );
-            ui.allocate_ui_with_layout(
-                egui::vec2(right_w, 0.0),
-                egui::Layout::top_down(egui::Align::LEFT),
+            module_contents(
+                &mut panels[1],
+                "02",
+                t("Parameter-Matrix", "Parameter matrix"),
+                "High-Res Rotary Attenuators",
+                p.teal,
                 |ui| {
-                    module_card(
-                        ui,
-                        "02",
-                        t("Parameter-Matrix", "Parameter matrix"),
-                        "High-Res Rotary Attenuators",
-                        p.teal,
-                        |ui| {
-                            rack_columns(ui, 3, |cols| {
-                                rotary_colored_sized(
-                                    &mut cols[0],
-                                    "Threshold",
-                                    &mut params.threshold_db,
-                                    -80.0..=0.0,
-                                    " dB",
-                                    p.accent_top,
-                                    dyn_k,
-                                );
-                                rotary_colored_sized(
-                                    &mut cols[1],
-                                    "Ratio",
-                                    &mut params.ratio,
-                                    1.0..=20.0,
-                                    ":1",
-                                    p.accent_top,
-                                    dyn_k,
-                                );
-                                rotary_colored_sized(
-                                    &mut cols[2],
-                                    "Knee",
-                                    &mut params.knee_db,
-                                    0.0..=24.0,
-                                    " dB",
-                                    p.amber,
-                                    dyn_k,
-                                );
-                            });
-                            ui.add_space(4.0);
-                            rack_columns(ui, 3, |cols| {
-                                rotary_colored_sized(
-                                    &mut cols[0],
-                                    "Attack",
-                                    &mut params.attack_ms,
-                                    0.1..=200.0,
-                                    " ms",
-                                    p.teal,
-                                    dyn_k,
-                                );
-                                rotary_colored_sized(
-                                    &mut cols[1],
-                                    "Release",
-                                    &mut params.release_ms,
-                                    1.0..=2000.0,
-                                    " ms",
-                                    p.teal,
-                                    dyn_k,
-                                );
-                                rotary_colored_sized(
-                                    &mut cols[2],
-                                    t("Ausgang", "Output"),
-                                    &mut params.makeup_db,
-                                    -24.0..=24.0,
-                                    " dB",
-                                    p.amber,
-                                    dyn_k,
-                                );
-                            });
-                        },
-                    );
+                    rack_columns(ui, 3, |cols| {
+                        rotary(
+                            &mut cols[0],
+                            &mut params.threshold_db,
+                            RotarySpec::new(
+                                "Threshold",
+                                -80.0..=0.0,
+                                " dB",
+                                RotaryAccent::Primary,
+                                dyn_k,
+                            ),
+                        );
+                        rotary(
+                            &mut cols[1],
+                            &mut params.ratio,
+                            RotarySpec::new("Ratio", 1.0..=20.0, ":1", RotaryAccent::Primary, dyn_k),
+                        );
+                        rotary(
+                            &mut cols[2],
+                            &mut params.knee_db,
+                            RotarySpec::new("Knee", 0.0..=24.0, " dB", RotaryAccent::Amber, dyn_k),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    rack_columns(ui, 3, |cols| {
+                        rotary(
+                            &mut cols[0],
+                            &mut params.attack_ms,
+                            RotarySpec::new(
+                                "Attack",
+                                0.1..=200.0,
+                                " ms",
+                                RotaryAccent::Signal,
+                                dyn_k,
+                            ),
+                        );
+                        rotary(
+                            &mut cols[1],
+                            &mut params.release_ms,
+                            RotarySpec::new(
+                                "Release",
+                                1.0..=2000.0,
+                                " ms",
+                                RotaryAccent::Signal,
+                                dyn_k,
+                            ),
+                        );
+                        rotary(
+                            &mut cols[2],
+                            &mut params.makeup_db,
+                            RotarySpec::new(
+                                t("Ausgang", "Output"),
+                                -24.0..=24.0,
+                                " dB",
+                                RotaryAccent::Amber,
+                                dyn_k,
+                            ),
+                        );
+                    });
                 },
             );
         });
@@ -1638,12 +1679,12 @@ fn draw_noise_spectrum_curve(
     let desired = egui::vec2(ui.available_width().max(260.0), height.max(40.0));
     let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
     let painter = ui.painter();
-    let oled_bg = egui::Color32::from_rgb(13, 17, 23);
-    painter.rect_filled(rect, RADIUS_WELL, oled_bg);
+    let p = OLED_PALETTE;
+    painter.rect_filled(rect, RADIUS_WELL, p.bg_inset);
     painter.rect_stroke(
         rect.shrink(0.5),
         RADIUS_WELL,
-        egui::Stroke::new(0.75, egui::Color32::from_rgb(44, 50, 62)),
+        egui::Stroke::new(0.75, p.border_subtle),
     );
 
     // Subtiles OLED-Messgitter
@@ -1651,7 +1692,7 @@ fn draw_noise_spectrum_curve(
         let y = rect.min.y + rect.height() * frac;
         painter.line_segment(
             [egui::pos2(rect.min.x + 8.0, y), egui::pos2(rect.max.x - 8.0, y)],
-            egui::Stroke::new(0.75, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
+            egui::Stroke::new(0.75, p.text_primary.gamma_multiply(0.06)),
         );
     }
 
@@ -1666,7 +1707,7 @@ fn draw_noise_spectrum_curve(
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(11.2),
-            egui::Color32::from_rgb(148, 163, 184),
+            p.text_muted,
         );
         return;
     };
@@ -1705,7 +1746,7 @@ fn draw_noise_spectrum_curve(
             *raw_pts.last().unwrap(),
             egui::pos2(rect.max.x - pad_x, bottom_y),
         ],
-        egui::Color32::from_rgba_unmultiplied(217, 119, 6, 26),
+        p.amber.gamma_multiply(0.11),
         egui::Stroke::NONE,
     ));
 
@@ -1717,24 +1758,24 @@ fn draw_noise_spectrum_curve(
         let sx = rect.min.x + pad_x + f * inner_w;
         painter.line_segment(
             [egui::pos2(sx, rect.min.y + 8.0), egui::pos2(sx, bottom_y)],
-            egui::Stroke::new(1.2, egui::Color32::from_rgb(245, 158, 11)),
+            egui::Stroke::new(1.2, p.amber),
         );
         painter.text(
             egui::pos2(sx + 5.0, bottom_y - 2.0),
             egui::Align2::LEFT_BOTTOM,
             format!("{hz:.0} Hz"),
             egui::FontId::monospace(9.0),
-            egui::Color32::from_rgb(245, 158, 11),
+            p.amber,
         );
     }
 
     painter.add(egui::Shape::line(
         raw_pts,
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(234, 128, 36)),
+        egui::Stroke::new(2.0, p.accent_top),
     ));
     painter.add(egui::Shape::line(
         reduced_pts,
-        egui::Stroke::new(1.8, egui::Color32::from_rgb(20, 184, 166)),
+        egui::Stroke::new(1.8, p.wave_right),
     ));
 
     // Teal-Badge "-X.X dB Hiss"
@@ -1742,20 +1783,20 @@ fn draw_noise_spectrum_curve(
         egui::pos2(rect.max.x - 102.0, rect.min.y + 8.0),
         egui::vec2(92.0, 18.0),
     );
-    painter.rect_filled(badge_rect, 4.0, egui::Color32::from_rgb(13, 148, 136));
+    painter.rect_filled(badge_rect, 4.0, p.teal_dim);
     painter.text(
         badge_rect.center(),
         egui::Align2::CENTER_CENTER,
         format!("-{reduction_db:.1} dB Hiss"),
         egui::FontId::monospace(9.5),
-        egui::Color32::WHITE,
+        p.wave_right,
     );
     painter.text(
         egui::pos2(rect.min.x + 12.0, rect.min.y + 8.0),
         egui::Align2::LEFT_TOP,
         format!("● Live FFT · {}", profile.name),
         egui::FontId::monospace(9.5),
-        egui::Color32::from_rgb(148, 163, 184),
+        p.text_muted,
     );
 }
 
@@ -1765,8 +1806,8 @@ fn draw_dynamics_transfer_curve(
     expander: bool,
     height: f32,
 ) {
-    let p = palette();
-    let size = egui::vec2(128.0, height.max(84.0));
+    let p = palette(ui.ctx());
+    let size = egui::vec2(ui.available_width(), height.max(84.0));
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     draw_recessed_well(painter, rect, RADIUS_WELL, p.bg_inset);
@@ -1850,138 +1891,6 @@ fn draw_dynamics_transfer_curve(
     );
 }
 
-/// Interaktive 3-Band-EQ-Frequenzgangkurve (20 Hz – 20 kHz, -18..+18 dB) mit 3 direkt ziehbaren Knoten.
-fn draw_eq_response_curve(
-    ui: &mut Ui,
-    eq: &mut crate::audio::processing::EqSettings,
-    height: f32,
-) {
-    let p = palette();
-    let desired = egui::vec2(ui.available_width().max(280.0), height.max(48.0));
-    let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
-    let painter = ui.painter();
-    draw_recessed_well(painter, rect, RADIUS_WELL, p.bg_inset);
-
-    let pad_l = 30.0;
-    let pad_r = 12.0;
-    let pad_t = 12.0;
-    let pad_b = 18.0;
-    let inner = egui::Rect::from_min_max(
-        egui::pos2(rect.min.x + pad_l, rect.min.y + pad_t),
-        egui::pos2(rect.max.x - pad_r, rect.max.y - pad_b),
-    );
-
-    let log_min = 20.0_f32.ln();
-    let log_max = 20_000.0_f32.ln();
-    let freq_to_x = |hz: f32| -> f32 {
-        let f = ((hz.clamp(20.0, 20_000.0).ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
-        inner.min.x + f * inner.width()
-    };
-    let x_to_freq = |x: f32| -> f32 {
-        let f = ((x - inner.min.x) / inner.width().max(1.0)).clamp(0.0, 1.0);
-        (log_min + f * (log_max - log_min)).exp()
-    };
-    let db_to_y = |db: f32| -> f32 {
-        let f = ((db.clamp(-18.0, 18.0) + 18.0) / 36.0).clamp(0.0, 1.0);
-        inner.max.y - f * inner.height()
-    };
-    let y_to_db = |y: f32| -> f32 {
-        let f = ((inner.max.y - y) / inner.height().max(1.0)).clamp(0.0, 1.0);
-        -18.0 + f * 36.0
-    };
-
-    // Frequenz-Gitter
-    for &(hz, lbl) in &[
-        (50.0, "50"),
-        (100.0, "100"),
-        (250.0, "250"),
-        (1000.0, "1k"),
-        (4000.0, "4k"),
-        (10000.0, "10k"),
-    ] {
-        let x = freq_to_x(hz);
-        painter.line_segment(
-            [egui::pos2(x, inner.min.y), egui::pos2(x, inner.max.y)],
-            egui::Stroke::new(0.75, p.border_subtle),
-        );
-        painter.text(
-            egui::pos2(x, inner.max.y + 3.0),
-            egui::Align2::CENTER_TOP,
-            lbl,
-            egui::FontId::monospace(8.5),
-            p.text_muted,
-        );
-    }
-
-    // dB-Gitter (+12, 0, -12)
-    for &(db, lbl) in &[(12.0, "+12"), (0.0, "0"), (-12.0, "-12")] {
-        let y = db_to_y(db);
-        painter.line_segment(
-            [egui::pos2(inner.min.x, y), egui::pos2(inner.max.x, y)],
-            egui::Stroke::new(if db == 0.0 { 1.1 } else { 0.75 }, if db == 0.0 { p.border_mid } else { p.border_subtle }),
-        );
-        painter.text(
-            egui::pos2(inner.min.x - 4.0, y),
-            egui::Align2::RIGHT_CENTER,
-            lbl,
-            egui::FontId::monospace(8.5),
-            p.text_muted,
-        );
-    }
-
-    // Summen-Frequenzgang (Low-Shelf + Mid-Peak + High-Shelf)
-    let eval_db = |hz: f32| -> f32 {
-        let low_ratio = (hz / eq.low_hz.max(20.0)).ln();
-        let low_weight = 1.0 / (1.0 + (low_ratio * 2.2).exp());
-        let high_ratio = (eq.high_hz.max(200.0) / hz).ln();
-        let high_weight = 1.0 / (1.0 + (high_ratio * 2.2).exp());
-        let mid_oct = (hz / eq.mid_hz.max(40.0)).log2();
-        let bw = (1.15 / eq.mid_q.clamp(0.2, 8.0)).max(0.15);
-        let mid_weight = (-0.5 * (mid_oct / bw).powi(2)).exp();
-        (eq.low_db * low_weight + eq.mid_db * mid_weight + eq.high_db * high_weight).clamp(-18.0, 18.0)
-    };
-
-    let steps = 96usize;
-    let mut pts = Vec::with_capacity(steps);
-    for i in 0..steps {
-        let f = i as f32 / (steps - 1) as f32;
-        let hz = (log_min + f * (log_max - log_min)).exp();
-        pts.push(egui::pos2(freq_to_x(hz), db_to_y(eval_db(hz))));
-    }
-    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, p.accent_top)));
-
-    // 3 direkt ziehbare Band-Knoten
-    let enabled = ui.is_enabled();
-    let bands = [
-        ("1", &mut eq.low_hz, &mut eq.low_db, 20.0_f32..=500.0, p.accent_top),
-        ("2", &mut eq.mid_hz, &mut eq.mid_db, 150.0_f32..=8000.0, p.teal),
-        ("3", &mut eq.high_hz, &mut eq.high_db, 1500.0_f32..=20_000.0, p.amber),
-    ];
-    for (idx, (tag, hz, db, hz_range, col)) in bands.into_iter().enumerate() {
-        let pos = egui::pos2(freq_to_x(*hz), db_to_y(*db));
-        let hit = egui::Rect::from_center_size(pos, egui::vec2(20.0, 20.0));
-        let resp = ui.interact(hit, ui.id().with(("eq_node", idx)), egui::Sense::click_and_drag());
-        if enabled && resp.dragged() {
-            if let Some(pointer) = resp.interact_pointer_pos() {
-                *hz = x_to_freq(pointer.x).clamp(*hz_range.start(), *hz_range.end());
-                *db = y_to_db(pointer.y).clamp(-18.0, 18.0);
-            }
-        }
-        let r = if resp.hovered() || resp.dragged() { 8.5 } else { 7.5 };
-        painter.circle_filled(pos, r, col);
-        painter.circle_stroke(pos, r, egui::Stroke::new(1.2, p.bg_panel));
-        painter.text(
-            pos,
-            egui::Align2::CENTER_CENTER,
-            tag,
-            egui::FontId::monospace(9.0),
-            egui::Color32::WHITE,
-        );
-        resp.on_hover_cursor(egui::CursorIcon::Grab)
-            .on_hover_text(format!("{tag}: {:.0} Hz · {:+.1} dB", *hz, *db));
-    }
-}
-
 fn routing_label(routing: Routing, lang: Language) -> &'static str {
     match (routing, lang) {
         (Routing::Stereo, _) => "Stereo",
@@ -2061,5 +1970,24 @@ mod tests {
         assert_eq!(editor.selection, None);
         assert_eq!(editor.view.zoom, 1.0);
         assert_eq!(editor.view.selected_segment, Some(1));
+    }
+
+    #[test]
+    fn normalize_song_sets_gain_to_reach_target_peak() {
+        let mut editor = SongEditor::default();
+        editor.normalize_target_db = -1.0;
+        let left = vec![0.25_f32; 1000]; // -12.04 dBFS
+        let right = vec![0.125_f32; 1000];
+        let splitter = TrackSplitter::new();
+        let tracks = splitter.get_tracks(10.0);
+        let mut settings = SongSettings::default();
+        editor.normalize_song(&mut settings, &left, &right, 100, &tracks[0], Language::De);
+        assert!(editor.error.is_none());
+        // -1.0 - (-12.0412) ≈ +11.04 dB
+        assert!(
+            (settings.gain_db - 11.04).abs() < 0.05,
+            "expected ~+11.04 dB, got {}",
+            settings.gain_db
+        );
     }
 }

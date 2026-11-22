@@ -1,13 +1,15 @@
 # TapeDigizer · Design
 
-**Status: Freigegeben und umgesetzt.** Die Studiokonsole gilt für Aufnahme, Schnitt und Song-Bearbeitung. Die Vorschau im Chat bleibt als Entwurfsreferenz erhalten.
+Diese Dokumentation beschreibt die macOS-Studiokonsole in **Version 2.0.0**. Silverface und Obsidian teilen sich dieselbe Navigation von der Aufnahme über Marker, Tracks und Einzeltrack bis zum Export.
 
-- [Designsprache](designsprache.md) definiert Material, Typografie, Farben und Layout.
-- [Elemente und Funktionen](elemente-und-funktionen.md) beschreibt Bedienverhalten, Zustände und die Zuordnung zum bestehenden Code.
+- [Designsprache](designsprache.md) dokumentiert Farbrollen, Bedienelemente und Fensterlayout.
+- [Elemente und Funktionen](elemente-und-funktionen.md) beschreibt die Bedienung, den Signalweg und die Zuordnung zum Code.
 
-Die Vorschau im Chat zeigt den Entwurf in **Aufnahme**, **Schneiden** und **Track bearbeiten**. Die Daten sind fiktiv. Navigation, Aufnahme- und Wiedergabezustand sowie ausgewählte Regler lassen sich ausprobieren.
+## Entwurfsreferenzen
 
-## Referenzen
+- [Obsidian Waveform](../../stitch_analog_audio_digitizer/obsidian_waveform/DESIGN.md)
+- Stitch-Studien für [Aufnahme mit VU-Metern](../../stitch_analog_audio_digitizer/aufnahme_pegelkontrolle_vintage_vu_meter/screen.png), [Schnitt](../../stitch_analog_audio_digitizer/schnitt_marker_ausrichtung/screen.png), [Track-DSP](../../stitch_analog_audio_digitizer/track_bearbeitung_dsp_effekte/screen.png) und [Export](../../stitch_analog_audio_digitizer/export_mastering_optionen/screen.png).
+- [Plugin-Slot](../../stitch_analog_audio_digitizer/plugin_editor_slot_01_vst3_au/screen.png) als Konzept für späteres AU-/VST3-Hosting. In 2.0.0 läuft der TapeDigizer Denoiser als separate Audio Unit in kompatiblen DAWs.
+- [Knobs and Pads · Petr Knoll](https://dribbble.com/shots/15642551-Knobs-and-Pads) und [Multiband Filterbank · Julian Behrens](https://dribbble.com/shots/25263605-Multiband-Filterbank-AIR-Plugin-and-Akai-MPC) als Referenzen für taktile Regler und Schalter.
 
-- [Knobs and Pads · Petr Knoll](https://dribbble.com/shots/15642551-Knobs-and-Pads) für den Unterschied zwischen Tasten, Pads und Drehreglern.
-- [Multiband Filterbank · Julian Behrens](https://dribbble.com/shots/25263605-Multiband-Filterbank-AIR-Plugin-and-Akai-MPC) als Referenz für die Verbindung von Plugin und Hardware-Bedienung.
+Die [Track-Studio-Spezifikation vom 20. November](../superpowers/specs/2026-11-20-track-studio-design.md) hält den damaligen Entwurfsstand fest.

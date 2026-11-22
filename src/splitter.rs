@@ -63,6 +63,9 @@ impl TrackInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkerSnapshot {
+    /// The immutable WAV to which these positions and settings apply.
+    pub(crate) audio_revision: Option<PathBuf>,
+    pub(crate) revision_preview_enabled: bool,
     pub markers: Vec<f64>,
     pub custom_titles: Vec<String>,
     pub pause_indices: Vec<usize>,
@@ -71,6 +74,12 @@ pub struct MarkerSnapshot {
 }
 
 impl MarkerSnapshot {
+    pub(crate) fn relocate_audio_revision(&mut self, from: Option<&Path>, to: &Path) {
+        if self.audio_revision.as_deref() == from {
+            self.audio_revision = Some(to.to_path_buf());
+        }
+    }
+
     /// Reindex all segment metadata using the original segment which owns each new interval.
     pub(crate) fn remap_segments(
         &mut self,
@@ -115,6 +124,8 @@ impl MarkerSnapshot {
 }
 
 pub struct TrackSplitter {
+    pub(crate) audio_revision: Option<PathBuf>,
+    pub(crate) revision_preview_enabled: bool,
     pub markers: Vec<f64>, // Split points in seconds
     pub custom_titles: Vec<String>,
     pub pause_indices: Vec<usize>, // Segments marked as excluded pauses (wont be exported)
@@ -127,6 +138,8 @@ pub struct TrackSplitter {
 impl TrackSplitter {
     pub fn new() -> Self {
         Self {
+            audio_revision: None,
+            revision_preview_enabled: false,
             song_settings: BTreeMap::new(),
             markers: Vec::new(),
             custom_titles: Vec::new(),
@@ -139,6 +152,8 @@ impl TrackSplitter {
 
     pub fn snapshot(&self) -> MarkerSnapshot {
         MarkerSnapshot {
+            audio_revision: self.audio_revision.clone(),
+            revision_preview_enabled: self.revision_preview_enabled,
             song_settings: self.song_settings.clone(),
             markers: self.markers.clone(),
             custom_titles: self.custom_titles.clone(),
@@ -181,6 +196,20 @@ impl TrackSplitter {
         } else {
             false
         }
+    }
+
+    pub(crate) fn relocate_audio_revision(&mut self, to: &Path) {
+        if self.audio_revision.as_deref() == Some(to) {
+            return;
+        }
+        let from = self.audio_revision.replace(to.to_path_buf());
+        for snapshot in self.undo_stack.iter_mut().chain(&mut self.redo_stack) {
+            snapshot.relocate_audio_revision(from.as_deref(), to);
+        }
+    }
+
+    pub(crate) fn history_target(&self, redo: bool) -> Option<&MarkerSnapshot> {
+        if redo { self.redo_stack.last() } else { self.undo_stack.last() }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -302,6 +331,8 @@ impl TrackSplitter {
     }
 
     pub fn restore(&mut self, snapshot: MarkerSnapshot) {
+        self.audio_revision = snapshot.audio_revision;
+        self.revision_preview_enabled = snapshot.revision_preview_enabled;
         self.song_settings = snapshot.song_settings;
         self.markers = snapshot.markers;
         self.custom_titles = snapshot.custom_titles;
@@ -1326,7 +1357,7 @@ mod tests {
 
     #[test]
     fn processed_mono_export_only_uses_song_samples_and_settings() {
-        use crate::audio::processing::{Routing, SongProcessor};
+        use crate::audio::processing::{EffectStage, LimiterSettings, Routing, SongProcessor};
         use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
         let rate = 48_000;
         let (path, file) =
@@ -1346,6 +1377,7 @@ mod tests {
             writer.write_sample(r).unwrap();
         }
         writer.finalize().unwrap();
+        let source = std::fs::read(&path).unwrap();
         let mut editor = TrackSplitter::new();
         editor.markers = vec![1.0 / f64::from(rate), (1 + clip.len()) as f64 / f64::from(rate)];
         editor.pause_indices = vec![0, 2];
@@ -1357,6 +1389,17 @@ mod tests {
             mono_gain_db: -1.5,
             ..Default::default()
         };
+        song.effect_chain.move_by(EffectStage::Restoration, 4);
+        song.effect_chain.move_by(EffectStage::Limiter, -4);
+        for channel in &mut song.channels {
+            channel.gain_db = -6.0;
+            channel.limiter = LimiterSettings {
+                enabled: true,
+                ceiling_db: -24.0,
+                drive_db: 7.0,
+                ..Default::default()
+            };
+        }
         let options = ExportOptions {
             highpass_20hz: true,
             stereo_balance_db: 10.0,
@@ -1406,6 +1449,7 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected);
         }
+        assert_eq!(std::fs::read(&path).unwrap(), source);
         std::fs::remove_dir_all(output).unwrap();
         std::fs::remove_file(path).unwrap();
     }

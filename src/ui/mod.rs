@@ -6,3 +6,8 @@ pub mod waveform_widget;
 
 #[cfg(target_os = "macos")]
 mod macos_menu;
+pub mod widgets;
+mod tape_deck;
+mod eq_editor;
+mod effect_rack;
+mod jobs;

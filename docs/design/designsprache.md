@@ -1,46 +1,35 @@
-# Designsprache · macOS Studio Craft
+# Designsprache · Silverface und Obsidian
 
-## Gestaltungsprinzip
+TapeDigizer übernimmt die Anordnung eines Studiogeräts. Messwerte, Wellenformen und Kennlinien liegen in vertieften Anzeigen. Abgesetzte Modulflächen, dezente Konturen und leicht plastische Tasten und Potis machen die Bedienebenen sichtbar. Dunkle Spektral- und LED-Anzeigen können auch in Silverface stehen.
 
-TapeDigizer orientiert sich an den **Apple macOS Human Interface Guidelines (Dark Mode)** in Verbindung mit der taktilen Präzision klassischer Studio-Hardware (wie Apple Logic Pro). Eine ruhige, neutrale Graphit- und Aluminium-Basis stellt das Audiosignal in den Mittelpunkt.
+## Farben und Material
 
-Funktionsbereiche werden **flächig** über abgestufte Helligkeits-Ebenen (*Surface Elevation*) und klaren Weißraum voneinander getrennt — ohne `1 px`-Rahmen um Panels oder Track-Zeilen. Tiefe vermittelt Bedienbarkeit: Wellenformen, Pegelmeter, Timecode und Segmented-Mulden sitzen vertieft hinter dunklem Displayglas (innerer Schatten oben, hauchfeiner Lichtsaum unten). Buttons, aktive Segmente, Drehregler und Fader heben sich über leichte vertikale Farbverläufe, oberes Kantenlicht (*Top Specular Highlight*) und sanfte Kontaktschatten plastisch ab.
+**Silverface** ist beim Start aktiv und kombiniert warmes Silber mit Kupferorange und Petrol. **Obsidian** kombiniert Graphit mit warmem Amber und Phosphorgrün. Die Schaltfläche **Dunkel** bzw. **Hell** in der Titelleiste schaltet das Theme für die laufende Sitzung um. Die Titelleiste, Komponenten und Signalflächen lesen ihre Farbrollen aus dem aktiven egui-Kontext. Die Werte in der Tabelle stammen aus der gemeinsamen [Palette](../../src/ui/theme.rs). OLED-Pegel und Spektrum verwenden in beiden Themes die dunkle Displaypalette.
 
-## Flächen- & Farbsystem (Surface Elevation)
-
-| Ebene / Rolle | Farbe / Verlauf | Verwendung |
+| Rolle | Silverface | Obsidian |
 |---|---|---|
-| Level 0 · Displayglas | `#0B0D10` | Wellenform, Stereo-Meter, Timecode, Segmented-Mulden |
-| Level 1 · Fensterfläche | `#16181C` | Grundfläche zwischen Funktions-Bays |
-| Level 2 · Unified Toolbar | `#1E2127` | Obere macOS-Kopfzeile (Navigation, Projektaktionen, Dokumenttitel) |
-| Level 3 · Surface Bay | `#21252C` | Rahmenlose Funktionsflächen (Aufnahme-Setup, Transport, Schnitt-Lupe, Track-Rack) |
-| Level 3b · Listenfläche | `#272C35` | Alternierende Zeilen in der Trackliste |
-| Level 4 · Bezel Control | `#3A404B → #2C313A` | Taktile macOS-Buttons und aktive Segmente (leichter vertikaler Verlauf) |
-| macOS-Systemakzent | `#4C9BFF → #2678E5` | Primäraktionen, aktive Zustände, Auswahl |
-| Fokusring | `#7CC0FF` | Sichtbarer 2-px-Tastaturfokus |
-| Text | `#F2F4F8` / `#B8C0CC` / `#8E98A8` | Primär, Sekundär und Skalen (WCAG 2.2 AA ≥ 4,5:1) |
-| Signal L / R | `#5CE0B8` / `#89B4FF` | Wellenform-Kanäle und L/R-Kennung |
-| Schnitt & Skala | `#F5B952` | Schnittmarken, Auswahlbereich, beleuchtete Rotary-Skala |
-| Aufnahme & Alarm | `#E84C52 → #C42B33` | REC-Taste, Aufnahme-Status und CLIP-Anzeige |
+| Fensterfläche | `#E5E2DC` | `#121316` |
+| Titelleiste | `#EDEAE4` | `#1A1C22` |
+| Modulfläche | `#F9F8F6` | `#1B1D23` |
+| Vertiefte Anzeige | `#F5F3EE` | `#0D0E11` |
+| Primärtext | `#121417` | `#E3E2E6` |
+| Primäraktion und aktives Segment | `#D46A20 → #BD5612` | `#FFC174 → #F59E0B` |
+| Kanalakzente L / R | `#C45B18` / `#0E7490` | `#F59E0B` / `#4EDEA3` |
+| Aufnahme und Übersteuerung | `#BA1A1A` | `#EF4444` |
+| Tastaturfokus | `#0E7490` | `#FFB95F` |
 
-## Größenverhältnisse & Geometrie (4/8-pt-Raster)
+## Layout und Bedienung
 
-- **3 feste Höhenklassen**: `30 pt` (Toolbar-Segmented, REC, Transport, Primäraktionen), `26 pt` (Standard-Buttons, Dropdowns, Modul-Segmented), `22 pt` (kompakte Zeilen-Aktionen in der Trackliste).
-- **3 feste Eckenradien**: `6 pt` (Buttons & aktive Segmente), `8 pt` (Display-Mulden & Segmented-Tracks), `10 pt` (Surface Bays).
-- **Typografie**: Systemschrift (SF Pro) für Bedienelemente (`12–15 pt`), Monospace für Timecode (`15 pt`), dBFS-Werte und Skalen (`11 pt`). Keine System-Emojis in Bedienknöpfen.
+- Die Unified Titlebar verbindet die nativen macOS-Fenstertasten mit **Aufnahme | Schnitt**. Unter **Schnitt** erscheint daneben **Marker | Tracks | Einzeltrack | Export**. Theme- und Sprachwechsel stehen rechts.
+- Die Aufnahme zeigt Eingangspegel und Aufnahmebefund nebeneinander. Darunter folgen Bandtransport und Live-Wellenform sowie die Einstellbereiche für Quelle, Projekt, Aufnahmedauer und Auto-Stopp.
+- Im Einzeltrack bleibt die Titelleistennavigation sichtbar. Darunter gehören Track-Wähler, Transport, Wellenform und Effekt-Rack dem ausgewählten Song. Das Rack zeigt jeweils das gewählte Modul.
+- Nachbarpanels in einer Zeile teilen sich die Breite gleichmäßig und haben einen festen Abstand von **12 pt**. Die Zeile richtet sich nach dem höchsten Inhalt, sodass ihre Ober- und Unterkanten auch bei Sprachwechsel und langen Beschriftungen bündig bleiben. Banddeck und Live-Wellenform teilen sich ebenfalls das Raster und die Anzeigehöhe.
+- Die Konsole ist ab **1060 × 700 pt** auf ein Layout ohne vertikales Scrollen ausgelegt. Das Startfenster misst **1260 × 820 pt**. Wellenformen und Teile des Racks passen ihre Höhe an. Trackliste und Exportvorschau passen die Zeilenzahl pro Seite an.
+- Die gemeinsamen Höhenklassen sind **28 pt** für Primäraktionen und Navigation, **25 pt** für Standardbedienelemente und **22 pt** für kompakte Aktionen. Die Oberfläche lädt SF Pro und SF Mono, sofern die Schriftdateien verfügbar sind. Zahlenanzeigen wie der Timecode nutzen Monospace.
 
-## Informationsarchitektur: Zwei Hauptbereiche
+## Prüfkriterien
 
-Die obere Unified Toolbar schaltet über ein zentrales macOS Segmented Control zwischen den beiden Hauptbereichen um:
-
-1. **Aufnahme**: REC-Taste mit Verlauf, Status/Timecode und Stereo-Eingangsmeter in einer gemeinsamen Surface Bay; darunter die Live-Wellenform im Display-Well und zwei rahmenlose Surface Bays für *Quelle & Projekt* sowie *Aufnahmedauer & Auto-Stopp*.
-2. **Schnitt**:
-   - **Band-Übersicht**: Schlanke Sub-Navigation als Segmented Control (`Schnitt & Marker` | `Trackliste` | `Export`) plus direkter Einstieg **`Track bearbeiten →`**.
-   - **Fokussierter Track-Bereich (Einzeltrack-Bearbeitung)**: Blendet die Band-Navigation vollständig aus und widmet das Fenster ausschließlich dem gewählten Track — mit Fokus-Kopfzeile (`← Zurück zum Schnitt`, Track-Wähler, `Track exportieren …`), lokalem Transport + Ausgangsmeter (`Bearbeitet | Original`), isolierter Song-Wellenform ab `00:00` und einer Processing-Bay in DSP-Signalfluss-Reihenfolge (`Kanäle` → `Restauration` → `Equalizer` → `Dynamik` → `Mix & Ausgabe`) mit taktilen Drehreglern und Hardware-Fadern.
-
-## Barrierefreiheit & Prüfkriterien
-
-- Kontrast von mindestens 4,5:1 für regulären Text und ≥ 3:1 für Regler, Skalen und Fokusringe.
-- Kein Zustand wird ausschließlich über Farbe vermittelt (REC, CLIP, Bypass, Solo, Original-Vergleich und aktive Segmente besitzen Text und/oder Form).
-- Vollständige Tastaturbedienung und `AccessKit`-Anbindung für Drehregler, Hardware-Fader, Segmented Controls, Bezel-Buttons und das Stereo-Meter.
-- Automatisierte Layout-Prüfung (`cargo test`) in Deutsch und Englisch bei `1060 × 700` und `1260 × 820` ohne Überlauf.
+- Regulärer Text soll mindestens **4,5:1** Kontrast erreichen. Für bedienrelevante grafische Elemente gilt **3:1** als Prüfziel. REC, CLIP, Bypass und aktive Segmente erhalten zusätzlich eine Beschriftung oder Form.
+- Potis melden Name, Wert und Wertebereich über AccessKit und unterstützen Tastaturschritte, Direkteingabe und Wertänderungen über Bedienungshilfen. Die vollständige Tastatur- und VoiceOver-Navigation durch den Workflow bleibt ein manuelles Prüfkriterium.
+- Im unteren Einzeltrack-Rack verwenden die Insert-Buttons und der Hauptmix dieselbe Breite. Die Akzentfläche markiert das ausgewählte Panel, der Punkt den Aktivzustand. Die kompakte Vergleichsanzeige verwendet die Textfarbe für den Eingang, den Hauptakzent für den Ausgang und Türkis für das Differenzsignal.
+- Der Layouttest `console_renders_before_and_after_recording` prüft die Ansichten mit Testdaten in Deutsch und Englisch bei beiden Fenstergrößen auf Überlauf. Er deckt beide Themes, lange Tracktitel und alle sechs Inserts sowie den Hauptmix ab. Visuelle Prüfungen ergänzen ihn für Fokus, Kontrast und Zustandswechsel.

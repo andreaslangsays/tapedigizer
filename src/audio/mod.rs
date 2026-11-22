@@ -4,3 +4,7 @@ pub mod meter;
 pub mod player;
 pub mod processing;
 pub mod recorder;
+pub mod spectrum;
+pub(crate) mod recording_edit;
+pub(crate) mod stage_meter;
+pub(crate) mod waveform;
